@@ -3843,7 +3843,7 @@ function copyFaq() {
     showToast('✅ FAQ已复制');
 }
 
-const COLOR_PROMPT = '原图原样，只改衣服颜色，背景版型纹理光影不变，高清服装实拍 四张图片，一张白色，一张黑色，一张灰色，一张军蓝色 ，图片比例1：1，锐化不要太严重';
+const COLOR_PROMPT = '原图原样，只改衣服颜色，背景版型纹理光影不变，高清服装实拍 四张图片，一张白色，一张黑色，一张灰色，一张深藏青色 ，图片比例1：1，锐化不要太严重';
 const COLOR_NAMES = ['white', 'black', 'gray', 'navy'];
 const BATCH_COLOR_COMPLETE_TIMEOUT = 6 * 60 * 1000;
 
@@ -4182,7 +4182,7 @@ function updateBatchColorFill(percent) {
 
 function startColorChange(rowNum) {
     const imagePath = getMainImagePath(rowNum);
-    const prompt = '原图原样，只改衣服颜色，背景版型纹理光影不变，高清服装实拍 四张图片，一张白色，一张黑色，一张灰色，一张军蓝色 ，图片比例1：1，锐化不要太严重';
+    const prompt = '原图原样，只改衣服颜色，背景版型纹理光影不变，高清服装实拍 四张图片，一张白色，一张黑色，一张灰色，一张深藏青色 ，图片比例1：1，锐化不要太严重';
     const btn = document.getElementById('colorChangeBtn');
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 处理中...'; }
     try {
