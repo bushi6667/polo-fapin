@@ -1728,7 +1728,7 @@ body::after {
                         </div>
                         <div class="batch-skip-uploaded" onclick="toggleSkipUploaded()">
                             <div class="mini-check" id="skipUploadedCheck"></div>
-                            <span>跳过已上传</span>
+                            <span>跳过已保存</span>
                         </div>
                         <span class="batch-count">已选 <strong id="selectedCount">0</strong> 个</span>
                     </div>
@@ -1737,7 +1737,11 @@ body::after {
                 <div class="batch-color-progress" id="batchPublishProgress" style="display: none;">
                     <div class="progress-header">
                         <span id="batchPublishStatus">准备中...</span>
-                        <span style="font-size:11px;opacity:0.55;">上品队列</span>
+                        <span style="display:flex;align-items:center;gap:6px;">
+                            <span style="font-size:11px;opacity:0.55;">每批</span>
+                            <input id="pubBatchSize" type="number" min="1" max="60" step="1" value="50" title="每批预填款数（1-60）" style="width:48px;padding:2px 4px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#fff;font-size:11px;text-align:center;">
+                            <button class="stop-btn" id="pubToggleBtn" onclick="togglePublishRun()">⏹ 停止</button>
+                        </span>
                     </div>
                     <div class="progress-bar">
                         <div class="progress-fill" id="batchPublishFill" style="width: 0%;"></div>
@@ -1746,6 +1750,15 @@ body::after {
                         <span id="batchPublishCounter">0/0</span>
                         <span id="batchPublishCurrent">-</span>
                     </div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+                        <span id="batchPublishBatch" style="font-size:11px;opacity:0.7;">本批已开 0/50 · 本批已填 0</span>
+                        <span id="batchPublishPending" style="font-size:11px;opacity:0.7;">待保存 0</span>
+                        <span id="batchPublishPages" style="font-size:11px;opacity:0.7;">页面 0/60</span>
+                        <button class="stop-btn" id="pubRetryBtn" onclick="retryPublishRow()" style="display:none;">↻ 重试当前行</button>
+                        <button class="stop-btn" id="pubSkipBtn" onclick="skipPublishRow()" style="display:none;">⏭ 跳过当前行</button>
+                        <button class="stop-btn" onclick="exportDiagLog()" title="导出最近 500 条结构化诊断日志">⬇ 导出日志</button>
+                    </div>
+                    <div id="batchPublishPause" style="display:none;margin-top:6px;font-size:11px;color:#ffb020;line-height:1.5;"></div>
                 </div>
                 <div class="product-cards" id="productCards"></div>
             </div>
@@ -2645,7 +2658,8 @@ function loadFromLocalStorage() {
 
 let selectedRows = new Set();
 let skipUploaded = false;
-let uploadedRows = {};
+let uploadedRows = {};   // 已核实保存（跳过依据）
+let legacyRows = {};     // 旧 uploaded 标记：历史待核，仅展示
 
 function getSelectedProducts() {
     return products.filter(p => selectedRows.has(p.row));
@@ -2700,7 +2714,7 @@ function toggleSkipUploaded() {
                     if (checkbox) checkbox.classList.remove('checked');
                 }
             }
-            showToast('ℹ️ 已跳过已上传的产品');
+            showToast('ℹ️ 已跳过已保存的产品');
         } else {
             skipUploadedCheck.classList.remove('checked');
         }
@@ -2713,7 +2727,7 @@ function toggleSelectRow(rowNum, event) {
         event.stopPropagation();
     }
     if (skipUploaded && uploadedRows[rowNum]) {
-        showToast('ℹ️ 已开启跳过已上传，无法勾选');
+        showToast('ℹ️ 已开启跳过已保存，无法勾选');
         return;
     }
     if (selectedRows.has(rowNum)) {
@@ -2816,9 +2830,10 @@ function batchPublish() {
                     action: 'openBatchPublish',
                     rows: rows
                 }, (resp) => {
-                    // 内存不足时扩展会另发 publishMemoryPaused 提示，这里不重复弹（否则会盖掉暂停提示）
-                    if (resp && resp.paused) return;
-                    showToast(`🚀 正在打开 ${rows.length} 个发品页面...`);
+                    if (chrome.runtime.lastError || !resp) { showToast('❌ 无法启动发品任务'); return; }
+                    if (!resp.ok) { showToast('❌ ' + (resp.error || '无法启动发品任务')); refreshPublishState(); return; }
+                    showToast(`🚀 发品任务已启动：共 ${rows.length} 款，每批 ${resp.batchSize || 50} 款`);
+                    refreshPublishState();
                 });
             } else {
                 showToast('❌ 保存产品数据失败');
@@ -2837,11 +2852,14 @@ function renderProductList() {
     productList.style.display = 'flex';
     productCount.textContent = products.length + '款';
 
-    function doRender(uploaded) {
+    function doRender(uploaded, legacy) {
         uploaded = uploaded || {};
-        uploadedRows = uploaded;
+        legacy = legacy || {};
+        uploadedRows = uploaded;   // 仅「已核实保存」记录（跳过依据）
+        legacyRows = legacy;       // 旧 uploaded 标记：历史待核，仅展示
         productCards.innerHTML = products.map((p, idx) => {
             const isUploaded = uploaded[p.row];
+            const isLegacy = legacy[p.row] && !isUploaded;
             const isChecked = selectedRows.has(p.row);
             const delay = Math.min(idx * 0.04, 0.4);
             return `
@@ -2858,7 +2876,7 @@ function renderProductList() {
                         ${currentColMap.material !== undefined ? `<div class="product-material">${p.material_cn || p.material_en}</div>` : ''}
                         <div class="product-tags">
                             <span class="tag">${p.category.split("'s ")[1] || p.category}</span>
-                            ${isUploaded ? '<span class="uploaded-badge">已上传</span>' : ''}
+                            ${isUploaded ? '<span class="uploaded-badge">已保存</span>' : (isLegacy ? '<span class="uploaded-badge" style="opacity:0.55;" title="旧标记，未核实保存，不作为跳过依据">历史待核</span>' : '')}
                         </div>
                     </div>
                 </div>`;
@@ -2877,7 +2895,7 @@ function renderProductList() {
         try {
             chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getUploadedRows' }, (response) => {
                 if (chrome.runtime.lastError) doRender();
-                else doRender(response?.rows);
+                else doRender(response?.rows, response?.legacy);
             });
         } catch (e) { doRender(); }
     } else { doRender(); }
@@ -3318,14 +3336,17 @@ function checkExtension() {
                         if (msg.action === 'colorTaskComplete') {
                             handleColorTaskComplete(msg);
                         }
-                        if (msg.action === 'publishMemoryPaused') {
-                            handlePublishMemoryPaused(msg);
+                        if (msg.action === 'publishState') {
+                            handlePublishState(msg);
                         }
-                        if (msg.action === 'publishMemoryResumed') {
-                            handlePublishMemoryResumed(msg);
+                        if (msg.action === 'publishResumed') {
+                            handlePublishResumed(msg);
                         }
-                        if (msg.action === 'publishProgress') {
-                            handlePublishProgress(msg);
+                        if (msg.action === 'publishResumeRejected') {
+                            handlePublishResumeRejected(msg);
+                        }
+                        if (msg.action === 'publishAllFilled') {
+                            handlePublishAllFilled(msg);
                         }
                     });
                     extensionPort.onDisconnect.addListener(() => {
@@ -3380,18 +3401,23 @@ function setupPsEditMessageListener() {
                     sendResponse({ ok: true });
                     return true;
                 }
-                if (request.action === 'publishMemoryPaused') {
-                    handlePublishMemoryPaused(request);
+                if (request.action === 'publishState') {
+                    handlePublishState(request);
                     sendResponse({ ok: true });
                     return true;
                 }
-                if (request.action === 'publishMemoryResumed') {
-                    handlePublishMemoryResumed(request);
+                if (request.action === 'publishResumed') {
+                    handlePublishResumed(request);
                     sendResponse({ ok: true });
                     return true;
                 }
-                if (request.action === 'publishProgress') {
-                    handlePublishProgress(request);
+                if (request.action === 'publishResumeRejected') {
+                    handlePublishResumeRejected(request);
+                    sendResponse({ ok: true });
+                    return true;
+                }
+                if (request.action === 'publishAllFilled') {
+                    handlePublishAllFilled(request);
                     sendResponse({ ok: true });
                     return true;
                 }
@@ -3425,57 +3451,186 @@ function showPublishProgress(show) {
     if (el) el.style.display = show ? 'block' : 'none';
 }
 
-function handlePublishProgress(req) {
-    const state = (req && req.state) ? req.state : 'running';
-    const done = (req && req.done) || 0;
-    const total = (req && req.total) || 0;
-    const remain = (req && req.remaining) || 0;
-    const current = req && req.current;
+// ===== 发品任务面板：状态驱动（批次 / 计数 / 待保存 / 暂停原因 / 停止继续 / 重试跳过）=====
+let lastPublishState = null;
 
-    if (state === 'done') {
-        showPublishProgress(true);
-        const st = publishStatusEl();
-        if (st) st.textContent = `✅ 全部完成（共 ${total} 款）`;
-        const fill = publishFillEl();
-        if (fill) fill.style.width = '100%';
-        const c = publishCounterEl();
-        if (c) c.textContent = `${total}/${total}`;
-        const cur = publishCurrentEl();
-        if (cur) cur.textContent = '已完成';
-        showToast(`✅ 批量发品完成，共 ${total} 款`);
-        setTimeout(() => showPublishProgress(false), 8000);
-        return;
+const publishBatchEl = () => document.getElementById('batchPublishBatch');
+const publishPendingEl = () => document.getElementById('batchPublishPending');
+const publishPagesEl = () => document.getElementById('batchPublishPages');
+const publishPauseEl = () => document.getElementById('batchPublishPause');
+const publishToggleEl = () => document.getElementById('pubToggleBtn');
+const publishRetryEl = () => document.getElementById('pubRetryBtn');
+const publishSkipEl = () => document.getElementById('pubSkipBtn');
+const publishBatchInput = () => document.getElementById('pubBatchSize');
+
+const PUBLISH_REASON_TEXT = {
+    batch: '本批已达上限',
+    pageLimit: '发品页面数达上限',
+    memory: '内存 / 提交额度不足',
+    monitorFail: '内存监测不可用',
+    manual: '你手动停止了',
+    tabClosed: '当前行标签被关闭',
+    rowTimeout: '当前行填写超时',
+    fileSwitch: '当前 Excel 文件已切换',
+    openFail: '打开页面失败'
+};
+
+function showPublishProgress(show) {
+    const el = publishProgressEl();
+    if (el) el.style.display = show ? 'block' : 'none';
+}
+
+// 渲染发品任务状态（由扩展 publishState / getPublishState 驱动）
+function renderPublishState(s) {
+    if (!s) return;
+    lastPublishState = s;
+    const total = s.total || 0;
+    const filled = s.filledCount || 0;
+    const remain = s.remaining || 0;
+    const running = s.state === 'running';
+    const paused = s.state === 'paused';
+    const done = s.state === 'done';
+
+    if (s.state === 'idle') { showPublishProgress(false); return; }
+    showPublishProgress(true);
+
+    const st = publishStatusEl();
+    if (st) {
+        if (done) st.textContent = `✅ 全部预填完成（${filled}/${total} 款，待保存）`;
+        else if (paused) st.textContent = `⏸ 已暂停 · ${PUBLISH_REASON_TEXT[s.pauseReason] || s.pauseReason || ''}`;
+        else st.textContent = `🚀 正在预填 ${filled}/${total}`;
+    }
+    const fill = publishFillEl();
+    if (fill) fill.style.width = (total > 0 ? Math.round((filled / total) * 100) : 0) + '%';
+    const c = publishCounterEl();
+    if (c) c.textContent = `${filled}/${total}`;
+    const cur = publishCurrentEl();
+    if (cur) cur.textContent = s.currentRow ? `正在填 row${s.currentRow}` : (done ? '已完成' : `剩 ${remain} 款`);
+
+    const b = publishBatchEl();
+    if (b) b.textContent = `本批已开 ${s.batchOpened || 0}/${s.batchSize || 0} · 本批已填 ${s.batchFilled || 0}`;
+    const p = publishPendingEl();
+    if (p) p.textContent = `待保存 ${s.pendingSaveCount || 0}`;
+    const pg = publishPagesEl();
+    if (pg) pg.textContent = `页面 ${s.pages || 0}/${s.pageLimit || 0}`;
+
+    const pauseEl = publishPauseEl();
+    if (pauseEl) {
+        if (paused && s.pauseDetail) { pauseEl.style.display = 'block'; pauseEl.textContent = '⏸ ' + s.pauseDetail; }
+        else { pauseEl.style.display = 'none'; }
     }
 
-    console.log(`📋 上品进度 ${done}/${total}，正在处理 row${current}，剩 ${remain}`);
-    showPublishProgress(true);
-    const fill = publishFillEl();
-    if (fill) fill.style.width = (total > 0 ? Math.round((done / total) * 100) : 0) + '%';
-    const c = publishCounterEl();
-    if (c) c.textContent = `${done}/${total}`;
-    const cur = publishCurrentEl();
-    if (cur) cur.textContent = current ? `正在发 row${current}` : '-';
-    const st = publishStatusEl();
-    if (st) st.textContent = `🚀 批量发品中 ${done}/${total}`;
+    const btn = publishToggleEl();
+    if (btn) {
+        if (running) { btn.textContent = '⏹ 停止'; btn.disabled = false; }
+        else if (done) { btn.textContent = '已完成'; btn.disabled = true; }
+        else { btn.textContent = '▶ 继续下一批'; btn.disabled = false; }
+    }
+    // 仅"当前行卡住"时提供重试 / 明确跳过
+    const stuck = paused && s.currentRow !== null &&
+        ['tabClosed', 'rowTimeout', 'openFail'].indexOf(s.pauseReason) >= 0;
+    const rb = publishRetryEl(); if (rb) rb.style.display = stuck ? 'inline-block' : 'none';
+    const sb = publishSkipEl(); if (sb) sb.style.display = stuck ? 'inline-block' : 'none';
+
+    const inp = publishBatchInput();
+    if (inp && document.activeElement !== inp) inp.value = String(s.batchSize || 50);
 }
 
-function handlePublishMemoryPaused(req) {
-    const avail = (req && req.availableMB !== undefined) ? req.availableMB : '?';
-    const th = (req && req.threshold !== undefined) ? req.threshold : getMemPauseMB();
-    const remain = (req && req.remaining !== undefined) ? req.remaining : '?';
-    console.warn(`⏸ 上品队列已暂停：可用内存 ${avail}MB < ${th}MB，剩 ${remain} 款`);
-    showPublishProgress(true);
-    const st = publishStatusEl();
-    if (st) st.textContent = `⏸ 内存不足已暂停（可用 ${avail}MB < ${th}MB），剩 ${remain} 款，恢复后自动继续`;
-    showToast(`⏸ 上品已暂停（内存不足：可用 ${avail}MB < ${th}MB），剩 ${remain} 款。内存恢复后自动继续`);
+function handlePublishState(s) { renderPublishState(s); }
+// 兼容旧事件名（扩展已不再发送 publishProgress）
+function handlePublishProgress(req) { renderPublishState(req); }
+
+function refreshPublishState() {
+    try {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getPublishState' }, (resp) => {
+            if (chrome.runtime.lastError || !resp || !resp.ok) return;
+            renderPublishState(resp);
+        });
+    } catch (_) {}
 }
 
-function handlePublishMemoryResumed(req) {
-    const remain = (req && req.remaining !== undefined) ? req.remaining : '?';
-    console.log(`▶ 内存已恢复，上品队列继续，剩 ${remain} 款`);
-    const st = publishStatusEl();
-    if (st) st.textContent = `▶ 内存已恢复，继续发（剩 ${remain} 款）`;
-    showToast(`▶ 内存已恢复，上品继续发（剩 ${remain} 款）`);
+function togglePublishRun() {
+    const running = lastPublishState && lastPublishState.state === 'running';
+    const action = running ? 'pausePublishQueue' : 'resumePublishQueue';
+    try {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action }, (r) => {
+            if (chrome.runtime.lastError || !r || !r.ok) {
+                showToast('❌ ' + ((r && (r.message || r.error)) || (running ? '停止失败' : '继续失败')));
+            }
+            refreshPublishState();
+        });
+    } catch (e) { showToast('❌ ' + e.message); }
+}
+
+function retryPublishRow() {
+    try {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'retryPublishRow' }, (r) => {
+            showToast(r && r.ok ? `↻ 已重开 row${r.row}` : '❌ ' + ((r && (r.message || r.error)) || '重试失败'));
+            refreshPublishState();
+        });
+    } catch (e) { showToast('❌ ' + e.message); }
+}
+
+function skipPublishRow() {
+    try {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'skipPublishRow' }, (r) => {
+            showToast(r && r.ok ? `⏭ 已跳过 row${r.row}` : '❌ ' + ((r && (r.message || r.error)) || '跳过失败'));
+            refreshPublishState();
+        });
+    } catch (e) { showToast('❌ ' + e.message); }
+}
+
+function exportDiagLog() {
+    try {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getDiagLog' }, (r) => {
+            if (chrome.runtime.lastError || !r || !r.ok) { showToast('❌ 日志读取失败'); return; }
+            const blob = new Blob([JSON.stringify(r.log || [], null, 2)], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'polo发品诊断日志_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+            showToast(`⬇ 已导出 ${(r.log || []).length} 条日志`);
+        });
+    } catch (e) { showToast('❌ ' + e.message); }
+}
+
+// 批次大小输入：改完写入扩展设置（1-60，由后台收敛）
+function initPublishBatchInput() {
+    const inp = publishBatchInput();
+    if (!inp || inp.dataset.bound === '1') return;
+    inp.dataset.bound = '1';
+    inp.addEventListener('change', () => {
+        const v = parseInt(inp.value, 10);
+        try {
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'setPublishSettings', patch: { batchSize: v } }, (r) => {
+                if (chrome.runtime.lastError || !r || !r.ok) { showToast('❌ 批次大小设置失败'); return; }
+                const s = r.settings || {};
+                inp.value = String(s.batchSize || 50);
+                showToast(`✅ 每批预填 ${s.batchSize} 款`);
+            });
+        } catch (e) { showToast('❌ ' + e.message); }
+    });
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => { initPublishBatchInput(); refreshPublishState(); });
+} else {
+    initPublishBatchInput();
+    refreshPublishState();
+}
+
+// 扩展在页面打开时会推 publishState；未推送时靠上面的 refreshPublishState 兜底
+function handlePublishResumed(req) {
+    showToast(`▶ 已继续，剩 ${(req && req.remaining) || '?'} 款`);
+    refreshPublishState();
+}
+function handlePublishResumeRejected(req) {
+    showToast('❌ ' + ((req && req.message) || '无法继续'));
+    refreshPublishState();
+}
+function handlePublishAllFilled(req) {
+    showToast(`✅ 全部预填完成（${(req && req.filled) || 0}/${(req && req.total) || 0} 款，待你核对保存）`);
+    refreshPublishState();
 }
 
 function handlePsEditComplete(request) {
@@ -5354,7 +5509,7 @@ function startUploadPolling() {
                             if (product && response.rows[product.row] && !card.querySelector('.uploaded-badge')) {
                                 const badge = document.createElement('span');
                                 badge.className = 'uploaded-badge';
-                                badge.textContent = '已上传';
+                                badge.textContent = '已保存';
                                 const tags = card.querySelector('.product-tags');
                                 if (tags) tags.appendChild(badge);
                             }
