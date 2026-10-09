@@ -490,7 +490,10 @@ function getColorImagePathData(rowNum, color, callback) {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
-    console.log('✅ Polo发品助手扩展已安装');
+    console.log('✅ Polo发品助手扩展已安装 / 更新 / 重载');
+    // 打时间戳：供「发品助手」页检测扩展重载并自动刷新
+    // （SW 被回收不会触发本事件，所以不会误刷新页面、不会丢批量进度）
+    chrome.storage.local.set({ polo_ext_reload_ts: Date.now() });
     ensureConfigLoaded().then(() => {
         console.log('📂 启动配置已加载:', { IMAGE_DIR, COLOR_IMG_DIR, CURRENT_FILENAME });
     });
@@ -851,6 +854,13 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
                     availableCapacity: info.availableCapacity,
                     availableMB: Math.round(info.availableCapacity / 1048576)
                 });
+            });
+            return true;
+        }
+        // 扩展重载时间戳：页面据此自动刷新（SW 休眠不会改变它，故不会误刷）
+        if (request.action === 'getExtBootInfo') {
+            chrome.storage.local.get('polo_ext_reload_ts', (r) => {
+                sendResponse({ ok: true, reloadTs: r['polo_ext_reload_ts'] || 0 });
             });
             return true;
         }

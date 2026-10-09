@@ -3236,6 +3236,37 @@ let extensionPort = null;
 let extensionReconnectTimer = null;
 
 
+// 扩展被重载 → 页面自动刷新（省掉手动 Ctrl+Shift+R）
+// 判据是扩展 onInstalled 打的时间戳：SW 休眠/唤醒不会改它，所以不会误刷新丢进度
+const EXT_RELOAD_TS_KEY = 'polo_ext_reload_ts_seen';
+let extReloadCheckBusy = false;
+
+function checkExtensionReloaded() {
+    if (extReloadCheckBusy || !EXTENSION_ID) return;
+    extReloadCheckBusy = true;
+    try {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getExtBootInfo' }, (resp) => {
+            extReloadCheckBusy = false;
+            if (chrome.runtime.lastError || !resp || !resp.ok) return;
+            const ts = resp.reloadTs || 0;
+            if (!ts) return; // 扩展还没跑过 onInstalled（老版本）→ 不动
+            const seen = parseInt(localStorage.getItem(EXT_RELOAD_TS_KEY), 10) || 0;
+            if (seen === 0) {
+                localStorage.setItem(EXT_RELOAD_TS_KEY, String(ts)); // 首次只记，不刷
+                return;
+            }
+            if (ts !== seen) {
+                localStorage.setItem(EXT_RELOAD_TS_KEY, String(ts));
+                console.log(`🔁 检测到扩展已重载（${seen} → ${ts}），页面自动刷新`);
+                showToast('🔁 扩展已重载，页面自动刷新中...');
+                setTimeout(() => location.reload(), 800);
+            }
+        });
+    } catch (e) {
+        extReloadCheckBusy = false;
+    }
+}
+
 function setupExtensionReconnect() {
     if (extensionReconnectTimer) clearInterval(extensionReconnectTimer);
     extensionReconnectTimer = setInterval(() => {
@@ -3266,6 +3297,7 @@ function checkExtension() {
             extensionInstalled = true;
             updateExtensionStatus();
             syncMemPauseMBToExtension();
+            checkExtensionReloaded();
             try {
                 if (!extensionPort) {
                     extensionPort = chrome.runtime.connect(EXTENSION_ID, { name: 'assistant-channel' });
@@ -3281,8 +3313,9 @@ function checkExtension() {
                         }
                     });
                     extensionPort.onDisconnect.addListener(() => {
-                        console.log('🔌 扩展长连接已断开，将在15秒后尝试重连');
+                        console.log('🔌 扩展长连接已断开（扩展重载或 SW 休眠），立即复查');
                         extensionPort = null;
+                        setTimeout(() => checkExtension(), 300);
                     });
                     console.log('🔌 已建立扩展长连接');
                 }
