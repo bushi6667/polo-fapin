@@ -3049,6 +3049,9 @@ function renderDetail() {
                             <button class="batch-color-btn" onclick="startColorChangeForRows()" id="colorRowsBtn" style="justify-content: center;">
                                 🔁 指定重生成
                             </button>
+                            <button class="batch-color-btn" onclick="resumeColorBatch()" id="colorResumeBtn" style="justify-content: center;">
+                                ▶ 继续
+                            </button>
                             <button class="color-change-btn" onclick="startColorChange(${p.row})" id="colorChangeBtn" style="justify-content: center;">
                                 🎨 AI换色
                             </button>
@@ -3209,6 +3212,7 @@ function renderDetail() {
     }
 
     if (extensionInstalled && currentProduct) loadColorImagesFromExtension(currentProduct.row);
+    syncColorResumeButton();
 }
 
 function copyData() {
@@ -3903,12 +3907,99 @@ function beginColorBatch(queueList, label) {
         lastAdvancedRow: null,
         lastProcessedTimestamp: 0,
         pollTimer: null,
-        label: label || '批量换色'
+        label: label || '批量换色',
+        failedRows: []
     };
+
+    // 新任务启动即清空「继续」待办（旧待办已被本次任务取代）
+    setColorResumeRows([]);
 
     showBatchColorProgress();
     startBatchColorPolling();
     processNextBatchColor();
+}
+
+// 生成「行N · 序号X · 标题」预览行（确认框用）
+function buildRowPreviewLines(queue, max = 15) {
+    const lines = queue.slice(0, max).map(p => {
+        const title = String(p.title_cn || p.title_en || '未命名').slice(0, 16);
+        const idxText = (p.index === '' || p.index === null || p.index === undefined) ? '-' : p.index;
+        return `  行${p.row} · 序号${idxText} · ${title}`;
+    });
+    if (queue.length > max) lines.push(`  … 等共 ${queue.length} 款`);
+    return lines;
+}
+
+// ===== 「继续」：记住被停止 / 失败打断的剩余行，供续跑 =====
+const COLOR_RESUME_KEY = 'polo_color_resume_rows';
+
+function getColorResumeRows() {
+    const raw = localStorage.getItem(COLOR_RESUME_KEY) || '';
+    return raw.split(/\s+/).filter(Boolean).map(Number).filter(n => Number.isInteger(n) && n > 0);
+}
+
+function setColorResumeRows(rows) {
+    const list = Array.isArray(rows) ? rows.filter(r => Number.isInteger(r) && r > 0) : [];
+    const uniq = [...new Set(list)]; // 按传入顺序去重
+    if (uniq.length === 0) {
+        localStorage.removeItem(COLOR_RESUME_KEY);
+    } else {
+        localStorage.setItem(COLOR_RESUME_KEY, uniq.join(' '));
+    }
+    syncColorResumeButton();
+}
+
+// 按钮状态同步：detail 面板会整体重渲染，渲染后必须再调一次
+function syncColorResumeButton() {
+    const btn = document.getElementById('colorResumeBtn');
+    if (!btn) return;
+    const n = getColorResumeRows().length;
+    btn.disabled = n === 0;
+    btn.textContent = n > 0 ? `▶ 继续（剩 ${n}）` : '▶ 继续';
+}
+
+// 从上次停止 / 失败处继续
+function resumeColorBatch() {
+    if (batchColorState && batchColorState.running) {
+        showToast('⚠️ 换色任务正在进行中');
+        return;
+    }
+    if (!extensionInstalled) {
+        showToast('⚠️ 请确认扩展已安装');
+        return;
+    }
+    if (!products || products.length === 0) {
+        showToast('⚠️ 请先上传 Excel');
+        return;
+    }
+
+    const rows = getColorResumeRows();
+    if (rows.length === 0) {
+        showToast('ℹ️ 没有可继续的任务');
+        return;
+    }
+
+    const byRow = new Map(products.map(p => [p.row, p]));
+    const queue = [];
+    const missing = [];
+    for (const r of rows) {
+        const p = byRow.get(r);
+        if (p) queue.push(p); else missing.push(r);
+    }
+    if (queue.length === 0) {
+        showToast(`⚠️ 剩余行号都不在当前 Excel：${missing.slice(0, 8).join(' ')}`);
+        return;
+    }
+
+    const missMsg = missing.length
+        ? `\n\n⚠️ 不在当前 Excel 中，将跳过 ${missing.length} 个：\n${missing.slice(0, 30).join(' ')}${missing.length > 30 ? ' ...' : ''}`
+        : '';
+    const ok = confirm(
+        `接着上次未完成的部分继续，共 ${queue.length} 款：\n\n${buildRowPreviewLines(queue).join('\n')}${missMsg}\n\n确定开始？`
+    );
+    if (!ok) return;
+
+    beginColorBatch(queue, '继续');
 }
 
 // 解析行号输入：空格 / 英文逗号 / 中文逗号 / 分号 / 顿号 / 换行分隔，支持 a-b 区间
@@ -3975,15 +4066,7 @@ function startColorChangeForRows() {
     }
 
     // 确认框逐条显示身份（行号 · 序号 · 标题），防止误填「序号」命中错款
-    const PREVIEW_MAX = 15;
-    const previewLines = queue.slice(0, PREVIEW_MAX).map(p => {
-        const title = String(p.title_cn || p.title_en || '未命名').slice(0, 16);
-        const idxText = (p.index === '' || p.index === null || p.index === undefined) ? '-' : p.index;
-        return `  行${p.row} · 序号${idxText} · ${title}`;
-    });
-    if (queue.length > PREVIEW_MAX) {
-        previewLines.push(`  … 等共 ${queue.length} 款`);
-    }
+    const previewLines = buildRowPreviewLines(queue);
     const missMsg = missing.length
         ? `\n\n⚠️ 不在当前 Excel 中，将跳过 ${missing.length} 个：\n${missing.slice(0, 30).join(' ')}${missing.length > 30 ? ' ...' : ''}`
         : '';
@@ -4051,6 +4134,7 @@ function processNextBatchColor() {
         if (chrome.runtime.lastError || !response || !response.ok) {
             console.warn(`row${product.row} 启动失败:`, chrome.runtime.lastError?.message || response?.error);
             batchColorState.failCount++;
+            batchColorState.failedRows.push(product.row);
             batchColorState.currentIndex++;
             setTimeout(processNextBatchColor, 500);
             return;
@@ -4070,6 +4154,7 @@ function setupBatchColorTimeout(product) {
         if (currentProduct && currentProduct.row === product.row) {
             console.warn(`row${product.row} 换色超时，跳过`);
             batchColorState.failCount++;
+            batchColorState.failedRows.push(product.row);
             batchColorState.currentIndex++;
             setTimeout(processNextBatchColor, 1000);
         }
@@ -4121,6 +4206,13 @@ function finishBatchColor(completed) {
     const seconds = elapsed % 60;
     const timeStr = minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
 
+    // 记下「失败 + 未处理」的行，供「继续」按钮续跑（主动停止 / 中途失败都能接上）
+    const leftOver = [
+        ...((batchColorState.failedRows || [])),
+        ...batchColorState.queue.slice(batchColorState.currentIndex).map(p => p.row)
+    ];
+    setColorResumeRows(leftOver);
+
     if (completed) {
         updateBatchColorStatus(`✅ ${batchLabel}完成 ${success} 款${fail > 0 ? `，失败 ${fail} 款` : ''}（用时 ${timeStr}）`);
         updateBatchColorFill(100);
@@ -4143,6 +4235,7 @@ function finishBatchColor(completed) {
         if (btn) { btn.disabled = false; btn.innerHTML = '🚀 一键换色'; }
         const rowsBtn = document.getElementById('colorRowsBtn');
         if (rowsBtn) rowsBtn.disabled = false;
+        syncColorResumeButton();
     }, 5000);
 }
 
@@ -4153,6 +4246,8 @@ function showBatchColorProgress() {
     if (btn) { btn.disabled = true; btn.innerHTML = '⏳ 批量运行中...'; }
     const rowsBtn = document.getElementById('colorRowsBtn');
     if (rowsBtn) rowsBtn.disabled = true;
+    const resumeBtn = document.getElementById('colorResumeBtn');
+    if (resumeBtn) resumeBtn.disabled = true;
 }
 
 function updateBatchColorProgress() {
