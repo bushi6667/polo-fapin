@@ -1734,6 +1734,19 @@ body::after {
                     </div>
                     <button class="batch-publish-btn" id="batchPublishBtn" disabled onclick="batchPublish()">批量发品</button>
                 </div>
+                <div class="batch-color-progress" id="batchPublishProgress" style="display: none;">
+                    <div class="progress-header">
+                        <span id="batchPublishStatus">准备中...</span>
+                        <span style="font-size:11px;opacity:0.55;">上品队列</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="batchPublishFill" style="width: 0%;"></div>
+                    </div>
+                    <div class="progress-text">
+                        <span id="batchPublishCounter">0/0</span>
+                        <span id="batchPublishCurrent">-</span>
+                    </div>
+                </div>
                 <div class="product-cards" id="productCards"></div>
             </div>
         </div>
@@ -3311,6 +3324,9 @@ function checkExtension() {
                         if (msg.action === 'publishMemoryResumed') {
                             handlePublishMemoryResumed(msg);
                         }
+                        if (msg.action === 'publishProgress') {
+                            handlePublishProgress(msg);
+                        }
                     });
                     extensionPort.onDisconnect.addListener(() => {
                         console.log('🔌 扩展长连接已断开（扩展重载或 SW 休眠），立即复查');
@@ -3374,6 +3390,11 @@ function setupPsEditMessageListener() {
                     sendResponse({ ok: true });
                     return true;
                 }
+                if (request.action === 'publishProgress') {
+                    handlePublishProgress(request);
+                    sendResponse({ ok: true });
+                    return true;
+                }
             });
         }
         if (chrome.runtime && chrome.runtime.onMessage) {
@@ -3392,18 +3413,68 @@ function setupPsEditMessageListener() {
     }
 }
 
-// ===== 上品队列内存暂停 / 恢复（闸门在扩展侧，这里只做可见反馈）=====
+// ===== 上品队列：进度面板 + 内存暂停/恢复（队列驱动在扩展侧）=====
+const publishProgressEl = () => document.getElementById('batchPublishProgress');
+const publishStatusEl = () => document.getElementById('batchPublishStatus');
+const publishFillEl = () => document.getElementById('batchPublishFill');
+const publishCounterEl = () => document.getElementById('batchPublishCounter');
+const publishCurrentEl = () => document.getElementById('batchPublishCurrent');
+
+function showPublishProgress(show) {
+    const el = publishProgressEl();
+    if (el) el.style.display = show ? 'block' : 'none';
+}
+
+function handlePublishProgress(req) {
+    const state = (req && req.state) ? req.state : 'running';
+    const done = (req && req.done) || 0;
+    const total = (req && req.total) || 0;
+    const remain = (req && req.remaining) || 0;
+    const current = req && req.current;
+
+    if (state === 'done') {
+        showPublishProgress(true);
+        const st = publishStatusEl();
+        if (st) st.textContent = `✅ 全部完成（共 ${total} 款）`;
+        const fill = publishFillEl();
+        if (fill) fill.style.width = '100%';
+        const c = publishCounterEl();
+        if (c) c.textContent = `${total}/${total}`;
+        const cur = publishCurrentEl();
+        if (cur) cur.textContent = '已完成';
+        showToast(`✅ 批量发品完成，共 ${total} 款`);
+        setTimeout(() => showPublishProgress(false), 8000);
+        return;
+    }
+
+    console.log(`📋 上品进度 ${done}/${total}，正在处理 row${current}，剩 ${remain}`);
+    showPublishProgress(true);
+    const fill = publishFillEl();
+    if (fill) fill.style.width = (total > 0 ? Math.round((done / total) * 100) : 0) + '%';
+    const c = publishCounterEl();
+    if (c) c.textContent = `${done}/${total}`;
+    const cur = publishCurrentEl();
+    if (cur) cur.textContent = current ? `正在发 row${current}` : '-';
+    const st = publishStatusEl();
+    if (st) st.textContent = `🚀 批量发品中 ${done}/${total}`;
+}
+
 function handlePublishMemoryPaused(req) {
     const avail = (req && req.availableMB !== undefined) ? req.availableMB : '?';
     const th = (req && req.threshold !== undefined) ? req.threshold : getMemPauseMB();
     const remain = (req && req.remaining !== undefined) ? req.remaining : '?';
     console.warn(`⏸ 上品队列已暂停：可用内存 ${avail}MB < ${th}MB，剩 ${remain} 款`);
+    showPublishProgress(true);
+    const st = publishStatusEl();
+    if (st) st.textContent = `⏸ 内存不足已暂停（可用 ${avail}MB < ${th}MB），剩 ${remain} 款，恢复后自动继续`;
     showToast(`⏸ 上品已暂停（内存不足：可用 ${avail}MB < ${th}MB），剩 ${remain} 款。内存恢复后自动继续`);
 }
 
 function handlePublishMemoryResumed(req) {
     const remain = (req && req.remaining !== undefined) ? req.remaining : '?';
     console.log(`▶ 内存已恢复，上品队列继续，剩 ${remain} 款`);
+    const st = publishStatusEl();
+    if (st) st.textContent = `▶ 内存已恢复，继续发（剩 ${remain} 款）`;
     showToast(`▶ 内存已恢复，上品继续发（剩 ${remain} 款）`);
 }
 

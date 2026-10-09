@@ -29,6 +29,7 @@ let assistantPort = null;
 
 let publishQueue = [];
 let isProcessingQueue = false;
+let publishTotal = 0; // 本轮批量发品的总款数（队列会 shift，需另存总数才能算进度）
 
 async function ensureConfigLoaded() {
     return new Promise((resolve) => {
@@ -225,7 +226,7 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
 }
 
 // 通知「发品助手」页（沿用 notifyColorTaskComplete 的三级通道）
-function notifyPublishMemory(action, payload) {
+function notifyAssistant(action, payload) {
     const msg = { action, ...payload };
     if (assistantPort) {
         try { assistantPort.postMessage(msg); return; } catch (_) { assistantPort = null; }
@@ -247,7 +248,7 @@ async function processPublishQueue() {
         publishMemPaused = true;
         console.warn(`⏸ 可用内存 ${mem.availableMB}MB < ${mem.threshold}MB，发品队列已暂停（剩 ${publishQueue.length} 款）`);
         if (firstPause) {
-            notifyPublishMemory('publishMemoryPaused', { availableMB: mem.availableMB, threshold: mem.threshold, remaining: publishQueue.length });
+            notifyAssistant('publishMemoryPaused', { availableMB: mem.availableMB, threshold: mem.threshold, remaining: publishQueue.length });
         }
         schedulePublishMemRetry();
         return;
@@ -256,14 +257,23 @@ async function processPublishQueue() {
         publishMemPaused = false;
         clearPublishMemTimer();
         console.log('▶ 内存已恢复，发品队列继续');
-        notifyPublishMemory('publishMemoryResumed', { remaining: publishQueue.length });
+        notifyAssistant('publishMemoryResumed', { remaining: publishQueue.length });
     }
 
     isProcessingQueue = true;
     
     const rowNum = publishQueue[0];
     await openPublishTab(rowNum);
-    
+
+    // 播报进度（done = 已处理完的款数 = 总数 - 队列剩余）
+    notifyAssistant('publishProgress', {
+        state: 'running',
+        current: rowNum,
+        done: Math.max(0, publishTotal - publishQueue.length),
+        total: publishTotal,
+        remaining: publishQueue.length
+    });
+
     isProcessingQueue = false;
 }
 
@@ -279,6 +289,7 @@ async function advancePublishQueue() {
         await processPublishQueue();
     } else {
         console.log('🎉 批量发品队列已全部处理完毕');
+        notifyAssistant('publishProgress', { state: 'done', done: publishTotal, total: publishTotal, remaining: 0 });
     }
 }
 
@@ -627,6 +638,7 @@ async function handleSharedAction(request, sendResponse) {
         
         await ensureConfigLoaded();
         publishQueue = [...rows];
+        publishTotal = rows.length;
         await savePublishQueue();
         console.log(`📋 批量发品队列已创建，共${publishQueue.length}个产品: ${publishQueue.join(', ')}`);
         
