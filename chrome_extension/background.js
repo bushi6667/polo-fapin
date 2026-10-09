@@ -406,10 +406,12 @@ async function broadcastPublishState(extra) {
 }
 
 // 已核实保存记录：按文件隔离 { [fileKey]: { row: {...} } }
+// 注意：fileKey 允许为空字符串（未设置文件名时 getFilePrefix() 返回 ''），不能用 && 判断
 async function getVerifiedSavedMap(fileKey) {
     const r = await new Promise(res => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, res));
     const all = r[PUBLISH_VERIFIED_SAVED_KEY] || {};
-    return (fileKey && all[fileKey]) || {};
+    const key = (fileKey === undefined || fileKey === null) ? '' : String(fileKey);
+    return all[key] || {};
 }
 
 // ---------- 暂停 / 继续 ----------
@@ -1141,9 +1143,12 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'getUploadedRows') {
-        const verified = await new Promise(r => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, v => r(v[PUBLISH_VERIFIED_SAVED_KEY] || {})));
+        // rows 只返回「当前任务文件」下的已核实保存行（不是整张嵌套表）
+        const t = await loadPublishTask();
+        const fileKey = (t && t.fileKey) || getFilePrefix();
+        const verified = await getVerifiedSavedMap(fileKey);
         const legacy = await new Promise(r => chrome.storage.local.get(uploadedKey(), v => r(v[uploadedKey()] || {})));
-        sendResponse({ ok: true, rows: verified, legacy });
+        sendResponse({ ok: true, rows: verified, legacy, fileKey });
         return true;
     }
     if (request.action === 'startColorChange') {
