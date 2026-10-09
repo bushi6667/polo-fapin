@@ -243,9 +243,12 @@ async function processPublishQueue() {
     // 内存水位闸门：不足则暂停队列（不 shift，队列已持久化在 storage，内存恢复后自动续跑）
     const mem = await checkMemoryForPublish();
     if (!mem.ok) {
+        const firstPause = !publishMemPaused; // 只在首次进入暂停时通知，避免每 30 秒重试都弹一次
         publishMemPaused = true;
         console.warn(`⏸ 可用内存 ${mem.availableMB}MB < ${mem.threshold}MB，发品队列已暂停（剩 ${publishQueue.length} 款）`);
-        notifyPublishMemory('publishMemoryPaused', { availableMB: mem.availableMB, threshold: mem.threshold, remaining: publishQueue.length });
+        if (firstPause) {
+            notifyPublishMemory('publishMemoryPaused', { availableMB: mem.availableMB, threshold: mem.threshold, remaining: publishQueue.length });
+        }
         schedulePublishMemRetry();
         return;
     }
@@ -626,7 +629,7 @@ async function handleSharedAction(request, sendResponse) {
         
         await processPublishQueue();
         
-        sendResponse({ ok: true, count: rows.length, queue: publishQueue });
+        sendResponse({ ok: true, count: rows.length, queue: publishQueue, paused: publishMemPaused });
         return true;
     }
     if (request.action === 'publishCompleted') {

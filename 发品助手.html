@@ -2795,8 +2795,11 @@ function batchPublish() {
                 chrome.runtime.sendMessage(EXTENSION_ID, {
                     action: 'openBatchPublish',
                     rows: rows
-                }, () => {});
-                showToast(`🚀 正在打开 ${rows.length} 个发品页面...`);
+                }, (resp) => {
+                    // 内存不足时扩展会另发 publishMemoryPaused 提示，这里不重复弹（否则会盖掉暂停提示）
+                    if (resp && resp.paused) return;
+                    showToast(`🚀 正在打开 ${rows.length} 个发品页面...`);
+                });
             } else {
                 showToast('❌ 保存产品数据失败');
             }
@@ -3994,6 +3997,7 @@ function syncMemPauseMBToExtension(v) {
 }
 
 // 查询整机可用内存（走扩展 system.memory）；失败/超时返回 null，调用方放行不阻塞
+let memQueryWarned = false;
 function querySystemMemoryMB() {
     return new Promise((resolve) => {
         let done = false;
@@ -4004,10 +4008,17 @@ function querySystemMemoryMB() {
                 done = true;
                 clearTimeout(timer);
                 if (chrome.runtime.lastError || !resp || !resp.ok) {
-                    console.warn('[mem] 查询失败:', chrome.runtime.lastError?.message || resp?.error);
+                    const why = chrome.runtime.lastError?.message || resp?.error || '未知';
+                    console.warn('[mem] 查询失败:', why);
+                    // 只提示一次：否则静默失效——用户会以为保护在用
+                    if (!memQueryWarned) {
+                        memQueryWarned = true;
+                        showToast(`⚠️ 内存保护未生效：${why}。请在 chrome://extensions 重新加载扩展`);
+                    }
                     resolve(null);
                     return;
                 }
+                memQueryWarned = false;
                 resolve(resp.availableMB);
             });
         } catch (e) {
