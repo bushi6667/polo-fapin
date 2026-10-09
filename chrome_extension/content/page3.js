@@ -3680,11 +3680,10 @@ async function saveDraft(product) {
         log('🖱️ 点击保存按钮...', 'info');
         await realClick(saveBtn);
         await sleep3(1000);
-        log('✅ 已点击保存', 'success');
-        results.push('✅ 已点击保存');
-        if (product && product.row) {
-                chrome.runtime.sendMessage({ action: 'markUploaded', row: product.row }, () => {});
-            }
+        log('✅ 已点击保存（等待核实结果，不标记已保存）', 'success');
+        results.push('✅ 已点击保存（待核实）');
+        // 按实施要求：点击保存只进入「正在保存」，不凭点击 / 固定等待 / HTTP 200 / 关标签判定成功。
+        // 核实保存由保存检测负责（Stage 2，待实测）。
     } else {
         log('⚠️ 未找到保存按钮', 'warn');
         results.push('⚠️ 未找到保存按钮');
@@ -4225,11 +4224,14 @@ function createPage3Panel() {
             
             const rowNum = getRowFromUrl();
             if (rowNum !== null) {
-                chrome.runtime.sendMessage({ action: 'markUploaded', row: rowNum }, () => {});
-                log(`🔄 批量模式：标记第${rowNum}行已上传完成`, 'success');
-                log(`🔄 批量模式：通知后台第${rowNum}行页3填写完成，准备打开下一个`, 'success');
+                // 填写完成 ≠ 保存完成：只上报 publishFilled（携带任务标识），不写任何已保存标记
+                log(`🔄 批量模式：第${rowNum}行填写完成，待你核对后手动保存`, 'success');
                 setTimeout(() => {
-                    chrome.runtime.sendMessage({ action: 'publishCompleted', rowNum: rowNum }, () => {});
+                    chrome.runtime.sendMessage({
+                        action: 'publishFilled',
+                        row: rowNum,
+                        taskId: getTaskFromUrl()
+                    }, () => {});
                 }, 1000);
             }
         } catch (e) {
@@ -4399,6 +4401,16 @@ function getRowFromUrl() {
     return null;
 }
 
+// 批量任务标识：优先 URL 的 task=，退回 sessionStorage（页2→页3 透传）
+function getTaskFromUrl() {
+    try {
+        const p = new URLSearchParams(window.location.search);
+        const t = p.get('task');
+        if (t) return t;
+    } catch (e) {}
+    try { return sessionStorage.getItem('polo_batch_task') || null; } catch (e) { return null; }
+}
+
 async function loadBatchProduct(rowNum) {
     try {
         const resp = await sendMessageRetry({
@@ -4410,11 +4422,11 @@ async function loadBatchProduct(rowNum) {
             updateProductInfo(currentProduct);
             log('✓ 从批量数据加载产品: 行' + rowNum, 'success');
 
-            const uploadedResp = await sendMessageRetry({
-                action: 'getUploadedRows'
-            });
+            const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows' });
+            // 只依据「已核实保存」记录跳过；跳过后必须正常推进队列，不能卡死
             if (uploadedResp && uploadedResp.ok && uploadedResp.rows && uploadedResp.rows[rowNum]) {
-                log(`⚠️ 第${rowNum}行已上传完成，跳过自动填入`, 'warn');
+                log(`⚠️ 第${rowNum}行已核实保存，跳过自动填入`, 'warn');
+                await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true });
                 return false;
             }
             
@@ -4440,12 +4452,10 @@ async function loadBatchProduct(rowNum) {
                     log('🔍 已滚动到保存按钮位置', 'info');
                 }
                 
-                await sendMessageRetry({ action: 'markUploaded', row: rowNum });
-                log(`🔄 批量模式：标记第${rowNum}行已上传完成`, 'success');
-                log(`🔄 批量模式：通知后台第${rowNum}行页3填写完成，准备打开下一个`, 'success');
+                log(`🔄 批量模式：第${rowNum}行填写完成，待核对后手动保存`, 'success');
                 setTimeout(async () => {
                     try {
-                        await sendMessageRetry({ action: 'publishCompleted', rowNum: rowNum });
+                        await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl() });
                     } catch (e) {
                         log('❌ 通知后台失败: ' + e.message, 'error');
                     } finally {

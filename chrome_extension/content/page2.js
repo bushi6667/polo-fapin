@@ -509,6 +509,10 @@ function initPage2() {
 // （保证从页2跳页3时批量行号不丢失）
 function setupNextStepRowPass(rowNum) {
     try { sessionStorage.setItem('polo_batch_row', rowNum); } catch(e) {}
+    // 批量任务标识：也要一起透传到页3，供后台校验消息来源（任务/行/标签三重匹配）
+    let taskId = null;
+    try { taskId = new URLSearchParams(window.location.search).get('task'); } catch (_e) {}
+    if (taskId) { try { sessionStorage.setItem('polo_batch_task', taskId); } catch (_e) {} }
 
     // 拦截「下一步/Next」按钮与 easyListing 链接的点击
     const interceptNextBtn = () => {
@@ -554,10 +558,14 @@ function setupNextStepRowPass(rowNum) {
     // 为发品页 URL 追加 row 参数
     function appendRowToUrl(url) {
         try { sessionStorage.setItem('polo_batch_row', rowNum); } catch(_e) {}
+        if (taskId) { try { sessionStorage.setItem('polo_batch_task', taskId); } catch(_e) {} }
         if (url && url.includes && (url.includes('easyListing') || url.includes('publish'))) {
+            const sep = url.includes('?') ? '&' : '?';
             if (!url.includes('row=')) {
-                const sep = url.includes('?') ? '&' : '?';
                 url = url + sep + 'row=' + rowNum;
+            }
+            if (taskId && !url.includes('task=')) {
+                url = url + '&task=' + encodeURIComponent(taskId);
             }
         }
         return url;

@@ -14,7 +14,6 @@ function isRasterImageType(blobType) {
 }
 const IMAGE_DIR_KEY = 'polo_image_dir';
 const COLOR_IMG_DIR_KEY = 'polo_color_img_dir';
-const PUBLISH_QUEUE_KEY = 'polo_publish_queue';
 const PENDING_COLOR_TASK_KEY = 'polo_pending_color_task';
 const DOUBAO_TAB_ID_KEY = 'polo_doubao_tab_id';
 const HELPER_PATH_KEY = 'polo_helper_path'; // popup.js 中配置的发品助手.html 路径（存在 chrome.storage.local）
@@ -27,19 +26,15 @@ const DOUBAO_URL = 'https://www.doubao.com/chat';
 let assistantTabId = null;
 let assistantPort = null;
 
-let publishQueue = [];
-let isProcessingQueue = false;
-let publishTotal = 0; // 本轮批量发品的总款数（队列会 shift，需另存总数才能算进度）
+// 发品任务状态改为持久化在 chrome.storage.local（PUBLISH_TASK_KEY），
+// 不再使用会随 MV3 休眠消失的内存变量作真相源。
 
 async function ensureConfigLoaded() {
     return new Promise((resolve) => {
-        chrome.storage.local.get([IMAGE_DIR_KEY, COLOR_IMG_DIR_KEY, 'current_filename', PUBLISH_QUEUE_KEY], (result) => {
+        chrome.storage.local.get([IMAGE_DIR_KEY, COLOR_IMG_DIR_KEY, 'current_filename'], (result) => {
             if (result[IMAGE_DIR_KEY]) IMAGE_DIR = result[IMAGE_DIR_KEY];
             if (result[COLOR_IMG_DIR_KEY]) COLOR_IMG_DIR = result[COLOR_IMG_DIR_KEY];
             if (result['current_filename']) CURRENT_FILENAME = result['current_filename'];
-            if (result[PUBLISH_QUEUE_KEY] && Array.isArray(result[PUBLISH_QUEUE_KEY])) {
-                publishQueue = result[PUBLISH_QUEUE_KEY];
-            }
             resolve();
         });
     });
@@ -115,11 +110,7 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
     }
 });
 
-async function savePublishQueue() {
-    return new Promise((resolve) => {
-        chrome.storage.local.set({ [PUBLISH_QUEUE_KEY]: publishQueue }, resolve);
-    });
-}
+// savePublishQueue 已废弃：队列状态统一由 savePublishTask() 写入 PUBLISH_TASK_KEY
 
 async function savePendingColorTask(task) {
     return new Promise((resolve) => {
@@ -164,12 +155,51 @@ async function openPublishTab(rowNum) {
     console.log(`🆕 已打开第${rowNum}行产品发品页面`);
 }
 
-// ===== 内存水位保护（上品 / 发品队列）=====
+// ============================================================
+// 发品任务：分批预填 + 资源闸门 + 停止/继续
+// 真相源一律在 chrome.storage.local，不依赖会随 MV3 休眠消失的内存变量
+// ============================================================
+const PUBLISH_TASK_KEY = 'polo_publish_task';
+const PUBLISH_LOG_KEY = 'polo_publish_log';
+const PUBLISH_LOG_MAX = 500;
+const PUBLISH_SETTINGS_KEY = 'polo_publish_settings';
+const PUBLISH_VERIFIED_SAVED_KEY = 'polo_publish_verified_saved';   // 已核实保存（Stage 2 写入）
+const PUBLISH_LEGACY_UPLOADED_KEY = 'polo_publish_legacy_uploaded'; // 旧 uploaded 标记：历史待核，仅供展示
 const MEM_PAUSE_MB_KEY = 'polo_mem_pause_mb';
 const MEM_PAUSE_MB_DEFAULT = 1500;
-const PUBLISH_MEM_RETRY_MS = 30000;
-let publishMemPaused = false;
-let publishMemTimer = null;
+const MEM_ENDPOINT = 'http://127.0.0.1:8765/mem-info';  // 本地只读内存端点（提交额度）
+const MEM_SAMPLE_CACHE_MS = 10000;
+const PUBLISH_TICK_MS = 30000;                          // 运行期资源巡检间隔上限
+
+const PUBLISH_DEFAULTS = {
+    batchSize: 50,          // 每批预填款数（1-60）
+    pageLimit: 60,          // 目标页面总量上限（统计全部目标顶层标签）
+    rowTimeoutMs: 600000,   // 单行超时 10 分钟
+    commitFreeMinMB: 4096,  // 提交剩余额度下限
+    commitUsedPctMax: 90    // 已提交 / 提交上限（%）上限
+};
+
+let publishTickTimer = null;
+let memSampleCache = { at: 0, value: null };
+
+// ---------- 设置（持久化 + 边界收敛） ----------
+async function getPublishSettings() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(PUBLISH_SETTINGS_KEY, (r) => {
+            resolve({ ...PUBLISH_DEFAULTS, ...(r[PUBLISH_SETTINGS_KEY] || {}) });
+        });
+    });
+}
+
+async function setPublishSettings(patch) {
+    const cur = await getPublishSettings();
+    const next = { ...cur, ...patch };
+    next.batchSize = Math.min(60, Math.max(1, parseInt(next.batchSize, 10) || PUBLISH_DEFAULTS.batchSize));
+    next.pageLimit = Math.min(200, Math.max(1, parseInt(next.pageLimit, 10) || PUBLISH_DEFAULTS.pageLimit));
+    next.rowTimeoutMs = Math.max(60000, parseInt(next.rowTimeoutMs, 10) || PUBLISH_DEFAULTS.rowTimeoutMs);
+    await new Promise(r => chrome.storage.local.set({ [PUBLISH_SETTINGS_KEY]: next }, r));
+    return next;
+}
 
 async function getMemPauseThresholdMB() {
     return new Promise((resolve) => {
@@ -180,49 +210,119 @@ async function getMemPauseThresholdMB() {
     });
 }
 
-// 返回 { ok:true } 或 { ok:false, availableMB, threshold }；无权限 / 查询失败一律放行
-async function checkMemoryForPublish() {
-    if (!chrome.system || !chrome.system.memory) return { ok: true };
-    const threshold = await getMemPauseThresholdMB();
-    const info = await new Promise((resolve) => {
-        try { chrome.system.memory.getInfo((i) => resolve(i || null)); }
-        catch (e) { resolve(null); }
+// ---------- 任务持久化 ----------
+async function loadPublishTask() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(PUBLISH_TASK_KEY, (r) => resolve(r[PUBLISH_TASK_KEY] || null));
     });
-    if (!info) return { ok: true };
-    const availableMB = Math.round(info.availableCapacity / 1048576);
-    return { ok: availableMB >= threshold, availableMB, threshold };
+}
+
+async function savePublishTask(task) {
+    return new Promise((resolve) => {
+        if (!task) { chrome.storage.local.remove(PUBLISH_TASK_KEY, resolve); return; }
+        chrome.storage.local.set({ [PUBLISH_TASK_KEY]: task }, resolve);
+    });
+}
+
+// ---------- 诊断日志（有界 500 条；只记数值与标识，不记凭据/文案/图片） ----------
+async function appendPublishLog(entry) {
+    try {
+        const r = await new Promise(res => chrome.storage.local.get(PUBLISH_LOG_KEY, res));
+        const list = Array.isArray(r[PUBLISH_LOG_KEY]) ? r[PUBLISH_LOG_KEY] : [];
+        list.push({ t: Date.now(), ...entry });
+        while (list.length > PUBLISH_LOG_MAX) list.shift();
+        await new Promise(res => chrome.storage.local.set({ [PUBLISH_LOG_KEY]: list }, res));
+    } catch (_) {}
+}
+
+// ---------- 目标页面统计（全部 easyListing/publish 顶层标签，含旧批次与已保存页面） ----------
+function isTargetPublishUrl(url) {
+    if (!url) return false;
+    return /^https?:\/\/post\.alibaba\.com\/product\/(easyListing|publish)/.test(url);
+}
+
+async function countTargetTabs() {
+    const tabs = await chrome.tabs.query({});
+    return tabs.filter(t => isTargetPublishUrl(t.url)).length;
+}
+
+// ---------- 内存采样：物理（system.memory）+ 提交额度（本地端点） ----------
+async function sampleMemory() {
+    const now = Date.now();
+    if (memSampleCache.value && now - memSampleCache.at < MEM_SAMPLE_CACHE_MS) return memSampleCache.value;
+
+    const out = {
+        physAvailableMB: null, physError: '',
+        commitFreeMB: null, commitLimitMB: null, commitUsedPct: null, commitError: '',
+        sampledAt: now
+    };
+
+    if (chrome.system && chrome.system.memory) {
+        try {
+            const info = await new Promise((resolve) => chrome.system.memory.getInfo((i) => resolve(i || null)));
+            if (info && typeof info.availableCapacity === 'number') {
+                out.physAvailableMB = Math.round(info.availableCapacity / 1048576);
+            } else {
+                out.physError = 'system.memory 返回空';
+            }
+        } catch (e) { out.physError = 'system.memory 异常: ' + e.message; }
+    } else {
+        out.physError = '缺少 system.memory 权限（需在 chrome://extensions 重新加载扩展）';
+    }
+
+    try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3000);
+        const resp = await fetch(MEM_ENDPOINT, { method: 'GET', signal: ctrl.signal, cache: 'no-store' });
+        clearTimeout(timer);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const j = await resp.json();
+        if (typeof j.committedBytes === 'number' && typeof j.commitLimitBytes === 'number' && j.commitLimitBytes > 0) {
+            out.commitFreeMB = Math.round((j.commitLimitBytes - j.committedBytes) / 1048576);
+            out.commitLimitMB = Math.round(j.commitLimitBytes / 1048576);
+            out.commitUsedPct = Math.round((j.committedBytes / j.commitLimitBytes) * 1000) / 10;
+        } else {
+            out.commitError = '端点返回缺少 committedBytes/commitLimitBytes';
+        }
+    } catch (e) {
+        out.commitError = (e.name === 'AbortError' ? '本地内存服务超时' : '本地内存服务不可用: ' + e.message);
+    }
+
+    memSampleCache = { at: now, value: out };
+    return out;
+}
+
+// ---------- 资源闸门：任一条件满足即暂停；监测失败一律暂停（禁止静默放行） ----------
+async function checkPublishResources() {
+    const settings = await getPublishSettings();
+    const threshold = await getMemPauseThresholdMB();
+    const mem = await sampleMemory();
+    const pages = await countTargetTabs();
+    const r = [];
+
+    if (mem.physAvailableMB === null) {
+        r.push({ reason: 'monitorFail', detail: '物理内存监测不可用：' + (mem.physError || '未知') });
+    } else if (mem.physAvailableMB < threshold) {
+        r.push({ reason: 'memory', detail: `可用物理内存 ${mem.physAvailableMB}MiB < 阈值 ${threshold}MiB` });
+    }
+    if (mem.commitFreeMB === null) {
+        r.push({ reason: 'monitorFail', detail: '提交额度监测不可用：' + (mem.commitError || '未知') });
+    } else {
+        if (mem.commitFreeMB < settings.commitFreeMinMB) {
+            r.push({ reason: 'memory', detail: `提交剩余 ${mem.commitFreeMB}MiB < ${settings.commitFreeMinMB}MiB` });
+        } else if (mem.commitUsedPct !== null && mem.commitUsedPct >= settings.commitUsedPctMax) {
+            r.push({ reason: 'memory', detail: `提交已用 ${mem.commitUsedPct}% ≥ ${settings.commitUsedPctMax}%` });
+        }
+    }
+    if (pages >= settings.pageLimit) {
+        r.push({ reason: 'pageLimit', detail: `已打开目标页面 ${pages} 个 ≥ 上限 ${settings.pageLimit}` });
+    }
+    return { ok: r.length === 0, reasons: r, mem, pages, settings, threshold };
 }
 
 function clearPublishMemTimer() {
-    try { if (chrome.alarms) chrome.alarms.clear('publishMemRetry'); } catch (_) {}
-    if (publishMemTimer) { clearTimeout(publishMemTimer); publishMemTimer = null; }
-}
-
-// 用 alarms 而非 setTimeout：MV3 SW 会被回收，setTimeout 随之丢失导致队列永久卡住；
-// alarm 能唤醒被回收的 SW（无 alarms 权限时退回 setTimeout 兜底）
-function schedulePublishMemRetry() {
-    clearPublishMemTimer();
-    try {
-        if (chrome.alarms) {
-            chrome.alarms.create('publishMemRetry', { delayInMinutes: 0.5 }); // 30 秒后重试
-            return;
-        }
-    } catch (e) {
-        console.warn('创建内存重试 alarm 失败，退回 setTimeout:', e.message);
-    }
-    publishMemTimer = setTimeout(() => {
-        publishMemTimer = null;
-        processPublishQueue();
-    }, PUBLISH_MEM_RETRY_MS);
-}
-
-// 内存恢复后自动续跑发品队列（alarm 可唤醒被回收的 SW）
-if (chrome.alarms && chrome.alarms.onAlarm) {
-    chrome.alarms.onAlarm.addListener((alarm) => {
-        if (alarm && alarm.name === 'publishMemRetry') {
-            processPublishQueue();
-        }
-    });
+    // 不再使用 alarms 重试：按实施要求，暂停后不自动恢复开页，必须用户主动「继续」
+    if (publishTickTimer) { clearInterval(publishTickTimer); publishTickTimer = null; }
 }
 
 // 通知「发品助手」页（沿用 notifyColorTaskComplete 的三级通道）
@@ -237,60 +337,204 @@ function notifyAssistant(action, payload) {
     try { chrome.runtime.sendMessage(EXTENSION_ID, msg, () => void chrome.runtime.lastError); } catch (_) {}
 }
 
-async function processPublishQueue() {
-    await ensureConfigLoaded();
-    if (isProcessingQueue || publishQueue.length === 0) return;
+// ---------- 状态播报 ----------
+function publishRunning(t) { return !!t && t.state === 'running'; }
 
-    // 内存水位闸门：不足则暂停队列（不 shift，队列已持久化在 storage，内存恢复后自动续跑）
-    const mem = await checkMemoryForPublish();
-    if (!mem.ok) {
-        const firstPause = !publishMemPaused; // 只在首次进入暂停时通知，避免每 30 秒重试都弹一次
-        publishMemPaused = true;
-        console.warn(`⏸ 可用内存 ${mem.availableMB}MB < ${mem.threshold}MB，发品队列已暂停（剩 ${publishQueue.length} 款）`);
-        if (firstPause) {
-            notifyAssistant('publishMemoryPaused', { availableMB: mem.availableMB, threshold: mem.threshold, remaining: publishQueue.length });
-        }
-        schedulePublishMemRetry();
-        return;
-    }
-    if (publishMemPaused) {
-        publishMemPaused = false;
-        clearPublishMemTimer();
-        console.log('▶ 内存已恢复，发品队列继续');
-        notifyAssistant('publishMemoryResumed', { remaining: publishQueue.length });
-    }
-
-    isProcessingQueue = true;
-    
-    const rowNum = publishQueue[0];
-    await openPublishTab(rowNum);
-
-    // 播报进度（done = 已处理完的款数 = 总数 - 队列剩余）
-    notifyAssistant('publishProgress', {
-        state: 'running',
-        current: rowNum,
-        done: Math.max(0, publishTotal - publishQueue.length),
-        total: publishTotal,
-        remaining: publishQueue.length
-    });
-
-    isProcessingQueue = false;
+async function buildPublishStatePayload() {
+    const t = await loadPublishTask();
+    const pages = await countTargetTabs();
+    const savedCount = await getVerifiedSavedCount();
+    return {
+        ok: true,
+        state: t ? t.state : 'idle',
+        taskId: t ? t.taskId : null,
+        batchSize: t ? t.batchSize : PUBLISH_DEFAULTS.batchSize,
+        batchFilled: t ? t.batchFilled : 0,
+        filledCount: t ? t.filledCount : 0,
+        total: t ? t.total : 0,
+        remaining: t ? t.remaining.length : 0,
+        pendingSaveCount: t ? Math.max(0, t.filledCount - savedCount) : 0,
+        savedCount,
+        pauseReason: t ? t.pauseReason : '',
+        pauseDetail: t ? t.pauseDetail : '',
+        currentRow: t ? t.currentRow : null,
+        pages,
+        pageLimit: t ? t.pageLimit : PUBLISH_DEFAULTS.pageLimit
+    };
 }
 
-async function advancePublishQueue() {
-    await ensureConfigLoaded();
-    if (publishQueue.length === 0) return;
-    
-    publishQueue.shift();
-    await savePublishQueue();
-    
-    if (publishQueue.length > 0) {
-        console.log(`📋 队列剩余 ${publishQueue.length} 个，下一个: row${publishQueue[0]}`);
-        await processPublishQueue();
-    } else {
-        console.log('🎉 批量发品队列已全部处理完毕');
-        notifyAssistant('publishProgress', { state: 'done', done: publishTotal, total: publishTotal, remaining: 0 });
+async function broadcastPublishState(extra) {
+    const payload = await buildPublishStatePayload();
+    notifyAssistant('publishState', { ...payload, ...(extra || {}) });
+}
+
+async function getVerifiedSavedCount() {
+    const r = await new Promise(res => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, res));
+    const m = r[PUBLISH_VERIFIED_SAVED_KEY];
+    return m && typeof m === 'object' ? Object.keys(m).length : 0;
+}
+
+// ---------- 暂停 / 继续 ----------
+async function pausePublishTask(reason, detail) {
+    const t = await loadPublishTask();
+    if (!t || t.state === 'done') return;
+    const first = t.state !== 'paused' || t.pauseReason !== reason;
+    t.state = 'paused';
+    t.pauseReason = reason;
+    t.pauseDetail = detail || '';
+    await savePublishTask(t);
+    clearPublishMemTimer();
+    console.warn(`⏸ 发品任务已暂停 [${reason}] ${detail || ''}（剩 ${t.remaining.length} 款）`);
+    if (first) {
+        await appendPublishLog({ level: 'pause', reason, detail, row: t.currentRow, pages: await countTargetTabs() });
+        await broadcastPublishState({ justPaused: true });
     }
+}
+
+async function resumePublishTask() {
+    const t = await loadPublishTask();
+    if (!t) { notifyAssistant('publishResumeRejected', { message: '没有可继续的发品任务' }); return { ok: false, message: '没有可继续的发品任务' }; }
+    if (t.state === 'running') { notifyAssistant('publishResumeRejected', { message: '任务正在运行中' }); return { ok: false, message: '任务正在运行中' }; }
+    if (t.remaining.length === 0) { notifyAssistant('publishResumeRejected', { message: '队列已空' }); return { ok: false, message: '队列已空' }; }
+
+    const g = await checkPublishResources();
+    if (!g.ok) {
+        const detail = g.reasons.map(x => x.detail).join('；');
+        await pausePublishTask(g.reasons[0].reason, detail);
+        notifyAssistant('publishResumeRejected', { message: '资源条件不满足：' + detail });
+        return { ok: false, message: '资源条件不满足：' + detail };
+    }
+
+    t.state = 'running';
+    t.pauseReason = '';
+    t.pauseDetail = '';
+    t.batchFilled = 0; // 用户主动继续 → 重置批次计数
+    await savePublishTask(t);
+    memSampleCache = { at: 0, value: null };
+    await appendPublishLog({ level: 'resume', row: t.currentRow, pages: g.pages });
+    startPublishTick();
+    notifyAssistant('publishResumed', { remaining: t.remaining.length, batchSize: t.batchSize });
+    await processPublishQueue();
+    return { ok: true };
+}
+
+// ---------- 打开下一个标签（唯一开页入口） ----------
+async function openPublishTab(rowNum, taskId) {
+    const baseUrl = 'https://post.alibaba.com/product/easyListing.htm?spm=a2700.micro_product_manager.0.0.40e03e5fPaTwSu';
+    const url = baseUrl + '&row=' + rowNum + '&task=' + encodeURIComponent(taskId);
+    const tab = await chrome.tabs.create({ url });
+    console.log(`🆕 已打开第${rowNum}行产品发品页面 (tab ${tab.id})`);
+    return tab;
+}
+
+// ---------- 运行期巡检（≤30s，仅加速发现资源变化；真相源仍是 storage） ----------
+function startPublishTick() {
+    if (publishTickTimer) return;
+    publishTickTimer = setInterval(async () => {
+        const t = await loadPublishTask();
+        if (!publishRunning(t)) { clearPublishMemTimer(); return; }
+        // 当前行超时
+        if (t.currentRow !== null && t.currentStartedAt && Date.now() - t.currentStartedAt > t.rowTimeoutMs) {
+            await pausePublishTask('rowTimeout', `第 ${t.currentRow} 行填写超时（>${Math.round(t.rowTimeoutMs / 60000)} 分钟）`);
+            return;
+        }
+        // 当前标签是否被用户关闭
+        if (t.currentTabId !== null) {
+            try {
+                await chrome.tabs.get(t.currentTabId);
+            } catch (_) {
+                await pausePublishTask('tabClosed', `第 ${t.currentRow} 行所在标签已被关闭，该行保留在队列`);
+                return;
+            }
+        }
+        const g = await checkPublishResources();
+        if (!g.ok) {
+            await pausePublishTask(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
+        }
+    }, PUBLISH_TICK_MS);
+}
+
+// ---------- 队列推进：开下一个 ----------
+async function processPublishQueue() {
+    const t = await loadPublishTask();
+    if (!t || !publishRunning(t) || t.remaining.length === 0) return;
+
+    // 本批已达上限 → 暂停，等用户主动继续（不因关页/保存自动继续）
+    if (t.batchFilled >= t.batchSize) {
+        await pausePublishTask('batch', `本批预填 ${t.batchFilled}/${t.batchSize} 已达上限，剩 ${t.remaining.length} 款；处理完已开页面后点「继续下一批」`);
+        return;
+    }
+
+    // 资源闸门（开页前必查）
+    const g = await checkPublishResources();
+    if (!g.ok) {
+        await pausePublishTask(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
+        return;
+    }
+
+    const rowNum = t.remaining[0];
+    let tab;
+    try {
+        tab = await openPublishTab(rowNum, t.taskId);
+    } catch (e) {
+        await pausePublishTask('openFail', `第 ${rowNum} 行开页失败：${e.message}`);
+        return;
+    }
+
+    t.currentRow = rowNum;
+    t.currentTabId = tab.id;
+    t.currentStartedAt = Date.now();
+    t.batchFilled += 1;
+    await savePublishTask(t);
+    startPublishTick();
+
+    await appendPublishLog({
+        level: 'open', row: rowNum, tabId: tab.id, state: t.state,
+        batchFilled: t.batchFilled, filled: t.filledCount, remain: t.remaining.length,
+        pages: g.pages, physMB: g.mem.physAvailableMB, commitFreeMB: g.mem.commitFreeMB,
+        commitUsedPct: g.mem.commitUsedPct, sampledAt: g.mem.sampledAt
+    });
+    await broadcastPublishState();
+}
+
+// ---------- 收到「填写完成」：校验来源后推进 ----------
+// 只接受当前任务 + 当前行 + 当前标签；重复/旧任务/乱序/其他标签一律拒绝
+async function onPublishFilled(senderTabId, msg) {
+    const t = await loadPublishTask();
+    if (!t) return { ok: false, message: '没有进行中的发品任务' };
+    const row = parseInt(msg.row, 10);
+    const taskId = msg.taskId;
+
+    if (msg.taskId && t.taskId && msg.taskId !== t.taskId) return { ok: false, message: '旧任务消息，已拒绝' };
+    if (!publishRunning(t)) return { ok: false, message: '任务未在运行，已拒绝' };
+    if (t.currentTabId !== null && senderTabId !== undefined && senderTabId !== t.currentTabId) {
+        return { ok: false, message: '非当前标签的消息，已拒绝' };
+    }
+    if (row !== t.currentRow) return { ok: false, message: `行号不匹配（当前 ${t.currentRow}），已拒绝` };
+
+    // 推进：移出队首
+    t.remaining.shift();
+    t.filledCount += 1;
+    t.currentRow = null;
+    t.currentTabId = null;
+    t.currentStartedAt = 0;
+    await savePublishTask(t);
+    await appendPublishLog({ level: 'filled', row, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilled });
+
+    if (t.remaining.length === 0) {
+        t.state = 'done';
+        await savePublishTask(t);
+        clearPublishMemTimer();
+        await appendPublishLog({ level: 'done', filled: t.filledCount, total: t.total });
+        notifyAssistant('publishAllFilled', { filled: t.filledCount, total: t.total });
+        await broadcastPublishState();
+        return { ok: true, done: true };
+    }
+
+    notifyAssistant('publishFilledAck', { row, filled: t.filledCount, total: t.total, remaining: t.remaining.length });
+    await broadcastPublishState();
+    await processPublishQueue();
+    return { ok: true, remaining: t.remaining.length };
 }
 
 async function realClickCDP(tabId, x, y) {
@@ -635,44 +879,66 @@ async function handleSharedAction(request, sendResponse) {
             sendResponse({ ok: true, count: 0 });
             return true;
         }
-        
-        await ensureConfigLoaded();
-        publishQueue = [...rows];
-        publishTotal = rows.length;
-        await savePublishQueue();
-        console.log(`📋 批量发品队列已创建，共${publishQueue.length}个产品: ${publishQueue.join(', ')}`);
-        
+
+        // 已有未完成任务时拒绝覆盖，保留原队列（force=true 才允许覆盖）
+        const prev = await loadPublishTask();
+        const force = request.force === true;
+        if (!force && prev && prev.state === 'running') {
+            sendResponse({ ok: false, error: '已有正在进行的发品任务，已保留原队列；请先停止或等其结束' });
+            return true;
+        }
+        if (!force && prev && prev.state === 'paused' && prev.remaining.length > 0) {
+            sendResponse({ ok: false, error: `存在暂停中的任务（剩 ${prev.remaining.length} 款）。请先点「继续下一批」，或确认覆盖后新建任务` });
+            return true;
+        }
+
+        const s = await getPublishSettings();
+        const now = Date.now();
+        const task = {
+            taskId: 'pt_' + now + '_' + Math.random().toString(36).slice(2, 8),
+            fileKey: getFilePrefix(),
+            total: rows.length,
+            remaining: [...rows],
+            filledCount: 0,
+            batchSize: s.batchSize,
+            batchFilled: 0,
+            pageLimit: s.pageLimit,
+            rowTimeoutMs: s.rowTimeoutMs,
+            state: 'running',
+            pauseReason: '',
+            pauseDetail: '',
+            currentRow: null,
+            currentTabId: null,
+            currentStartedAt: 0,
+            startedAt: now
+        };
+        await savePublishTask(task);
+        console.log(`📋 发品任务已创建 ${task.taskId}，共 ${task.total} 款，批次 ${task.batchSize}`);
+        await appendPublishLog({ level: 'create', taskId: task.taskId, total: task.total, batchSize: task.batchSize });
+
         await processPublishQueue();
-        
-        sendResponse({ ok: true, count: rows.length, queue: publishQueue, paused: publishMemPaused });
+        await broadcastPublishState();
+        sendResponse({ ok: true, count: rows.length, taskId: task.taskId, batchSize: task.batchSize });
         return true;
     }
     if (request.action === 'publishCompleted') {
-        const rowNum = request.rowNum;
-        console.log(`✅ 收到第${rowNum}行产品保存完成通知`);
-        
-        await advancePublishQueue();
-        
-        sendResponse({ ok: true, remaining: publishQueue.length });
+        // 已废弃：旧事件不得无条件推进队列
+        console.log(`ℹ️ 收到已废弃的 publishCompleted（row ${request.rowNum}），未推进队列`);
+        await appendPublishLog({ level: 'deprecated', event: 'publishCompleted', row: request.rowNum });
+        sendResponse({ ok: true, deprecated: true });
         return true;
     }
     if (request.action === 'markUploaded') {
-        const row = request.row;
-        const key = uploadedKey();
-        chrome.storage.local.get(key, (result) => {
-            const uploaded = result[key] || {};
-            uploaded[row] = true;
-            chrome.storage.local.set({ [key]: uploaded }, () => {
-                sendResponse({ ok: true });
-            });
-        });
+        // 已废弃并拒绝：禁止外部页面伪造「已保存」
+        console.warn(`⛔ markUploaded 已废弃并拒绝（row ${request.row}）`);
+        await appendPublishLog({ level: 'reject', event: 'markUploaded', row: request.row });
+        sendResponse({ ok: false, error: 'markUploaded 已废弃：保存状态只能由已核实保存记录决定' });
         return true;
     }
     if (request.action === 'getUploadedRows') {
-        const key = uploadedKey();
-        chrome.storage.local.get(key, (result) => {
-            sendResponse({ ok: true, rows: result[key] || {} });
-        });
+        const verified = await new Promise(r => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, v => r(v[PUBLISH_VERIFIED_SAVED_KEY] || {})));
+        const legacy = await new Promise(r => chrome.storage.local.get(uploadedKey(), v => r(v[uploadedKey()] || {})));
+        sendResponse({ ok: true, rows: verified, legacy });
         return true;
     }
     if (request.action === 'startColorChange') {
@@ -927,6 +1193,41 @@ chrome.runtime.onConnectExternal.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log(`🔍 [onMessage] 收到消息: action=${request.action}, sender=${sender?.tab?.url ? 'tab' : 'unknown'}`);
+
+    // ---------- 发品任务（内部通道：content script 发来，sender.tab 可信） ----------
+    if (request.action === 'publishFilled') {
+        const tabId = sender && sender.tab ? sender.tab.id : undefined;
+        onPublishFilled(tabId, request).then(sendResponse).catch(e => sendResponse({ ok: false, message: e.message }));
+        return true;
+    }
+    if (request.action === 'pausePublishQueue') {
+        loadPublishTask().then(t => {
+            if (!t) { sendResponse({ ok: false, message: '没有发品任务' }); return; }
+            pausePublishTask('manual', '用户手动停止').then(() => sendResponse({ ok: true }));
+        });
+        return true;
+    }
+    if (request.action === 'resumePublishQueue') {
+        resumePublishTask().then(sendResponse).catch(e => sendResponse({ ok: false, message: e.message }));
+        return true;
+    }
+    if (request.action === 'getPublishState') {
+        buildPublishStatePayload().then(sendResponse);
+        return true;
+    }
+    if (request.action === 'setPublishSettings') {
+        setPublishSettings(request.patch || {}).then(s => sendResponse({ ok: true, settings: s }));
+        return true;
+    }
+    if (request.action === 'getDiagLog') {
+        chrome.storage.local.get(PUBLISH_LOG_KEY, r => sendResponse({ ok: true, log: r[PUBLISH_LOG_KEY] || [] }));
+        return true;
+    }
+    if (request.action === 'clearDiagLog') {
+        chrome.storage.local.remove(PUBLISH_LOG_KEY, () => sendResponse({ ok: true }));
+        return true;
+    }
+
     if (request.action === 'getProductData') {
         const key = productKey();
         chrome.storage.local.get(key, (result) => {
