@@ -216,3 +216,35 @@ function finishBatchColor(completed, reason) {
 - 全程**手工编辑**，禁脚本改写代码
 - 每处单独编辑，改完**重读复核**
 - 先 commit 备份点再动手
+
+## 七、补充：扩展到「上品」流程（实施中追加）
+
+上品队列在**扩展侧**跑（`publishQueue` + `processPublishQueue`），闸门加在 `background.js`：
+
+- 可用内存不足时**不 shift**，队列已持久化在 `publishQueue`(storage) → 不丢
+- 内存恢复后**自动续跑**（上品是不锈钢队列、无人值守，自动恢复优于手动点）
+- 页面收到 `publishMemoryPaused` / `publishMemoryResumed` 时弹 Toast 提示
+
+### 关键修正 1：重试用 `chrome.alarms`，不用 `setTimeout`
+MV3 Service Worker 空闲约 30 秒即被回收。`setTimeout` 会随 SW 一起丢失 →
+**暂停中的队列会永久卡住**。`chrome.alarms` 能唤醒被回收的 SW。
+→ manifest 权限追加 `"alarms"`；无 alarms 权限时退回 `setTimeout` 兜底。
+
+### 关键修正 2：阈值同步
+页面的阈值存在 `localStorage`，而扩展闸门读 `chrome.storage.local`，**两套不通**。
+→ `background.js` 新增 `setMemPauseMB` 动作；页面 `setMemPauseMB()` 每次改动即同步，
+并在检测到扩展时（`checkExtension` 成功处）推一次。
+
+### 改动清单（追加）
+| # | 文件 | 内容 |
+|---|---|---|
+| E11 | `manifest.json` | 权限追加 `"alarms"` |
+| E12 | `background.js` | 内存闸门辅助函数 + `processPublishQueue()` 闸门 + alarm 监听 |
+| E13 | `background.js` | `setMemPauseMB` 动作（阈值同步） |
+| E14 | `发品助手.html` | 端口监听 + `onMessageExternal` 接收暂停/恢复消息 |
+| E15 | `发品助手.html` | `handlePublishMemoryPaused` / `handlePublishMemoryResumed` |
+| E16 | `发品助手.html` | `syncMemPauseMBToExtension()` 并在 `checkExtension` 成功处推送 |
+
+### 验证（追加）
+- `chrome.alarms.onAlarm` 注册带 `if (chrome.alarms && ...)` 守卫，避免无权限时 SW 启动即抛错
+- 阈值同步：页面改阈值 → 扩展 `chrome.storage.local` 应更新（SW 控制台可见日志）

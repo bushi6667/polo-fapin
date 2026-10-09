@@ -163,9 +163,99 @@ async function openPublishTab(rowNum) {
     console.log(`🆕 已打开第${rowNum}行产品发品页面`);
 }
 
+// ===== 内存水位保护（上品 / 发品队列）=====
+const MEM_PAUSE_MB_KEY = 'polo_mem_pause_mb';
+const MEM_PAUSE_MB_DEFAULT = 1500;
+const PUBLISH_MEM_RETRY_MS = 30000;
+let publishMemPaused = false;
+let publishMemTimer = null;
+
+async function getMemPauseThresholdMB() {
+    return new Promise((resolve) => {
+        chrome.storage.local.get(MEM_PAUSE_MB_KEY, (r) => {
+            const v = parseInt(r[MEM_PAUSE_MB_KEY], 10);
+            resolve(Number.isInteger(v) && v >= 200 ? v : MEM_PAUSE_MB_DEFAULT);
+        });
+    });
+}
+
+// 返回 { ok:true } 或 { ok:false, availableMB, threshold }；无权限 / 查询失败一律放行
+async function checkMemoryForPublish() {
+    if (!chrome.system || !chrome.system.memory) return { ok: true };
+    const threshold = await getMemPauseThresholdMB();
+    const info = await new Promise((resolve) => {
+        try { chrome.system.memory.getInfo((i) => resolve(i || null)); }
+        catch (e) { resolve(null); }
+    });
+    if (!info) return { ok: true };
+    const availableMB = Math.round(info.availableCapacity / 1048576);
+    return { ok: availableMB >= threshold, availableMB, threshold };
+}
+
+function clearPublishMemTimer() {
+    try { if (chrome.alarms) chrome.alarms.clear('publishMemRetry'); } catch (_) {}
+    if (publishMemTimer) { clearTimeout(publishMemTimer); publishMemTimer = null; }
+}
+
+// 用 alarms 而非 setTimeout：MV3 SW 会被回收，setTimeout 随之丢失导致队列永久卡住；
+// alarm 能唤醒被回收的 SW（无 alarms 权限时退回 setTimeout 兜底）
+function schedulePublishMemRetry() {
+    clearPublishMemTimer();
+    try {
+        if (chrome.alarms) {
+            chrome.alarms.create('publishMemRetry', { delayInMinutes: 0.5 }); // 30 秒后重试
+            return;
+        }
+    } catch (e) {
+        console.warn('创建内存重试 alarm 失败，退回 setTimeout:', e.message);
+    }
+    publishMemTimer = setTimeout(() => {
+        publishMemTimer = null;
+        processPublishQueue();
+    }, PUBLISH_MEM_RETRY_MS);
+}
+
+// 内存恢复后自动续跑发品队列（alarm 可唤醒被回收的 SW）
+if (chrome.alarms && chrome.alarms.onAlarm) {
+    chrome.alarms.onAlarm.addListener((alarm) => {
+        if (alarm && alarm.name === 'publishMemRetry') {
+            processPublishQueue();
+        }
+    });
+}
+
+// 通知「发品助手」页（沿用 notifyColorTaskComplete 的三级通道）
+function notifyPublishMemory(action, payload) {
+    const msg = { action, ...payload };
+    if (assistantPort) {
+        try { assistantPort.postMessage(msg); return; } catch (_) { assistantPort = null; }
+    }
+    if (assistantTabId) {
+        chrome.tabs.sendMessage(assistantTabId, msg).catch(() => {});
+    }
+    try { chrome.runtime.sendMessage(EXTENSION_ID, msg, () => void chrome.runtime.lastError); } catch (_) {}
+}
+
 async function processPublishQueue() {
     await ensureConfigLoaded();
     if (isProcessingQueue || publishQueue.length === 0) return;
+
+    // 内存水位闸门：不足则暂停队列（不 shift，队列已持久化在 storage，内存恢复后自动续跑）
+    const mem = await checkMemoryForPublish();
+    if (!mem.ok) {
+        publishMemPaused = true;
+        console.warn(`⏸ 可用内存 ${mem.availableMB}MB < ${mem.threshold}MB，发品队列已暂停（剩 ${publishQueue.length} 款）`);
+        notifyPublishMemory('publishMemoryPaused', { availableMB: mem.availableMB, threshold: mem.threshold, remaining: publishQueue.length });
+        schedulePublishMemRetry();
+        return;
+    }
+    if (publishMemPaused) {
+        publishMemPaused = false;
+        clearPublishMemTimer();
+        console.log('▶ 内存已恢复，发品队列继续');
+        notifyPublishMemory('publishMemoryResumed', { remaining: publishQueue.length });
+    }
+
     isProcessingQueue = true;
     
     const rowNum = publishQueue[0];
@@ -758,6 +848,19 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
                     availableCapacity: info.availableCapacity,
                     availableMB: Math.round(info.availableCapacity / 1048576)
                 });
+            });
+            return true;
+        }
+        // 阈值同步：页面把它的阈值写进扩展 storage，供上品队列闸门读取
+        if (request.action === 'setMemPauseMB') {
+            const n = parseInt(request.value, 10);
+            if (!Number.isInteger(n) || n < 200) {
+                sendResponse({ ok: false, error: '阈值需为 ≥200 的整数' });
+                return true;
+            }
+            chrome.storage.local.set({ [MEM_PAUSE_MB_KEY]: n }, () => {
+                console.log(`💾 内存暂停阈值已同步到扩展: ${n} MB`);
+                sendResponse({ ok: true, value: n });
             });
             return true;
         }

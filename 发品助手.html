@@ -3273,12 +3273,19 @@ function checkExtension() {
             }
             extensionInstalled = true;
             updateExtensionStatus();
+            syncMemPauseMBToExtension();
             try {
                 if (!extensionPort) {
                     extensionPort = chrome.runtime.connect(EXTENSION_ID, { name: 'assistant-channel' });
                     extensionPort.onMessage.addListener((msg) => {
                         if (msg.action === 'colorTaskComplete') {
                             handleColorTaskComplete(msg);
+                        }
+                        if (msg.action === 'publishMemoryPaused') {
+                            handlePublishMemoryPaused(msg);
+                        }
+                        if (msg.action === 'publishMemoryResumed') {
+                            handlePublishMemoryResumed(msg);
                         }
                     });
                     extensionPort.onDisconnect.addListener(() => {
@@ -3332,6 +3339,16 @@ function setupPsEditMessageListener() {
                     sendResponse({ ok: true });
                     return true;
                 }
+                if (request.action === 'publishMemoryPaused') {
+                    handlePublishMemoryPaused(request);
+                    sendResponse({ ok: true });
+                    return true;
+                }
+                if (request.action === 'publishMemoryResumed') {
+                    handlePublishMemoryResumed(request);
+                    sendResponse({ ok: true });
+                    return true;
+                }
             });
         }
         if (chrome.runtime && chrome.runtime.onMessage) {
@@ -3348,6 +3365,21 @@ function setupPsEditMessageListener() {
     } catch (e) {
         console.warn('设置消息监听失败:', e);
     }
+}
+
+// ===== 上品队列内存暂停 / 恢复（闸门在扩展侧，这里只做可见反馈）=====
+function handlePublishMemoryPaused(req) {
+    const avail = (req && req.availableMB !== undefined) ? req.availableMB : '?';
+    const th = (req && req.threshold !== undefined) ? req.threshold : getMemPauseMB();
+    const remain = (req && req.remaining !== undefined) ? req.remaining : '?';
+    console.warn(`⏸ 上品队列已暂停：可用内存 ${avail}MB < ${th}MB，剩 ${remain} 款`);
+    showToast(`⏸ 上品已暂停（内存不足：可用 ${avail}MB < ${th}MB），剩 ${remain} 款。内存恢复后自动继续`);
+}
+
+function handlePublishMemoryResumed(req) {
+    const remain = (req && req.remaining !== undefined) ? req.remaining : '?';
+    console.log(`▶ 内存已恢复，上品队列继续，剩 ${remain} 款`);
+    showToast(`▶ 内存已恢复，上品继续发（剩 ${remain} 款）`);
 }
 
 function handlePsEditComplete(request) {
@@ -3946,7 +3978,19 @@ function getMemPauseMB() {
 
 function setMemPauseMB(v) {
     const n = parseInt(v, 10);
-    if (Number.isInteger(n) && n >= 200) localStorage.setItem(MEM_PAUSE_KEY, String(n));
+    if (!Number.isInteger(n) || n < 200) return;
+    localStorage.setItem(MEM_PAUSE_KEY, String(n));
+    syncMemPauseMBToExtension(n);
+}
+
+// 同步阈值到扩展（上品队列的闸门读的是扩展 chrome.storage.local，与页面 localStorage 是两套）
+function syncMemPauseMBToExtension(v) {
+    const n = Number.isInteger(v) ? v : getMemPauseMB();
+    try {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'setMemPauseMB', value: n }, () => {
+            void chrome.runtime.lastError;
+        });
+    } catch (_) {}
 }
 
 // 查询整机可用内存（走扩展 system.memory）；失败/超时返回 null，调用方放行不阻塞
