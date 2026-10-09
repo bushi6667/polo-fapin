@@ -3525,13 +3525,17 @@ function renderPublishState(s) {
 
     const pauseEl = publishPauseEl();
     if (pauseEl) {
-        if (paused && s.pauseDetail) { pauseEl.style.display = 'block'; pauseEl.textContent = '⏸ ' + s.pauseDetail; }
+        const parts = [];
+        if (paused && s.pauseDetail) parts.push('⏸ ' + s.pauseDetail);
+        if (paused && s.resourceBlockDetail && s.resourceBlockDetail !== s.pauseDetail) parts.push('⛔ ' + s.resourceBlockDetail);
+        if (paused && s.rowRetryable) parts.push(`↻ 第 ${s.currentRow} 行可重试（已重试 ${s.rowRetries || 0} 次）`);
+        if (parts.length) { pauseEl.style.display = 'block'; pauseEl.textContent = parts.join('\n'); }
         else { pauseEl.style.display = 'none'; }
     }
 
-    // 当前行处于"页面已失效"的暂停态时，「继续」只会空等 → 禁用并引导用重试/跳过
-    const needExplicit = paused && s.currentRow !== null &&
-        ['tabClosed', 'rowTimeout', 'openFail'].indexOf(s.pauseReason) >= 0;
+    // 当前行处于"已失效"状态时（rowRetryable 由扩展的行失效状态决定，与资源暂停原因分开），
+    // 「继续」只会空等 → 禁用并引导用重试/跳过
+    const needExplicit = paused && s.rowRetryable === true;
     const btn = publishToggleEl();
     if (btn) {
         btn.style.display = idle ? 'none' : 'inline-block';

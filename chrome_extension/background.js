@@ -208,9 +208,26 @@ function beginPublishRunIntent() {
     return publishRunEpoch;
 }
 
+// 该操作/请求开始后是否收到了"新的停止"（epoch 只增不减）
+// epochRef 应是【用户请求被接收时】捕获的代次，而不是取得锁之后的代次
+function publishStoppedSince(epochRef) {
+    return publishStopEpoch !== epochRef;
+}
+
+// 通过合法性检查后调用：解除"本请求开始前"的旧停止。
+// epochRef 必须仍等于当前代次（等待锁/异步期间没有新的停止），否则不动任何状态。
+function beginPublishRunIntentFrom(epochRef) {
+    if (publishStopEpoch !== epochRef) return false;
+    publishStopRequested = false;
+    publishRunEpoch = epochRef;
+    return true;
+}
+
 // 最终开页前确认：是否已被停止（含操作开始后新到达的停止）
-function publishStopBlocked() {
-    return publishStopRequested || publishStopEpoch !== publishRunEpoch;
+function publishStopBlocked(epochRef) {
+    if (publishStopRequested) return true;
+    if (epochRef === undefined || epochRef === null) return publishStopEpoch !== publishRunEpoch;
+    return publishStopEpoch !== epochRef;
 }
 
 // 单行重试上限（重试会重置批次计数，需另设上限防止无限开页）
@@ -472,6 +489,11 @@ async function buildPublishStatePayload() {
         savedCount,
         pauseReason: t ? t.pauseReason : '',
         pauseDetail: t ? t.pauseDetail : '',
+        // 行失效状态与资源暂停原因分开：界面按 rowRetryable 决定是否显示重试/跳过
+        currentRowFailure: t ? (t.currentRowFailure || '') : '',
+        rowRetryable: !!(t && t.currentRow !== null && rowFailureOf(t)),
+        rowRetries: t ? (t.currentRowRetries || 0) : 0,
+        resourceBlockDetail: t ? (t.resourceBlockDetail || '') : '',
         currentRow: t ? t.currentRow : null,
         pages,
         pageLimit: t ? t.pageLimit : settings.pageLimit
@@ -514,19 +536,62 @@ function pausePublishTask(reason, detail) {
     return withPublishLock(() => pausePublishTaskLocked(reason, detail));
 }
 
+// 当前行是否"已失效、可重试"。与资源暂停原因分开保存：
+//   currentRowFailure = rowTimeout/tabClosed/openFail（行本身失效，重试/继续的判断依据）
+//   pauseReason       = 最近一次暂停原因，可能是 memory/pageLimit/monitorFail 等资源原因
+// 资源保护不得清除"当前行可重试"这一事实。
+function rowFailureOf(t) {
+    if (!t || t.currentRow === null) return '';
+    if (t.currentRowFailure) return t.currentRowFailure;
+    return RETRYABLE_REASONS.indexOf(t.pauseReason) >= 0 ? t.pauseReason : '';
+}
+
+// 行失效导致的暂停：同时记录 currentRowFailure
+async function pauseForRowFailureLocked(reason, detail) {
+    const t = await loadPublishTask();
+    if (t && t.currentRow !== null) {
+        t.currentRowFailure = reason;
+        await savePublishTask(t);
+    }
+    await pausePublishTaskLocked(reason, detail);
+}
+
+// 资源导致的暂停：只更新资源原因，不动 currentRowFailure
+async function pauseForResourceLocked(reason, detail) {
+    const t = await loadPublishTask();
+    if (t) {
+        t.resourceBlockDetail = detail || '';
+        await savePublishTask(t);
+    }
+    await pausePublishTaskLocked(reason, detail);
+}
+
 async function resumePublishTask() {
+    // ① 在进入串行队列【之前】捕获停止代次：等待锁也是本次操作等待的一部分
+    const epochAtRequest = publishStopEpoch;
     return withPublishLock(async () => {
-    beginPublishRunIntent();   // 用户明确的继续意图：清掉"开始前"的旧停止，记录代次
+    // ② 等待锁期间收到更晚的停止 → 拒绝，且绝不清除它
+    if (publishStoppedSince(epochAtRequest)) {
+        notifyAssistant('publishResumeRejected', { message: '排队期间收到停止请求，未继续' });
+        return { ok: false, message: '排队期间收到停止请求，未继续' };
+    }
     const t = await loadPublishTask();
     if (!t) { notifyAssistant('publishResumeRejected', { message: '没有可继续的发品任务' }); return { ok: false, message: '没有可继续的发品任务' }; }
     if (t.state === 'running') { notifyAssistant('publishResumeRejected', { message: '任务正在运行中' }); return { ok: false, message: '任务正在运行中' }; }
     if (t.remaining.length === 0) { notifyAssistant('publishResumeRejected', { message: '队列已空' }); return { ok: false, message: '队列已空' }; }
 
-    // 当前行处于"页面已失效"的暂停态：不能靠"继续"空等，必须走明确的重试/跳过
-    if (t.currentRow !== null && RETRYABLE_REASONS.indexOf(t.pauseReason) >= 0) {
-        const msg = `第 ${t.currentRow} 行需要明确处理：请点「↻ 重试当前行」重开该页，或「⏭ 跳过当前行」`;
+    // 当前行处于"已失效"状态：不能靠"继续"空等，必须走明确的重试/跳过
+    const rowFailR = rowFailureOf(t);
+    if (t.currentRow !== null && rowFailR) {
+        const msg = `第 ${t.currentRow} 行需要明确处理（${rowFailR}）：请点「↻ 重试当前行」重开该页，或「⏭ 跳过当前行」`;
         notifyAssistant('publishResumeRejected', { message: msg });
         return { ok: false, message: msg };
+    }
+
+    // ③ 合法性检查全部通过 → 才允许解除"本请求开始前"的旧停止
+    if (!beginPublishRunIntentFrom(epochAtRequest)) {
+        notifyAssistant('publishResumeRejected', { message: '排队期间收到停止请求，未继续' });
+        return { ok: false, message: '排队期间收到停止请求，未继续' };
     }
 
     // 继续前强制刷新采样：不能用失败/过期缓存先检查
@@ -534,7 +599,7 @@ async function resumePublishTask() {
     const g = await checkPublishResources(true);
     if (!g.ok) {
         const detail = g.reasons.map(x => x.detail).join('；');
-        await pausePublishTaskLocked(g.reasons[0].reason, detail);
+        await pauseForResourceLocked(g.reasons[0].reason, detail);   // 只更新资源原因，不动行失效事实
         notifyAssistant('publishResumeRejected', { message: '资源条件不满足：' + detail });
         return { ok: false, message: '资源条件不满足：' + detail };
     }
@@ -553,8 +618,8 @@ async function resumePublishTask() {
     t.pageLimit = s.pageLimit;
     t.rowTimeoutMs = s.rowTimeoutMs;
 
-    // 设置读取期间若收到停止请求 → 保持暂停，不继续（不前功尽弃地清除新停止）
-    if (publishStopBlocked()) {
+    // 设置读取期间若收到停止请求 → 保持暂停，不继续（不覆盖本请求开始后新到达的停止）
+    if (publishStoppedSince(epochAtRequest)) {
         notifyAssistant('publishResumeRejected', { message: '已收到停止请求，未继续' });
         return { ok: false, message: '已收到停止请求，未继续' };
     }
@@ -582,8 +647,9 @@ async function resumePublishTask() {
 
 // ---------- 打开下一个标签（唯一开页入口） ----------
 // 紧邻 tabs.create 前做最终停止确认：尚未调用 tabs.create 时收到停止，一律不创建。
-async function openPublishTab(rowNum, taskId) {
-    if (publishStopBlocked()) {
+// epochRef：本次开页所属操作的停止代次（普通推进传 publishRunEpoch；继续/重试传请求时捕获的代次）
+async function openPublishTab(rowNum, taskId, epochRef) {
+    if (publishStopBlocked(epochRef)) {
         console.warn('⛔ 开页前确认到停止请求，未创建新页');
         return { blocked: true, reason: 'stopping' };
     }
@@ -607,7 +673,7 @@ async function publishTickOnce() {
         }
         // 当前行超时
         if (t.currentRow !== null && t.currentStartedAt && Date.now() - t.currentStartedAt > t.rowTimeoutMs) {
-            await pausePublishTaskLocked('rowTimeout', `第 ${t.currentRow} 行填写超时（>${Math.round(t.rowTimeoutMs / 60000)} 分钟）`);
+            await pauseForRowFailureLocked('rowTimeout', `第 ${t.currentRow} 行填写超时（>${Math.round(t.rowTimeoutMs / 60000)} 分钟）`);
             return;
         }
         // 当前标签是否被用户关闭
@@ -615,13 +681,13 @@ async function publishTickOnce() {
             try {
                 await chrome.tabs.get(t.currentTabId);
             } catch (_) {
-                await pausePublishTaskLocked('tabClosed', `第 ${t.currentRow} 行所在标签已被关闭，该行保留在队列`);
+                await pauseForRowFailureLocked('tabClosed', `第 ${t.currentRow} 行所在标签已被关闭，该行保留在队列`);
                 return;
             }
         }
         const g = await checkPublishResources();
         if (!g.ok) {
-            await pausePublishTaskLocked(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
+            await pauseForResourceLocked(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
         }
     });
 }
@@ -648,7 +714,9 @@ async function processPublishQueueLocked() {
     const pre = await canOpenPublishPage(t);
     if (!pre.ok) {
         if (pre.reason === 'stopping') await pausePublishTaskLocked('manual', pre.detail);
-        else await pausePublishTaskLocked(pre.reason, pre.detail);
+        else if (pre.reason === 'fileSwitch') await pausePublishTaskLocked('fileSwitch', pre.detail);
+        else if (pre.reason === 'notRunning' || pre.reason === 'busy' || pre.reason === 'noTask') return;
+        else await pauseForResourceLocked(pre.reason, pre.detail);
         return;
     }
     const g = pre.g;
@@ -665,7 +733,7 @@ async function processPublishQueueLocked() {
     const rowNum = t2.remaining[0];
     let tab;
     try {
-        tab = await openPublishTab(rowNum, t2.taskId);
+        tab = await openPublishTab(rowNum, t2.taskId, publishRunEpoch);
     } catch (e) {
         await pausePublishTaskLocked('openFail', `第 ${rowNum} 行开页失败：${e.message}`);
         return;
@@ -680,6 +748,7 @@ async function processPublishQueueLocked() {
     t2.currentTabId = tab.id;
     t2.currentStartedAt = Date.now();
     t2.currentRowRetries = 0;
+    t2.currentRowFailure = '';
     t2.batchFilled = (t2.batchFilled || 0) + 1;
 
     if (publishStopBlocked()) {
@@ -741,6 +810,8 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
         t.currentTabId = null;
         t.currentStartedAt = 0;
         t.currentRowRetries = 0;   // 该行已入账，重试计数归零
+        t.currentRowFailure = '';  // 行已成功填写，失效状态清除
+        t.resourceBlockDetail = '';
         await savePublishTask(t);
         await appendPublishLog({ level: 'filled', row, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilledDone, paused: wasPaused });
 
@@ -771,34 +842,48 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
 //       不再受"本批已开数"上限阻挡（否则每批最后一款失败后无法恢复）。
 //       仍受 页面总量 / 内存 / 文件 / 停止 闸门限制，另有单行重试上限防无限开页。
 async function retryPublishRow() {
+    // ① 进入串行队列【之前】捕获停止代次
+    const epochAtRequest = publishStopEpoch;
     return withPublishLock(async () => {
-        beginPublishRunIntent();   // 用户明确的重试意图：清掉"开始前"的旧停止，记录代次
+        // ② 等待锁期间收到更晚的停止 → 拒绝，不清除
+        if (publishStoppedSince(epochAtRequest)) {
+            return { ok: false, message: '排队期间收到停止请求，未重试' };
+        }
         const t = await loadPublishTask();
         if (!t) return { ok: false, message: '没有发品任务' };
         if (t.state === 'running') return { ok: false, message: '任务正在运行，不能重试' };
         if (t.state !== 'paused') return { ok: false, message: '当前状态不可重试' };
-        if (RETRYABLE_REASONS.indexOf(t.pauseReason) < 0) {
-            return { ok: false, message: `当前暂停原因（${t.pauseReason || '未知'}）不支持重试；请用「继续下一批」或「跳过当前行」` };
-        }
         if (t.currentRow === null) return { ok: false, message: '当前没有待重试的行' };
+
+        // 合法性依据【行失效状态】，而不是最近一次暂停原因（资源暂停不得抹掉行可重试的事实）
+        const rowFail = rowFailureOf(t);
+        if (!rowFail) {
+            return { ok: false, message: `当前行没有可重试的失效状态（暂停原因：${t.pauseReason || '无'}）；请用「继续下一批」` };
+        }
         if ((t.currentRowRetries || 0) >= PUBLISH_ROW_RETRY_MAX) {
             return { ok: false, message: `该行已重试 ${t.currentRowRetries} 次达上限，请「跳过当前行」或检查页面` };
         }
 
-        // 重试 = 该异常行进入下一批：先重置下一批计数，再开页
-        t.batchFilled = 0;
-        t.batchFilledDone = 0;
+        // ③ 合法性检查通过 → 才解除"本请求开始前"的旧停止
+        if (!beginPublishRunIntentFrom(epochAtRequest)) {
+            return { ok: false, message: '排队期间收到停止请求，未重试' };
+        }
 
         const pre = await canOpenPublishPage(t, { allowPaused: true, allowCurrentRow: true });
         if (!pre.ok) {
-            if (pre.reason !== 'stopping') await pausePublishTaskLocked(pre.reason, pre.detail);
+            // 资源原因只更新资源信息，保留 currentRowFailure（资源恢复后仍可重试）
+            if (pre.reason !== 'stopping') await pauseForResourceLocked(pre.reason, pre.detail);
             return { ok: false, message: pre.detail };
         }
+
+        // 重试 = 该异常行进入下一批：资源检查通过后才重置下一批计数
+        t.batchFilled = 0;
+        t.batchFilledDone = 0;
 
         const row = t.currentRow;
         let tab;
         try {
-            tab = await openPublishTab(row, t.taskId);
+            tab = await openPublishTab(row, t.taskId, epochAtRequest);
         } catch (e) {
             return { ok: false, message: '重开失败：' + e.message };
         }
@@ -810,6 +895,8 @@ async function retryPublishRow() {
         t.currentTabId = tab.id;
         t.currentStartedAt = Date.now();
         t.currentRowRetries = (t.currentRowRetries || 0) + 1;
+        t.currentRowFailure = '';   // 已重开该行，失效状态清除
+        t.resourceBlockDetail = '';
         t.batchFilled = 1;   // 新批次：这一页计入新批次
 
         if (publishStopBlocked()) {
@@ -847,6 +934,8 @@ async function skipPublishRow() {
         t.currentTabId = null;
         t.currentStartedAt = 0;
         t.currentRowRetries = 0;   // 该行已跳过，重试计数归零
+        t.currentRowFailure = '';  // 行已被明确跳过，失效状态清除
+        t.resourceBlockDetail = '';
         t.state = t.remaining.length === 0 ? 'done' : 'running';
         t.pauseReason = '';
         t.pauseDetail = '';
@@ -886,7 +975,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     withPublishLock(async () => {
         const t = await loadPublishTask();
         if (!publishRunning(t) || t.currentTabId !== tabId) return;
-        await pausePublishTaskLocked('tabClosed', `第 ${t.currentRow} 行所在标签已被关闭，该行保留在队列`);
+        await pauseForRowFailureLocked('tabClosed', `第 ${t.currentRow} 行所在标签已被关闭，该行保留在队列`);
     });
 });
 
@@ -1318,6 +1407,8 @@ async function handleSharedAction(request, sendResponse) {
                 currentTabId: null,
                 currentStartedAt: 0,
                 currentRowRetries: 0,
+                currentRowFailure: '',
+                resourceBlockDetail: '',
                 startedAt: now
             };
             await savePublishTask(task);

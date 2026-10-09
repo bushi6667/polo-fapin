@@ -895,6 +895,143 @@ async function driveFills(env, maxFills) {
         const st = await env.sendExternal({ action: 'getPublishState' });
         ok(st.state === 'paused' && st.pauseReason === 'tabClosed', '仍保持 tabClosed');
     }
+    // ---------- 排队中的继续/重试 + 后到达的停止 ----------
+    console.log('\n【30】锁被占用 → 继续请求 → 停止请求 → 释放锁 → 不得开页');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [501, 502, 503] });
+        await tick(300);
+        const t0 = await env.run('loadPublishTask()');
+        await env.sendInternal({ action: 'publishFilled', row: 501, taskId: t0.taskId }, { tab: { id: t0.currentTabId }, frameId: 0 });
+        await tick(300);
+        await env.sendExternal({ action: 'pausePublishQueue' });
+        await tick(300);
+        const created = env.createdUrls.length;
+
+        // 占住互斥链
+        env.run('withPublishLock(() => new Promise(r => setTimeout(r, 500)))');
+        await tick(30);
+        const pResume = env.sendExternal({ action: 'resumePublishQueue' });   // 进入队列
+        await tick(30);
+        await env.sendExternal({ action: 'pausePublishQueue' });              // 排队期间新停止
+        const rs = await pResume;
+        await tick(400);
+        ok(rs && !rs.ok, `排队期间新停止 → 继续被拒（实际 ${JSON.stringify(rs)}）`);
+        ok(env.createdUrls.length === created, `未创建新页（实际新增 ${env.createdUrls.length - created}）`);
+        const st = await env.sendExternal({ action: 'getPublishState' });
+        ok(st.state === 'paused', '保持暂停');
+    }
+
+    console.log('\n【31】锁被占用 → 重试请求 → 停止请求 → 释放锁 → 不得开页');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 3 } });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [511, 512, 513] });
+        await tick(300);
+        const t0 = await env.run('loadPublishTask()');
+        for (const f of env.L.onRemoved) f(t0.currentTabId);   // 制造可重试态
+        await tick(300);
+        const created = env.createdUrls.length;
+
+        env.run('withPublishLock(() => new Promise(r => setTimeout(r, 500)))');
+        await tick(30);
+        const pRetry = env.sendExternal({ action: 'retryPublishRow' });
+        await tick(30);
+        await env.sendExternal({ action: 'pausePublishQueue' });
+        const rt = await pRetry;
+        await tick(400);
+        ok(rt && !rt.ok, `排队期间新停止 → 重试被拒（实际 ${JSON.stringify(rt)}）`);
+        ok(env.createdUrls.length === created, `未创建新页（实际新增 ${env.createdUrls.length - created}）`);
+    }
+
+    console.log('\n【32】停止在前、明确继续在后 → 允许正常恢复');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [521, 522, 523] });
+        await tick(300);
+        const t0 = await env.run('loadPublishTask()');
+        await env.sendInternal({ action: 'publishFilled', row: 521, taskId: t0.taskId }, { tab: { id: t0.currentTabId }, frameId: 0 });
+        await tick(300);
+        await env.sendExternal({ action: 'pausePublishQueue' });   // 停止在前
+        await tick(300);
+        const created = env.createdUrls.length;
+        const rs = await env.sendExternal({ action: 'resumePublishQueue' });  // 明确继续在后
+        await tick(400);
+        ok(rs && rs.ok, `旧停止可被明确继续解除（实际 ${JSON.stringify(rs)}）`);
+        const st = await env.sendExternal({ action: 'getPublishState' });
+        ok(st.state === 'running', '恢复到运行');
+    }
+
+    console.log('\n【33】无效继续/重试不得清除停止');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        // 没有任务 → 继续/重试均无效
+        await env.sendExternal({ action: 'pausePublishQueue' });
+        await tick(200);
+        const resumeNoTask = await env.sendExternal({ action: 'resumePublishQueue' });
+        ok(resumeNoTask && !resumeNoTask.ok, '无任务时继续被拒');
+        const retryNoTask = await env.sendExternal({ action: 'retryPublishRow' });
+        ok(retryNoTask && !retryNoTask.ok, '无任务时重试被拒');
+        // 内部状态：停止仍生效（用后续合法开页验证）
+        await env.sendExternal({ action: 'openBatchPublish', rows: [531] });
+        await tick(400);
+        const st = await env.sendExternal({ action: 'getPublishState' });
+        ok(st.state === 'running' && env.createdUrls.length === 1, '明确的新建任务可正常开页（旧停止被新意图解除）');
+    }
+
+    console.log('\n【34】重试被资源拒绝 → 保留行失效事实 → 资源恢复后可重试');
+    {
+        // 提交余量 120MiB：资源被拒
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 120 });
+        await env.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 3 } });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [541, 542, 543] });
+        await tick(400);
+        // 资源不足 → 可能一开始就没开页；构造一个"行已失效"的任务状态
+        env.store['polo_publish_task'] = {
+            taskId: 'pt_manual_fail', fileKey: '', total: 3, remaining: [541, 542, 543],
+            filledCount: 0, filledRows: [], batchSize: 3, batchFilled: 1, batchFilledDone: 0,
+            pageLimit: 60, rowTimeoutMs: 600000, state: 'paused',
+            pauseReason: 'rowTimeout', pauseDetail: '第 541 行填写超时',
+            currentRow: 541, currentTabId: 999, currentStartedAt: Date.now() - 700000,
+            currentRowRetries: 0, currentRowFailure: 'rowTimeout', resourceBlockDetail: '',
+            skippedRows: [], startedAt: Date.now()
+        };
+        const created0 = env.createdUrls.length;
+        const rt1 = await env.sendExternal({ action: 'retryPublishRow' });
+        await tick(300);
+        ok(rt1 && !rt1.ok, `资源不足时重试被拒（实际 ${JSON.stringify(rt1)}）`);
+        const st1 = await env.sendExternal({ action: 'getPublishState' });
+        ok(st1.rowRetryable === true, `行失效事实被保留（rowRetryable=${st1.rowRetryable}）`);
+        ok(st1.currentRowFailure === 'rowTimeout', `currentRowFailure 仍为 rowTimeout（实际 ${st1.currentRowFailure}）`);
+        ok(env.createdUrls.length === created0, '未开页');
+
+        // 资源恢复 → 重试成功
+        const env2 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        env2.store['polo_publish_task'] = JSON.parse(JSON.stringify(env.store['polo_publish_task']));
+        env2.tabs.push({ id: 999, url: 'https://post.alibaba.com/product/publish?row=541&task=pt_manual_fail' });
+        // 让新上下文能读到该任务：重新载入源码（等同后台重启）
+        const env3 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, initialStore: { 'polo_publish_task': JSON.parse(JSON.stringify(env.store['polo_publish_task'])) } });
+        const rt2 = await env3.sendExternal({ action: 'resumePublishQueue' });
+        await tick(300);
+        ok(rt2 && !rt2.ok, `失效行时「继续」被拒并指引重试（实际 ${JSON.stringify(rt2)}）`);
+        const rt3 = await env3.sendExternal({ action: 'retryPublishRow' });
+        await tick(300);
+        ok(rt3 && rt3.ok, `资源恢复后可重试原行（实际 ${JSON.stringify(rt3)}）`);
+        ok(env3.createdUrls.length === 1, '重试开了一页');
+        const st3 = await env3.sendExternal({ action: 'getPublishState' });
+        ok(st3.currentRowFailure === '', `失效状态已清除（实际 "${st3.currentRowFailure}"）`);
+        ok(st3.rowRetries === 1, `重试次数只在实际开页后增加（实际 ${st3.rowRetries}）`);
+
+        // 60 页上限拒绝后仍可重试
+        const env4 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, initialStore: { 'polo_publish_task': JSON.parse(JSON.stringify(env.store['polo_publish_task'])) } });
+        for (let i = 0; i < 60; i++) env4.tabs.push({ id: 9000 + i, url: 'https://post.alibaba.com/product/publish?row=' + (500 + i) });
+        const rt4 = await env4.sendExternal({ action: 'retryPublishRow' });
+        await tick(300);
+        ok(rt4 && !rt4.ok, `60 页上限时重试被拒（实际 ${JSON.stringify(rt4)}）`);
+        const st4 = await env4.sendExternal({ action: 'getPublishState' });
+        ok(st4.rowRetryable === true, '60 页拒绝后行失效事实仍保留');
+    }
+    // ---------- 汇总 ----------
     console.log('\n' + '='.repeat(50));
     console.log(`通过: ${pass}   失败: ${fail}`);
     if (failures.length) { console.log('失败项:'); failures.forEach(f => console.log('  - ' + f)); }
