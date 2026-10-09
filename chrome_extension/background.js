@@ -148,13 +148,6 @@ async function getDoubaoTabId() {
     });
 }
 
-async function openPublishTab(rowNum) {
-    const baseUrl = 'https://post.alibaba.com/product/easyListing.htm?spm=a2700.micro_product_manager.0.0.40e03e5fPaTwSu';
-    const url = baseUrl + '&row=' + rowNum;
-    await chrome.tabs.create({ url });
-    console.log(`🆕 已打开第${rowNum}行产品发品页面`);
-}
-
 // ============================================================
 // 发品任务：分批预填 + 资源闸门 + 停止/继续
 // 真相源一律在 chrome.storage.local，不依赖会随 MV3 休眠消失的内存变量
@@ -182,6 +175,18 @@ const PUBLISH_DEFAULTS = {
 let publishTickTimer = null;
 let memSampleCache = { at: 0, value: null };
 
+// ---------- 异步互斥：所有任务状态变更串行执行（持久化 ≠ 互斥） ----------
+// 重复完成消息并发到达时，只有第一个能推进；后续在锁内重读状态后会被拒绝。
+let publishOpChain = Promise.resolve();
+function withPublishLock(fn) {
+    const run = publishOpChain.then(fn, fn);
+    publishOpChain = run.then(() => {}, () => {});
+    return run;
+}
+
+// 巡检用 alarm（可唤醒被 MV3 回收的后台）；setInterval 只作同进程加速
+const PUBLISH_TICK_ALARM = 'publishTick';
+
 // ---------- 设置（持久化 + 边界收敛） ----------
 async function getPublishSettings() {
     return new Promise((resolve) => {
@@ -195,7 +200,8 @@ async function setPublishSettings(patch) {
     const cur = await getPublishSettings();
     const next = { ...cur, ...patch };
     next.batchSize = Math.min(60, Math.max(1, parseInt(next.batchSize, 10) || PUBLISH_DEFAULTS.batchSize));
-    next.pageLimit = Math.min(200, Math.max(1, parseInt(next.pageLimit, 10) || PUBLISH_DEFAULTS.pageLimit));
+    // 页面上限安全边界固定为 60，不允许调高
+    next.pageLimit = Math.min(60, Math.max(1, parseInt(next.pageLimit, 10) || PUBLISH_DEFAULTS.pageLimit));
     next.rowTimeoutMs = Math.max(60000, parseInt(next.rowTimeoutMs, 10) || PUBLISH_DEFAULTS.rowTimeoutMs);
     await new Promise(r => chrome.storage.local.set({ [PUBLISH_SETTINGS_KEY]: next }, r));
     return next;
@@ -247,9 +253,9 @@ async function countTargetTabs() {
 }
 
 // ---------- 内存采样：物理（system.memory）+ 提交额度（本地端点） ----------
-async function sampleMemory() {
+async function sampleMemory(forceRefresh) {
     const now = Date.now();
-    if (memSampleCache.value && now - memSampleCache.at < MEM_SAMPLE_CACHE_MS) return memSampleCache.value;
+    if (!forceRefresh && memSampleCache.value && now - memSampleCache.at < MEM_SAMPLE_CACHE_MS) return memSampleCache.value;
 
     const out = {
         physAvailableMB: null, physError: '',
@@ -257,32 +263,47 @@ async function sampleMemory() {
         sampledAt: now
     };
 
+    // 物理内存：system.memory 回调整体限时（3 秒），防回调挂起
     if (chrome.system && chrome.system.memory) {
         try {
-            const info = await new Promise((resolve) => chrome.system.memory.getInfo((i) => resolve(i || null)));
-            if (info && typeof info.availableCapacity === 'number') {
+            const info = await Promise.race([
+                new Promise((resolve) => chrome.system.memory.getInfo((i) => resolve(i || null))),
+                new Promise((resolve) => setTimeout(() => resolve(null), 3000))
+            ]);
+            if (info && typeof info.availableCapacity === 'number' && Number.isFinite(info.availableCapacity) && info.availableCapacity >= 0) {
                 out.physAvailableMB = Math.round(info.availableCapacity / 1048576);
             } else {
-                out.physError = 'system.memory 返回空';
+                out.physError = 'system.memory 返回空或非法值';
             }
         } catch (e) { out.physError = 'system.memory 异常: ' + e.message; }
     } else {
         out.physError = '缺少 system.memory 权限（需在 chrome://extensions 重新加载扩展）';
     }
 
+    // 提交额度（本地只读端点）：超时覆盖到响应体读取完成
     try {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 3000);
         const resp = await fetch(MEM_ENDPOINT, { method: 'GET', signal: ctrl.signal, cache: 'no-store' });
-        clearTimeout(timer);
+        let j = null;
+        try {
+            j = await resp.json();
+        } finally {
+            clearTimeout(timer);
+        }
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const j = await resp.json();
-        if (typeof j.committedBytes === 'number' && typeof j.commitLimitBytes === 'number' && j.commitLimitBytes > 0) {
-            out.commitFreeMB = Math.round((j.commitLimitBytes - j.committedBytes) / 1048576);
-            out.commitLimitMB = Math.round(j.commitLimitBytes / 1048576);
-            out.commitUsedPct = Math.round((j.committedBytes / j.commitLimitBytes) * 1000) / 10;
+        const cb = Number(j && j.committedBytes);
+        const cl = Number(j && j.commitLimitBytes);
+        const sampledAt = Number(j && j.sampledAt) || 0;
+        if (!Number.isFinite(cb) || !Number.isFinite(cl) || cb < 0 || cl <= 0 || cb > cl) {
+            out.commitError = '端点返回数值非法（committed/limit）';
+        } else if (!sampledAt || Date.now() - sampledAt > MEM_SAMPLE_CACHE_MS + 5000) {
+            out.commitError = '端点采样时间过期';
         } else {
-            out.commitError = '端点返回缺少 committedBytes/commitLimitBytes';
+            out.commitFreeMB = Math.round((cl - cb) / 1048576);
+            out.commitLimitMB = Math.round(cl / 1048576);
+            out.commitUsedPct = Math.round((cb / cl) * 1000) / 10;
+            out.sampledAt = sampledAt;
         }
     } catch (e) {
         out.commitError = (e.name === 'AbortError' ? '本地内存服务超时' : '本地内存服务不可用: ' + e.message);
@@ -293,10 +314,10 @@ async function sampleMemory() {
 }
 
 // ---------- 资源闸门：任一条件满足即暂停；监测失败一律暂停（禁止静默放行） ----------
-async function checkPublishResources() {
+async function checkPublishResources(forceRefresh) {
     const settings = await getPublishSettings();
     const threshold = await getMemPauseThresholdMB();
-    const mem = await sampleMemory();
+    const mem = await sampleMemory(forceRefresh);
     const pages = await countTargetTabs();
     const r = [];
 
@@ -320,9 +341,19 @@ async function checkPublishResources() {
     return { ok: r.length === 0, reasons: r, mem, pages, settings, threshold };
 }
 
-function clearPublishMemTimer() {
-    // 不再使用 alarms 重试：按实施要求，暂停后不自动恢复开页，必须用户主动「继续」
+function stopPublishTick() {
+    try { if (chrome.alarms) chrome.alarms.clear(PUBLISH_TICK_ALARM); } catch (_) {}
     if (publishTickTimer) { clearInterval(publishTickTimer); publishTickTimer = null; }
+}
+
+// 巡检保活：alarm 可唤醒被 MV3 回收的后台；setInterval 仅作同进程加速
+function ensurePublishTick() {
+    try {
+        if (chrome.alarms) chrome.alarms.create(PUBLISH_TICK_ALARM, { periodInMinutes: 0.5 }); // 30 秒
+    } catch (_) {}
+    if (!publishTickTimer) {
+        publishTickTimer = setInterval(() => { publishTickOnce(); }, PUBLISH_TICK_MS);
+    }
 }
 
 // 通知「发品助手」页（沿用 notifyColorTaskComplete 的三级通道）
@@ -343,17 +374,23 @@ function publishRunning(t) { return !!t && t.state === 'running'; }
 async function buildPublishStatePayload() {
     const t = await loadPublishTask();
     const pages = await countTargetTabs();
-    const savedCount = await getVerifiedSavedCount();
+    // 已核实保存记录按文件隔离；本任务待保存数 = 本任务已填完且未核实保存的行
+    const fileKey = (t && t.fileKey) || getFilePrefix();
+    const savedMap = await getVerifiedSavedMap(fileKey);
+    const savedCount = Object.keys(savedMap).length;
+    const filledRows = (t && Array.isArray(t.filledRows)) ? t.filledRows : [];
+    const pendingSaveCount = filledRows.filter(r => !savedMap[r]).length;
     return {
         ok: true,
         state: t ? t.state : 'idle',
         taskId: t ? t.taskId : null,
         batchSize: t ? t.batchSize : PUBLISH_DEFAULTS.batchSize,
-        batchFilled: t ? t.batchFilled : 0,
+        batchOpened: t ? (t.batchFilled || 0) : 0,     // 本批已开页数
+        batchFilled: t ? (t.batchFilledDone || 0) : 0, // 本批已填完数
         filledCount: t ? t.filledCount : 0,
         total: t ? t.total : 0,
         remaining: t ? t.remaining.length : 0,
-        pendingSaveCount: t ? Math.max(0, t.filledCount - savedCount) : 0,
+        pendingSaveCount,
         savedCount,
         pauseReason: t ? t.pauseReason : '',
         pauseDetail: t ? t.pauseDetail : '',
@@ -368,14 +405,16 @@ async function broadcastPublishState(extra) {
     notifyAssistant('publishState', { ...payload, ...(extra || {}) });
 }
 
-async function getVerifiedSavedCount() {
+// 已核实保存记录：按文件隔离 { [fileKey]: { row: {...} } }
+async function getVerifiedSavedMap(fileKey) {
     const r = await new Promise(res => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, res));
-    const m = r[PUBLISH_VERIFIED_SAVED_KEY];
-    return m && typeof m === 'object' ? Object.keys(m).length : 0;
+    const all = r[PUBLISH_VERIFIED_SAVED_KEY] || {};
+    return (fileKey && all[fileKey]) || {};
 }
 
 // ---------- 暂停 / 继续 ----------
-async function pausePublishTask(reason, detail) {
+// 内部实现：假定调用方已持锁（withPublishLock）
+async function pausePublishTaskLocked(reason, detail) {
     const t = await loadPublishTask();
     if (!t || t.state === 'done') return;
     const first = t.state !== 'paused' || t.pauseReason !== reason;
@@ -383,7 +422,7 @@ async function pausePublishTask(reason, detail) {
     t.pauseReason = reason;
     t.pauseDetail = detail || '';
     await savePublishTask(t);
-    clearPublishMemTimer();
+    stopPublishTick();
     console.warn(`⏸ 发品任务已暂停 [${reason}] ${detail || ''}（剩 ${t.remaining.length} 款）`);
     if (first) {
         await appendPublishLog({ level: 'pause', reason, detail, row: t.currentRow, pages: await countTargetTabs() });
@@ -391,16 +430,23 @@ async function pausePublishTask(reason, detail) {
     }
 }
 
+function pausePublishTask(reason, detail) {
+    return withPublishLock(() => pausePublishTaskLocked(reason, detail));
+}
+
 async function resumePublishTask() {
+    return withPublishLock(async () => {
     const t = await loadPublishTask();
     if (!t) { notifyAssistant('publishResumeRejected', { message: '没有可继续的发品任务' }); return { ok: false, message: '没有可继续的发品任务' }; }
     if (t.state === 'running') { notifyAssistant('publishResumeRejected', { message: '任务正在运行中' }); return { ok: false, message: '任务正在运行中' }; }
     if (t.remaining.length === 0) { notifyAssistant('publishResumeRejected', { message: '队列已空' }); return { ok: false, message: '队列已空' }; }
 
-    const g = await checkPublishResources();
+    // 继续前强制刷新采样：不能用失败/过期缓存先检查
+    memSampleCache = { at: 0, value: null };
+    const g = await checkPublishResources(true);
     if (!g.ok) {
         const detail = g.reasons.map(x => x.detail).join('；');
-        await pausePublishTask(g.reasons[0].reason, detail);
+        await pausePublishTaskLocked(g.reasons[0].reason, detail);
         notifyAssistant('publishResumeRejected', { message: '资源条件不满足：' + detail });
         return { ok: false, message: '资源条件不满足：' + detail };
     }
@@ -408,14 +454,22 @@ async function resumePublishTask() {
     t.state = 'running';
     t.pauseReason = '';
     t.pauseDetail = '';
-    t.batchFilled = 0; // 用户主动继续 → 重置批次计数
+    // 当前仍有在填页面：只恢复等待该标签，不重置批次、不开新页
+    if (t.currentRow === null) {
+        t.batchFilled = 0;      // 新一批
+        t.batchFilledDone = 0;
+    }
     await savePublishTask(t);
     memSampleCache = { at: 0, value: null };
     await appendPublishLog({ level: 'resume', row: t.currentRow, pages: g.pages });
-    startPublishTick();
-    notifyAssistant('publishResumed', { remaining: t.remaining.length, batchSize: t.batchSize });
-    await processPublishQueue();
+    ensurePublishTick();
+    notifyAssistant('publishResumed', { remaining: t.remaining.length, batchSize: t.batchSize, waitingCurrent: t.currentRow !== null });
+    await broadcastPublishState();
+    if (t.currentRow === null) {
+        await processPublishQueueLocked();
+    }
     return { ok: true };
+    });
 }
 
 // ---------- 打开下一个标签（唯一开页入口） ----------
@@ -427,15 +481,20 @@ async function openPublishTab(rowNum, taskId) {
     return tab;
 }
 
-// ---------- 运行期巡检（≤30s，仅加速发现资源变化；真相源仍是 storage） ----------
-function startPublishTick() {
-    if (publishTickTimer) return;
-    publishTickTimer = setInterval(async () => {
+// ---------- 巡检体（幂等；锁内执行；唤醒后先校验，不直接开页） ----------
+async function publishTickOnce() {
+    return withPublishLock(async () => {
         const t = await loadPublishTask();
-        if (!publishRunning(t)) { clearPublishMemTimer(); return; }
+        if (!publishRunning(t)) { stopPublishTick(); return; }
+
+        // 文件切换检查：任务绑定文件 ≠ 当前文件 → 暂停，防串数据
+        if (t.fileKey && t.fileKey !== getFilePrefix()) {
+            await pausePublishTaskLocked('fileSwitch', `当前文件已切换（任务绑定 ${t.fileKey}），任务已暂停以防数据互串`);
+            return;
+        }
         // 当前行超时
         if (t.currentRow !== null && t.currentStartedAt && Date.now() - t.currentStartedAt > t.rowTimeoutMs) {
-            await pausePublishTask('rowTimeout', `第 ${t.currentRow} 行填写超时（>${Math.round(t.rowTimeoutMs / 60000)} 分钟）`);
+            await pausePublishTaskLocked('rowTimeout', `第 ${t.currentRow} 行填写超时（>${Math.round(t.rowTimeoutMs / 60000)} 分钟）`);
             return;
         }
         // 当前标签是否被用户关闭
@@ -443,99 +502,206 @@ function startPublishTick() {
             try {
                 await chrome.tabs.get(t.currentTabId);
             } catch (_) {
-                await pausePublishTask('tabClosed', `第 ${t.currentRow} 行所在标签已被关闭，该行保留在队列`);
+                await pausePublishTaskLocked('tabClosed', `第 ${t.currentRow} 行所在标签已被关闭，该行保留在队列`);
                 return;
             }
         }
         const g = await checkPublishResources();
         if (!g.ok) {
-            await pausePublishTask(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
+            await pausePublishTaskLocked(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
         }
-    }, PUBLISH_TICK_MS);
+    });
 }
 
-// ---------- 队列推进：开下一个 ----------
-async function processPublishQueue() {
+// ---------- 队列推进（锁内实现；公开入口自动加锁） ----------
+async function processPublishQueueLocked() {
     const t = await loadPublishTask();
-    if (!t || !publishRunning(t) || t.remaining.length === 0) return;
+    if (!publishRunning(t) || t.remaining.length === 0) return;
+    // 已有在填页面：恢复等待该标签，绝不重复开页
+    if (t.currentRow !== null) return;
 
-    // 本批已达上限 → 暂停，等用户主动继续（不因关页/保存自动继续）
-    if (t.batchFilled >= t.batchSize) {
-        await pausePublishTask('batch', `本批预填 ${t.batchFilled}/${t.batchSize} 已达上限，剩 ${t.remaining.length} 款；处理完已开页面后点「继续下一批」`);
+    // 本批已开页数达上限 → 暂停，等用户主动继续（不因关页/保存自动继续）
+    if ((t.batchFilled || 0) >= t.batchSize) {
+        await pausePublishTaskLocked('batch', `本批已开 ${t.batchFilled}/${t.batchSize} 页达上限，剩 ${t.remaining.length} 款；处理完已开页面后点「继续下一批」`);
         return;
     }
 
-    // 资源闸门（开页前必查）
     const g = await checkPublishResources();
     if (!g.ok) {
-        await pausePublishTask(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
+        await pausePublishTaskLocked(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
         return;
     }
 
-    const rowNum = t.remaining[0];
+    // 开页前重读状态：停止若在资源检查期间到达，不得用旧 running 快照开页
+    const t2 = await loadPublishTask();
+    if (!publishRunning(t2) || t2.currentRow !== null) return;
+
+    const rowNum = t2.remaining[0];
     let tab;
     try {
-        tab = await openPublishTab(rowNum, t.taskId);
+        tab = await openPublishTab(rowNum, t2.taskId);
     } catch (e) {
-        await pausePublishTask('openFail', `第 ${rowNum} 行开页失败：${e.message}`);
+        await pausePublishTaskLocked('openFail', `第 ${rowNum} 行开页失败：${e.message}`);
         return;
     }
 
-    t.currentRow = rowNum;
-    t.currentTabId = tab.id;
-    t.currentStartedAt = Date.now();
-    t.batchFilled += 1;
-    await savePublishTask(t);
-    startPublishTick();
+    t2.currentRow = rowNum;
+    t2.currentTabId = tab.id;
+    t2.currentStartedAt = Date.now();
+    t2.batchFilled = (t2.batchFilled || 0) + 1;
+    await savePublishTask(t2);
+    ensurePublishTick();
 
     await appendPublishLog({
-        level: 'open', row: rowNum, tabId: tab.id, state: t.state,
-        batchFilled: t.batchFilled, filled: t.filledCount, remain: t.remaining.length,
+        level: 'open', row: rowNum, tabId: tab.id, state: t2.state,
+        batchOpened: t2.batchFilled, filled: t2.filledCount, remain: t2.remaining.length,
         pages: g.pages, physMB: g.mem.physAvailableMB, commitFreeMB: g.mem.commitFreeMB,
         commitUsedPct: g.mem.commitUsedPct, sampledAt: g.mem.sampledAt
     });
     await broadcastPublishState();
 }
 
+function processPublishQueue() {
+    return withPublishLock(processPublishQueueLocked);
+}
+
 // ---------- 收到「填写完成」：校验来源后推进 ----------
 // 只接受当前任务 + 当前行 + 当前标签；重复/旧任务/乱序/其他标签一律拒绝
-async function onPublishFilled(senderTabId, msg) {
-    const t = await loadPublishTask();
-    if (!t) return { ok: false, message: '没有进行中的发品任务' };
-    const row = parseInt(msg.row, 10);
-    const taskId = msg.taskId;
+async function onPublishFilled(senderTabId, senderFrameId, msg) {
+    return withPublishLock(async () => {
+        const t = await loadPublishTask();
+        if (!t) return { ok: false, message: '没有进行中的发品任务' };
+        const row = parseInt(msg.row, 10);
 
-    if (msg.taskId && t.taskId && msg.taskId !== t.taskId) return { ok: false, message: '旧任务消息，已拒绝' };
-    if (!publishRunning(t)) return { ok: false, message: '任务未在运行，已拒绝' };
-    if (t.currentTabId !== null && senderTabId !== undefined && senderTabId !== t.currentTabId) {
-        return { ok: false, message: '非当前标签的消息，已拒绝' };
-    }
-    if (row !== t.currentRow) return { ok: false, message: `行号不匹配（当前 ${t.currentRow}），已拒绝` };
+        // 严格校验：taskId 必填且严格相等；senderTabId 必须有效且等于当前标签；须为顶层框架
+        if (!msg.taskId || typeof msg.taskId !== 'string' || msg.taskId !== t.taskId) {
+            return { ok: false, message: '任务标识缺失或不匹配，已拒绝' };
+        }
+        if (senderTabId === undefined || senderTabId === null || senderTabId !== t.currentTabId) {
+            return { ok: false, message: '非当前标签的消息，已拒绝' };
+        }
+        if (senderFrameId !== undefined && senderFrameId !== null && senderFrameId !== 0) {
+            return { ok: false, message: '非顶层框架消息，已拒绝' };
+        }
+        if (row !== t.currentRow) return { ok: false, message: `行号不匹配（当前 ${t.currentRow}），已拒绝` };
 
-    // 推进：移出队首
-    t.remaining.shift();
-    t.filledCount += 1;
-    t.currentRow = null;
-    t.currentTabId = null;
-    t.currentStartedAt = 0;
-    await savePublishTask(t);
-    await appendPublishLog({ level: 'filled', row, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilled });
-
-    if (t.remaining.length === 0) {
-        t.state = 'done';
+        // 记录填写完成。暂停中也接受：当前页的有效完成必须入账，只是不自动开新页。
+        const wasPaused = t.state === 'paused';
+        t.remaining.shift();
+        t.filledCount += 1;
+        if (!Array.isArray(t.filledRows)) t.filledRows = [];
+        t.filledRows.push(row);
+        t.batchFilledDone = (t.batchFilledDone || 0) + 1;
+        t.currentRow = null;
+        t.currentTabId = null;
+        t.currentStartedAt = 0;
         await savePublishTask(t);
-        clearPublishMemTimer();
-        await appendPublishLog({ level: 'done', filled: t.filledCount, total: t.total });
-        notifyAssistant('publishAllFilled', { filled: t.filledCount, total: t.total });
-        await broadcastPublishState();
-        return { ok: true, done: true };
-    }
+        await appendPublishLog({ level: 'filled', row, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilledDone, paused: wasPaused });
 
-    notifyAssistant('publishFilledAck', { row, filled: t.filledCount, total: t.total, remaining: t.remaining.length });
-    await broadcastPublishState();
-    await processPublishQueue();
-    return { ok: true, remaining: t.remaining.length };
+        if (t.remaining.length === 0) {
+            t.state = 'done';
+            t.pauseReason = '';
+            t.pauseDetail = '';
+            await savePublishTask(t);
+            stopPublishTick();
+            await appendPublishLog({ level: 'done', filled: t.filledCount, total: t.total });
+            notifyAssistant('publishAllFilled', { filled: t.filledCount, total: t.total });
+            await broadcastPublishState();
+            return { ok: true, done: true };
+        }
+
+        notifyAssistant('publishFilledAck', { row, filled: t.filledCount, total: t.total, remaining: t.remaining.length });
+        await broadcastPublishState();
+        // 只在运行中自动开下一款；暂停状态保持暂停（等用户主动继续）
+        if (!wasPaused) {
+            await processPublishQueueLocked();
+        }
+        return { ok: true, remaining: t.remaining.length };
+    });
 }
+
+// ---------- 单行重试 / 明确跳过（用户主动触发） ----------
+async function retryPublishRow() {
+    return withPublishLock(async () => {
+        const t = await loadPublishTask();
+        if (!t) return { ok: false, message: '没有发品任务' };
+        if (t.currentRow === null) return { ok: false, message: '当前没有待重试的行' };
+        const row = t.currentRow;
+        let tab;
+        try {
+            tab = await openPublishTab(row, t.taskId);
+        } catch (e) {
+            return { ok: false, message: '重开失败：' + e.message };
+        }
+        t.currentTabId = tab.id;
+        t.currentStartedAt = Date.now();
+        t.state = 'running';
+        t.pauseReason = '';
+        t.pauseDetail = '';
+        await savePublishTask(t);
+        ensurePublishTick();
+        await appendPublishLog({ level: 'retry', row, tabId: tab.id });
+        await broadcastPublishState();
+        return { ok: true, row };
+    });
+}
+
+async function skipPublishRow() {
+    return withPublishLock(async () => {
+        const t = await loadPublishTask();
+        if (!t) return { ok: false, message: '没有发品任务' };
+        if (t.currentRow === null) return { ok: false, message: '当前没有可跳过的行' };
+        const row = t.currentRow;
+        t.remaining.shift();
+        if (!Array.isArray(t.skippedRows)) t.skippedRows = [];
+        t.skippedRows.push(row);
+        t.currentRow = null;
+        t.currentTabId = null;
+        t.currentStartedAt = 0;
+        t.state = t.remaining.length === 0 ? 'done' : 'running';
+        t.pauseReason = '';
+        t.pauseDetail = '';
+        await savePublishTask(t);
+        await appendPublishLog({ level: 'skip', row, remain: t.remaining.length });
+        if (t.state === 'done') {
+            stopPublishTick();
+        } else {
+            ensurePublishTick();
+            await processPublishQueueLocked();
+        }
+        await broadcastPublishState();
+        return { ok: true, row, remaining: t.remaining.length };
+    });
+}
+
+// ---------- 后台冷启动恢复（不把用户暂停变运行） ----------
+async function recoverPublishTaskOnStartup() {
+    try {
+        const t = await loadPublishTask();
+        if (publishRunning(t)) {
+            ensurePublishTick();
+            await publishTickOnce(); // 唤醒后先校验（标签/超时/文件/资源），不直接开页
+        }
+    } catch (_) {}
+}
+
+// alarm 巡检：可唤醒被 MV3 回收的后台
+if (chrome.alarms && chrome.alarms.onAlarm) {
+    chrome.alarms.onAlarm.addListener((alarm) => {
+        if (alarm && alarm.name === PUBLISH_TICK_ALARM) publishTickOnce();
+    });
+}
+
+// 可靠的关页检测（不依赖巡检周期）
+chrome.tabs.onRemoved.addListener((tabId) => {
+    withPublishLock(async () => {
+        const t = await loadPublishTask();
+        if (!publishRunning(t) || t.currentTabId !== tabId) return;
+        await pausePublishTaskLocked('tabClosed', `第 ${t.currentRow} 行所在标签已被关闭，该行保留在队列`);
+    });
+});
+
+recoverPublishTaskOnStartup();
 
 async function realClickCDP(tabId, x, y) {
     try {
@@ -779,6 +945,41 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 // （saveProductData/saveBatchProducts/getProductByRow/openPublishPage/…/getConfig），
 // 各动作内直接操作 storage 与目录配置并 sendResponse
 async function handleSharedAction(request, sendResponse) {
+    // ---------- 发品任务控制（发品助手页 file:// 与扩展内部均可） ----------
+    if (request.action === 'pausePublishQueue') {
+        pausePublishTask('manual', '用户手动停止').then(() => {
+            buildPublishStatePayload().then(p => sendResponse({ ok: true, state: p.state }));
+        }).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'resumePublishQueue') {
+        resumePublishTask().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'getPublishState') {
+        buildPublishStatePayload().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'setPublishSettings') {
+        setPublishSettings(request.patch || {}).then(s => sendResponse({ ok: true, settings: s })).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'getDiagLog') {
+        chrome.storage.local.get(PUBLISH_LOG_KEY, r => sendResponse({ ok: true, log: r[PUBLISH_LOG_KEY] || [] }));
+        return true;
+    }
+    if (request.action === 'clearDiagLog') {
+        chrome.storage.local.remove(PUBLISH_LOG_KEY, () => sendResponse({ ok: true }));
+        return true;
+    }
+    if (request.action === 'retryPublishRow') {
+        retryPublishRow().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'skipPublishRow') {
+        skipPublishRow().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
     if (request.action === 'saveProductData') {
         const pKey = productKey();
         const setObj = { [pKey]: request.data };
@@ -853,16 +1054,21 @@ async function handleSharedAction(request, sendResponse) {
     }
     if (request.action === 'getProductByRow') {
         const rowNum = request.rowNum;
-        const prefix = getFilePrefix();
-        const key = prefix + 'product__row' + rowNum;
-        chrome.storage.local.get(key, (result) => {
-            const product = result[key] || null;
-            if (product) {
-                console.log(`📦 获取产品数据: row=${rowNum}, title=${product.seo_title_en || product.title_en || '无标题'}`);
-            } else {
-                console.log(`⚠️ 未找到产品数据: row=${rowNum}`);
-            }
-            sendResponse({ ok: !!product, data: product });
+        // 产品读取按任务绑定文件查询：页2/页3 的迟到消息不依赖可变的全局文件名
+        const resolvePrefix = (request.taskId)
+            ? loadPublishTask().then(t => (t && t.taskId === request.taskId && t.fileKey) ? t.fileKey : getFilePrefix())
+            : Promise.resolve(getFilePrefix());
+        resolvePrefix.then(prefix => {
+            const key = prefix + 'product__row' + rowNum;
+            chrome.storage.local.get(key, (result) => {
+                const product = result[key] || null;
+                if (product) {
+                    console.log(`📦 获取产品数据: row=${rowNum}, title=${product.seo_title_en || product.title_en || '无标题'}`);
+                } else {
+                    console.log(`⚠️ 未找到产品数据: row=${rowNum}`);
+                }
+                sendResponse({ ok: !!product, data: product });
+            });
         });
         return true;
     }
@@ -880,15 +1086,14 @@ async function handleSharedAction(request, sendResponse) {
             return true;
         }
 
-        // 已有未完成任务时拒绝覆盖，保留原队列（force=true 才允许覆盖）
+        // 新任务不得覆盖未完成任务（含用户手动停止的）：无任何 force 绕过
         const prev = await loadPublishTask();
-        const force = request.force === true;
-        if (!force && prev && prev.state === 'running') {
+        if (prev && prev.state === 'running') {
             sendResponse({ ok: false, error: '已有正在进行的发品任务，已保留原队列；请先停止或等其结束' });
             return true;
         }
-        if (!force && prev && prev.state === 'paused' && prev.remaining.length > 0) {
-            sendResponse({ ok: false, error: `存在暂停中的任务（剩 ${prev.remaining.length} 款）。请先点「继续下一批」，或确认覆盖后新建任务` });
+        if (prev && prev.state === 'paused' && prev.remaining.length > 0) {
+            sendResponse({ ok: false, error: `存在暂停中的任务（剩 ${prev.remaining.length} 款）。请先点「继续下一批」` });
             return true;
         }
 
@@ -1005,6 +1210,8 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'setCurrentFilename') {
+        // 文件切换：先暂停在跑的发品任务（防串数据），再切换当前文件
+        pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').catch(() => {});
         CURRENT_FILENAME = request.filename || '';
         console.log(`📄 当前文件名切换为: ${CURRENT_FILENAME || '(默认)'}`);
         chrome.storage.local.set({ current_filename: CURRENT_FILENAME }, () => {
@@ -1197,7 +1404,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // ---------- 发品任务（内部通道：content script 发来，sender.tab 可信） ----------
     if (request.action === 'publishFilled') {
         const tabId = sender && sender.tab ? sender.tab.id : undefined;
-        onPublishFilled(tabId, request).then(sendResponse).catch(e => sendResponse({ ok: false, message: e.message }));
+        const frameId = sender ? sender.frameId : undefined;
+        onPublishFilled(tabId, frameId, request).then(sendResponse).catch(e => sendResponse({ ok: false, message: e.message }));
+        return true;
+    }
+    if (request.action === 'retryPublishRow') {
+        retryPublishRow().then(sendResponse);
+        return true;
+    }
+    if (request.action === 'skipPublishRow') {
+        skipPublishRow().then(sendResponse);
         return true;
     }
     if (request.action === 'pausePublishQueue') {

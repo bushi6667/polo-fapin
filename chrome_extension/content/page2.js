@@ -458,7 +458,14 @@ async function loadBatchProduct(rowNum) {
     try {
         const resp = await sendMessageRetry({
             action: 'getProductByRow',
-            rowNum: rowNum
+            rowNum: rowNum,
+            // 批量任务标识：后台按任务绑定的文件读取产品数据，防止文件切换后串数据
+            taskId: (function () {
+                try {
+                    const p = new URLSearchParams(window.location.search);
+                    return p.get('task') || sessionStorage.getItem('polo_batch_task') || null;
+                } catch (e) { return null; }
+            })()
         });
         if (resp && resp.ok && resp.data) {
             currentProduct = resp.data;

@@ -4415,7 +4415,8 @@ async function loadBatchProduct(rowNum) {
     try {
         const resp = await sendMessageRetry({
             action: 'getProductByRow',
-            rowNum: rowNum
+            rowNum: rowNum,
+            taskId: getTaskFromUrl()
         });
         if (resp && resp.ok && resp.data) {
             currentProduct = resp.data;
