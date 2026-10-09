@@ -741,6 +741,26 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
             }
             return true;
         }
+        // 内存水位查询：供「发品助手」批量换色时做暂停保护
+        if (request.action === 'getSystemMemory') {
+            if (!chrome.system || !chrome.system.memory) {
+                sendResponse({ ok: false, error: 'system.memory 权限未生效（需在 chrome://extensions 重新加载扩展）' });
+                return true;
+            }
+            chrome.system.memory.getInfo((info) => {
+                if (chrome.runtime.lastError) {
+                    sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+                    return;
+                }
+                sendResponse({
+                    ok: true,
+                    capacity: info.capacity,
+                    availableCapacity: info.availableCapacity,
+                    availableMB: Math.round(info.availableCapacity / 1048576)
+                });
+            });
+            return true;
+        }
         handleSharedAction(request, sendResponse);
         return true;
     }).catch((err) => {

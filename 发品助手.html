@@ -3061,6 +3061,11 @@ function renderDetail() {
                             <button class="ai-edit-btn" onclick="startAiEdit(${p.row})" id="aiEditBtn" style="justify-content: center;">
                                 🤖 AI改图
                             </button>
+                            <div style="display:flex; align-items:center; gap:5px; font-size:11px; color:rgba(255,255,255,0.6); padding-top:2px;">
+                                <span>可用内存低于</span>
+                                <input id="memPauseInput" type="number" min="200" step="100" value="1500" style="width:56px; padding:2px 4px; border-radius:6px; border:1px solid rgba(255,255,255,0.18); background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.9); font-size:11px; text-align:center;">
+                                <span>MB 暂停</span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -3213,6 +3218,16 @@ function renderDetail() {
 
     if (extensionInstalled && currentProduct) loadColorImagesFromExtension(currentProduct.row);
     syncColorResumeButton();
+
+    const memInput = document.getElementById('memPauseInput');
+    if (memInput) {
+        memInput.value = String(getMemPauseMB());
+        memInput.addEventListener('change', () => {
+            setMemPauseMB(memInput.value);
+            memInput.value = String(getMemPauseMB());
+            showToast(`✅ 内存暂停阈值已设为 ${getMemPauseMB()} MB`);
+        });
+    }
 }
 
 function copyData() {
@@ -3908,7 +3923,8 @@ function beginColorBatch(queueList, label) {
         lastProcessedTimestamp: 0,
         pollTimer: null,
         label: label || '批量换色',
-        failedRows: []
+        failedRows: [],
+        lastMemMB: 0
     };
 
     // 新任务启动即清空「继续」待办（旧待办已被本次任务取代）
@@ -3917,6 +3933,43 @@ function beginColorBatch(queueList, label) {
     showBatchColorProgress();
     startBatchColorPolling();
     processNextBatchColor();
+}
+
+// ===== 内存水位保护：整机可用内存低于阈值时自动暂停 =====
+const MEM_PAUSE_KEY = 'polo_mem_pause_mb';
+const MEM_PAUSE_DEFAULT = 1500;
+
+function getMemPauseMB() {
+    const v = parseInt(localStorage.getItem(MEM_PAUSE_KEY), 10);
+    return Number.isInteger(v) && v >= 200 ? v : MEM_PAUSE_DEFAULT;
+}
+
+function setMemPauseMB(v) {
+    const n = parseInt(v, 10);
+    if (Number.isInteger(n) && n >= 200) localStorage.setItem(MEM_PAUSE_KEY, String(n));
+}
+
+// 查询整机可用内存（走扩展 system.memory）；失败/超时返回 null，调用方放行不阻塞
+function querySystemMemoryMB() {
+    return new Promise((resolve) => {
+        let done = false;
+        const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 3000);
+        try {
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getSystemMemory' }, (resp) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                if (chrome.runtime.lastError || !resp || !resp.ok) {
+                    console.warn('[mem] 查询失败:', chrome.runtime.lastError?.message || resp?.error);
+                    resolve(null);
+                    return;
+                }
+                resolve(resp.availableMB);
+            });
+        } catch (e) {
+            if (!done) { done = true; clearTimeout(timer); resolve(null); }
+        }
+    });
 }
 
 // 生成「行N · 序号X · 标题」预览行（确认框用）
@@ -4098,6 +4151,12 @@ function startBatchColorPolling() {
                     advanceBatchColorForRow(evt.rowNum, 'poll');
                 }
             });
+            // 顺带刷新内存读数（只更新显示，不影响推进逻辑）
+            querySystemMemoryMB().then((mb) => {
+                if (mb === null || !batchColorState || !batchColorState.running) return;
+                batchColorState.lastMemMB = mb;
+                updateBatchColorProgress();
+            });
         } catch (e) {
             console.warn('批量换色轮询异常:', e);
         }
@@ -4117,6 +4176,27 @@ function processNextBatchColor() {
         finishBatchColor(false);
         return;
     }
+    if (batchColorState.currentIndex >= batchColorState.queue.length) {
+        finishBatchColor(true);
+        return;
+    }
+
+    // 内存水位闸门：可用内存不足则自动暂停，剩余行进「继续」待办
+    querySystemMemoryMB().then((availMB) => {
+        if (!batchColorState || !batchColorState.running) return;
+        const threshold = getMemPauseMB();
+        if (availMB !== null) batchColorState.lastMemMB = availMB;
+        if (availMB !== null && availMB < threshold) {
+            console.warn(`⚠️ 可用内存 ${availMB}MB < 阈值 ${threshold}MB，自动暂停`);
+            finishBatchColor(false, `内存不足：可用 ${availMB}MB < ${threshold}MB`);
+            return;
+        }
+        sendNextBatchColor();
+    });
+}
+
+function sendNextBatchColor() {
+    if (!batchColorState || !batchColorState.running) return;
     if (batchColorState.currentIndex >= batchColorState.queue.length) {
         finishBatchColor(true);
         return;
@@ -4188,7 +4268,7 @@ function stopBatchColorChange() {
     finishBatchColor(false);
 }
 
-function finishBatchColor(completed) {
+function finishBatchColor(completed, reason) {
     if (!batchColorState) return;
     const finishedState = batchColorState;
     const batchLabel = batchColorState.label || '批量换色';
@@ -4218,8 +4298,9 @@ function finishBatchColor(completed) {
         updateBatchColorFill(100);
         showToast(`✅ ${batchLabel}完成！${success} 款成功${fail > 0 ? `，${fail} 款失败` : ''}，用时 ${timeStr}`);
     } else {
-        updateBatchColorStatus(`⏸ ${batchLabel}已停止。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）`);
-        showToast(`⏸ ${batchLabel}已停止。完成 ${success} 款，失败 ${fail} 款`);
+        const why = reason ? `（${reason}）` : '';
+        updateBatchColorStatus(`⏸ ${batchLabel}已停止${why}。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）`);
+        showToast(`⏸ ${batchLabel}已暂停${why}。完成 ${success} 款，还剩 ${leftOver.length} 款可点「继续」`);
     }
 
     if (colorPollTimer) { clearInterval(colorPollTimer); colorPollTimer = null; }
@@ -4260,7 +4341,8 @@ function updateBatchColorProgress() {
     if (counter) counter.textContent = `${current}/${total}`;
     const product = batchColorState.queue[current];
     if (product && batchColorCurrentEl) {
-        batchColorCurrentEl.textContent = `正在处理 row${product.row} (${product.title_en || '未命名'})`;
+        const mem = batchColorState.lastMemMB ? ` · 可用 ${(batchColorState.lastMemMB / 1024).toFixed(1)}GB` : '';
+        batchColorCurrentEl.textContent = `正在处理 row${product.row} (${product.title_en || '未命名'})${mem}`;
     }
     updateBatchColorStatus(`🚀 ${batchColorState.label || '批量换色'}中 ${current}/${total}`);
 }
