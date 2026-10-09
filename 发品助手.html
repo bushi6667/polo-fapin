@@ -3974,11 +3974,21 @@ function startColorChangeForRows() {
         return;
     }
 
+    // 确认框逐条显示身份（行号 · 序号 · 标题），防止误填「序号」命中错款
+    const PREVIEW_MAX = 15;
+    const previewLines = queue.slice(0, PREVIEW_MAX).map(p => {
+        const title = String(p.title_cn || p.title_en || '未命名').slice(0, 16);
+        const idxText = (p.index === '' || p.index === null || p.index === undefined) ? '-' : p.index;
+        return `  行${p.row} · 序号${idxText} · ${title}`;
+    });
+    if (queue.length > PREVIEW_MAX) {
+        previewLines.push(`  … 等共 ${queue.length} 款`);
+    }
     const missMsg = missing.length
         ? `\n\n⚠️ 不在当前 Excel 中，将跳过 ${missing.length} 个：\n${missing.slice(0, 30).join(' ')}${missing.length > 30 ? ' ...' : ''}`
         : '';
     const ok = confirm(
-        `将对指定的 ${queue.length} 款产品依次执行 AI 换色：\n\n${queue.map(p => p.row).join(' ')}${missMsg}\n\n确定开始？`
+        `将对指定的 ${queue.length} 款产品依次执行 AI 换色：\n\n${previewLines.join('\n')}${missMsg}\n\n确定开始？`
     );
     if (!ok) return;
 
