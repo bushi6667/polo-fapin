@@ -107,6 +107,10 @@ chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
         for (const [k, v] of downloadFilenameMap) {
             if (v === mapping) { downloadFilenameMap.delete(k); break; }
         }
+    } else {
+        // 契约：listener 必须恰好调用一次 suggest；未命中时显式空参调用，
+        // 否则 Chrome 自动 suggest 后文件名不可控（表现为「下载 - 时间戳.png」）
+        suggest();
     }
 });
 
@@ -1680,8 +1684,13 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                 }
             }
 
-            const downloadUrl = dataUrl || url;
-            console.log(`[download] using url type: ${dataUrl ? 'data' : 'original'}, filename: ${relativePath}`);
+            const downloadUrl = dataUrl && dataUrl.length <= 5 * 1024 * 1024 ? dataUrl : url;
+            console.log(`[download] using url type: ${downloadUrl === dataUrl ? 'data' : 'original'}, filename: ${relativePath}`);
+
+            // 关键：download() 之前按 URL 预登记。onDeterminingFilename 可能先于回调触发
+            // （data: URL 无需联网即可定 MIME），只在回调里登记会漏匹配 → suggest() 不调 → 丢文件名
+            const preKey = 'pre:' + downloadUrl;
+            downloadFilenameMap.set(preKey, { filename, relativePath, url: downloadUrl });
             
             chrome.downloads.download({
                 url: downloadUrl,
@@ -1689,7 +1698,8 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                 conflictAction: 'overwrite',
                 saveAs: false
             }, (downloadId) => {
-                // 在回调里存储映射，onDeterminingFilename 会用 downloadId 匹配
+                // 回调里把预登记条目迁移到真实 downloadId（命中后 url 键可能已被监听器消费）
+                downloadFilenameMap.delete(preKey);
                 if (downloadId !== undefined) {
                     downloadFilenameMap.set(downloadId, { filename, relativePath, url: downloadUrl });
                 }
@@ -1863,6 +1873,11 @@ async function downloadViaFetch(url, filename, rowNum, relativePath) {
         // L4：超大 data URL 超出 downloads.download 限制（>5MB 回退原始 URL 直下）
         const downloadUrl = dataUrl && dataUrl.length <= 5 * 1024 * 1024 ? dataUrl : url;
 
+        // 关键：兜底路径同样要按 URL 预登记映射，否则走这里必然丢文件名
+        // （只要有扩展注册 onDeterminingFilename，Chrome 就会忽略 DownloadOptions.filename）
+        const preKey = 'pre:' + downloadUrl;
+        downloadFilenameMap.set(preKey, { filename, relativePath, url: downloadUrl });
+
         return new Promise((resolve) => {
             chrome.downloads.download({
                 url: downloadUrl,
@@ -1870,6 +1885,7 @@ async function downloadViaFetch(url, filename, rowNum, relativePath) {
                 conflictAction: 'overwrite',
                 saveAs: false
             }, (downloadId) => {
+                downloadFilenameMap.delete(preKey);
                 if (chrome.runtime.lastError) {
                     resolve({ ok: false, error: chrome.runtime.lastError.message });
                     return;
