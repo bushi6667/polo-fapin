@@ -1561,11 +1561,11 @@ body::after {
     transform: translateX(-50%) translateY(0);
 }
 
-/* FPS 监测器 */
+/* FPS 监测器（下移到扩展设置/内存阈值下方，避免右上角重叠） */
 .fps-monitor {
     position: fixed;
-    top: 10px;
-    right: 10px;
+    top: 92px;
+    right: 18px;
     z-index: 9999;
     padding: 6px 12px;
     background: rgba(0, 0, 0, 0.6);
@@ -1665,6 +1665,13 @@ body::after {
 <button id="extIdBtn" style="position:fixed;top:14px;right:18px;z-index:9999;padding:7px 14px;border:none;border-radius:10px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;font-size:12px;font-weight:500;cursor:pointer;box-shadow:0 2px 8px rgba(102,126,234,0.35);" onclick="promptExtensionId()" title="配置 / 查看扩展 ID">
     🔌 扩展设置
 </button>
+
+<!-- 内存水位阈值：紧贴扩展设置下方，页面级常驻（不随详情面板重渲染） -->
+<div id="memPauseBox" style="position:fixed;top:52px;right:18px;z-index:9999;display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:10px;background:rgba(0,0,0,0.5);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.85);font-size:11px;white-space:nowrap;" title="整机可用内存低于此值时，自动暂停换色 / 上品队列">
+    <span>可用内存低于</span>
+    <input id="memPauseInput" type="number" min="200" step="100" value="1500" style="width:56px;padding:2px 4px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#fff;font-size:11px;text-align:center;">
+    <span>MB 暂停</span>
+</div>
 
 <div class="page-header">
     <h1>产品发品助手</h1>
@@ -3015,7 +3022,7 @@ function renderDetail() {
         <div class="batch-color-progress" id="batchColorProgress" style="display: none;">
             <div class="progress-header">
                 <span id="batchColorStatus">准备中...</span>
-                <button class="stop-btn" onclick="stopBatchColorChange()">⏹ 停止</button>
+                <button class="stop-btn" id="batchColorToggleBtn" onclick="toggleBatchColorRun()">⏹ 停止</button>
             </div>
             <div class="progress-bar">
                 <div class="progress-fill" id="batchColorFill" style="width: 0%;"></div>
@@ -3052,9 +3059,6 @@ function renderDetail() {
                             <button class="batch-color-btn" onclick="startColorChangeForRows()" id="colorRowsBtn" style="justify-content: center;">
                                 🔁 指定重生成
                             </button>
-                            <button class="batch-color-btn" onclick="resumeColorBatch()" id="colorResumeBtn" style="justify-content: center;">
-                                ▶ 继续
-                            </button>
                             <button class="color-change-btn" onclick="startColorChange(${p.row})" id="colorChangeBtn" style="justify-content: center;">
                                 🎨 AI换色
                             </button>
@@ -3064,11 +3068,6 @@ function renderDetail() {
                             <button class="ai-edit-btn" onclick="startAiEdit(${p.row})" id="aiEditBtn" style="justify-content: center;">
                                 🤖 AI改图
                             </button>
-                            <div style="display:flex; align-items:center; gap:5px; font-size:11px; color:rgba(255,255,255,0.6); padding-top:2px;">
-                                <span>可用内存低于</span>
-                                <input id="memPauseInput" type="number" min="200" step="100" value="1500" style="width:56px; padding:2px 4px; border-radius:6px; border:1px solid rgba(255,255,255,0.18); background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.9); font-size:11px; text-align:center;">
-                                <span>MB 暂停</span>
-                            </div>
                         </div>
                     </div>
                 </div>
@@ -3221,16 +3220,6 @@ function renderDetail() {
 
     if (extensionInstalled && currentProduct) loadColorImagesFromExtension(currentProduct.row);
     syncColorResumeButton();
-
-    const memInput = document.getElementById('memPauseInput');
-    if (memInput) {
-        memInput.value = String(getMemPauseMB());
-        memInput.addEventListener('change', () => {
-            setMemPauseMB(memInput.value);
-            memInput.value = String(getMemPauseMB());
-            showToast(`✅ 内存暂停阈值已设为 ${getMemPauseMB()} MB`);
-        });
-    }
 }
 
 function copyData() {
@@ -4027,6 +4016,24 @@ function querySystemMemoryMB() {
     });
 }
 
+// 阈值框绑定：元素在静态 HTML 里（#memPauseBox），页面级只绑一次，不随详情面板重渲染
+function initMemPauseBox() {
+    const memInput = document.getElementById('memPauseInput');
+    if (!memInput || memInput.dataset.bound === '1') return;
+    memInput.dataset.bound = '1';
+    memInput.value = String(getMemPauseMB());
+    memInput.addEventListener('change', () => {
+        setMemPauseMB(memInput.value);
+        memInput.value = String(getMemPauseMB());
+        showToast(`✅ 内存暂停阈值已设为 ${getMemPauseMB()} MB`);
+    });
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initMemPauseBox);
+} else {
+    initMemPauseBox();
+}
+
 // 生成「行N · 序号X · 标题」预览行（确认框用）
 function buildRowPreviewLines(queue, max = 15) {
     const lines = queue.slice(0, max).map(p => {
@@ -4057,13 +4064,58 @@ function setColorResumeRows(rows) {
     syncColorResumeButton();
 }
 
-// 按钮状态同步：detail 面板会整体重渲染，渲染后必须再调一次
-function syncColorResumeButton() {
-    const btn = document.getElementById('colorResumeBtn');
+// 「停止 / 继续」一体按钮：运行中显示"停止"，暂停且有剩余时显示"继续"
+function setBatchColorToggle(mode) {
+    const btn = document.getElementById('batchColorToggleBtn');
     if (!btn) return;
-    const n = getColorResumeRows().length;
-    btn.disabled = n === 0;
-    btn.textContent = n > 0 ? `▶ 继续（剩 ${n}）` : '▶ 继续';
+    if (mode === 'resume') {
+        const n = getColorResumeRows().length;
+        btn.textContent = n > 0 ? `▶ 继续（剩 ${n}）` : '▶ 继续';
+        btn.disabled = n === 0;
+    } else {
+        btn.textContent = '⏹ 停止';
+        btn.disabled = false;
+    }
+}
+
+// 面板 + 按钮统一刷新（运行中 / 待继续 / 空闲 三态）；注意：不覆盖状态文案
+function restoreBatchColorUI() {
+    const panel = batchColorProgressEl();
+    const running = !!(batchColorState && batchColorState.running);
+    const left = getColorResumeRows().length;
+
+    if (running) {
+        if (panel) panel.style.display = 'block';
+        setBatchColorToggle('stop');
+        return;
+    }
+    if (left > 0) {
+        if (panel) panel.style.display = 'block';
+        setBatchColorToggle('resume');
+        updateBatchColorFill(0);
+        const counter = batchColorCounterEl();
+        if (counter) counter.textContent = `剩 ${left}`;
+        const cur = batchColorCurrentEl();
+        if (cur) cur.textContent = '已暂停';
+        return;
+    }
+    if (panel) panel.style.display = 'none';
+    setBatchColorToggle('stop');
+}
+
+// 兼容旧调用点：非运行态才刷新
+function syncColorResumeButton() {
+    if (batchColorState && batchColorState.running) return;
+    restoreBatchColorUI();
+}
+
+// 面板按钮点击：运行中 → 停止；否则 → 继续
+function toggleBatchColorRun() {
+    if (batchColorState && batchColorState.running) {
+        stopBatchColorChange();
+        return;
+    }
+    resumeColorBatch();
 }
 
 // 从上次停止 / 失败处继续
@@ -4364,14 +4416,19 @@ function finishBatchColor(completed, reason) {
     setTimeout(() => {
         // 5 秒内若已开新任务，勿干扰新任务的状态与按钮
         if (batchColorState && batchColorState !== finishedState) return;
-        const el = batchColorProgressEl();
-        if (el) el.style.display = 'none';
-        if (batchColorState === finishedState) batchColorState = null;
         const btn = document.getElementById('batchColorBtn');
         if (btn) { btn.disabled = false; btn.innerHTML = '🚀 一键换色'; }
         const rowsBtn = document.getElementById('colorRowsBtn');
         if (rowsBtn) rowsBtn.disabled = false;
-        syncColorResumeButton();
+        if (getColorResumeRows().length > 0) {
+            // 还有没跑完的：保留进度面板、按钮停在「继续」，state 不置空（供再次续跑）
+            restoreBatchColorUI();
+            return;
+        }
+        const el = batchColorProgressEl();
+        if (el) el.style.display = 'none';
+        if (batchColorState === finishedState) batchColorState = null;
+        setBatchColorToggle('stop');
     }, 5000);
 }
 
@@ -4382,8 +4439,7 @@ function showBatchColorProgress() {
     if (btn) { btn.disabled = true; btn.innerHTML = '⏳ 批量运行中...'; }
     const rowsBtn = document.getElementById('colorRowsBtn');
     if (rowsBtn) rowsBtn.disabled = true;
-    const resumeBtn = document.getElementById('colorResumeBtn');
-    if (resumeBtn) resumeBtn.disabled = true;
+    setBatchColorToggle('stop');   // 新任务开始：面板按钮回到「停止」
 }
 
 function updateBatchColorProgress() {
