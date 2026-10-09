@@ -3529,18 +3529,25 @@ function renderPublishState(s) {
         else { pauseEl.style.display = 'none'; }
     }
 
+    // 当前行处于"页面已失效"的暂停态时，「继续」只会空等 → 禁用并引导用重试/跳过
+    const needExplicit = paused && s.currentRow !== null &&
+        ['tabClosed', 'rowTimeout', 'openFail'].indexOf(s.pauseReason) >= 0;
     const btn = publishToggleEl();
     if (btn) {
         btn.style.display = idle ? 'none' : 'inline-block';
-        if (running) { btn.textContent = '⏹ 停止'; btn.disabled = false; }
-        else if (done) { btn.textContent = '已完成'; btn.disabled = true; }
-        else { btn.textContent = '▶ 继续下一批'; btn.disabled = false; }
+        if (running) { btn.textContent = '⏹ 停止'; btn.disabled = false; btn.title = '停止后不再开新页'; }
+        else if (done) { btn.textContent = '已完成'; btn.disabled = true; btn.title = ''; }
+        else if (needExplicit) {
+            btn.textContent = '▶ 继续下一批'; btn.disabled = true;
+            btn.title = '当前行页面已失效，请先「↻ 重试当前行」或「⏭ 跳过当前行」';
+        } else {
+            btn.textContent = '▶ 继续下一批'; btn.disabled = false;
+            btn.title = '继续下一批（会重新读取每批款数设置）';
+        }
     }
     // 仅"当前行卡住"时提供重试 / 明确跳过
-    const stuck = paused && s.currentRow !== null &&
-        ['tabClosed', 'rowTimeout', 'openFail'].indexOf(s.pauseReason) >= 0;
-    const rb = publishRetryEl(); if (rb) rb.style.display = stuck ? 'inline-block' : 'none';
-    const sb = publishSkipEl(); if (sb) sb.style.display = stuck ? 'inline-block' : 'none';
+    const rb = publishRetryEl(); if (rb) rb.style.display = needExplicit ? 'inline-block' : 'none';
+    const sb = publishSkipEl(); if (sb) sb.style.display = needExplicit ? 'inline-block' : 'none';
 
     // 每批款数：运行中不可改（改的是"下一批"，由扩展在继续时同步到任务）
     const inp = publishBatchInput();

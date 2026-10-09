@@ -124,10 +124,13 @@ function createEnv(opts = {}) {
         scripting: {}
     };
 
+    let memCalls = 0;
     const fetchMock = async (url) => {
         if (String(url).indexOf('/mem-info') < 0) throw new Error('unexpected fetch ' + url);
+        memCalls++;
         if (opts.commitFetchFails) throw new Error('connect ECONNREFUSED');
         if (opts.commitFetchHang) return { ok: true, json: () => new Promise(() => {}) }; // 响应体挂起
+        if (opts.commitFetchDelayMs) await new Promise(r => setTimeout(r, opts.commitFetchDelayMs));
         const limit = (opts.commitLimitGiB === undefined ? 64 : opts.commitLimitGiB) * GIB;
         const free = (opts.commitFreeMiB === undefined ? 8192 : opts.commitFreeMiB) * 1024 * 1024;
         return {
@@ -525,7 +528,7 @@ async function driveFills(env, maxFills) {
         ok(rt && rt.ok && rt.row === 161, `卡住态可重试（实际 ${JSON.stringify(rt)}）`);
         ok(env.createdUrls.length === before + 1, '重试开了一页');
         const t1 = await env.run('loadPublishTask()');
-        ok(t1.batchFilled === 2, `重试计入本批已开数（实际 ${t1.batchFilled}）`);
+        ok(t1.batchFilled === 1, `重试计入新批次（本批已开 ${t1.batchFilled}）`);
 
         const sk = await env.sendExternal({ action: 'skipPublishRow' });
         await tick(250);
@@ -574,7 +577,7 @@ async function driveFills(env, maxFills) {
         ok(rtB && !rtB.ok, `60 页下重试被拒绝（实际 ${JSON.stringify(rtB)}）`);
         ok(envB.createdUrls.length === createdB, '60 页下重试未开页');
 
-        // 批次已开数达上限
+        // 批次已开数达上限：新语义下「异常行带入下一批」，重试应成功并重置批次
         const envC = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
         await envC.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 1 } });
         await envC.sendExternal({ action: 'openBatchPublish', rows: [221, 222] });
@@ -584,9 +587,12 @@ async function driveFills(env, maxFills) {
         await tick(250);
         const createdC = envC.createdUrls.length;
         const rtC = await envC.sendExternal({ action: 'retryPublishRow' });
-        await tick(200);
-        ok(rtC && !rtC.ok, `批次已达上限时重试被拒绝（实际 ${JSON.stringify(rtC)}）`);
-        ok(envC.createdUrls.length === createdC, '批次上限下重试未开页');
+        await tick(250);
+        ok(rtC && rtC.ok, `批次已达上限时仍可重试（新语义：带入下一批）（实际 ${JSON.stringify(rtC)}）`);
+        ok(envC.createdUrls.length === createdC + 1, '重试开了一页');
+        const tC2 = await envC.run('loadPublishTask()');
+        ok(tC2.batchFilled === 1, `重试重置并计入新批次（实际 ${tC2.batchFilled}）`);
+        ok(tC2.remaining.join(',') === '221,222', `异常行保留（实际 ${tC2.remaining.join(',')}）`);
     }
 
     // ---------- 并发新建任务 ----------
@@ -718,7 +724,177 @@ async function driveFills(env, maxFills) {
         ok(env.createdUrls.length <= createdBefore + 3, `一批不超过 3 页（实际新增 ${env.createdUrls.length - createdBefore}）`);
     }
 
-    // ---------- 汇总 ----------
+    // ---------- 停止代次：继续/重试期间到达的停止不得被抹掉 ----------
+    console.log('\n【26】继续/重试期间收到停止 → 不得创建新页（停止代次）');
+    {
+        // 重试路径：资源检查期间收到停止
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, commitFetchDelayMs: 250 });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [301, 302] });
+        await tick(400);
+        const t0 = await env.run('loadPublishTask()');
+        for (const f of env.L.onRemoved) f(t0.currentTabId);   // 制造可重试态
+        await tick(250);
+        const createdBefore = env.createdUrls.length;
+        env.run('memSampleCache = { at: 0, value: null }');    // 确保重试的资源检查真的走网络
+        const pRetry = env.sendExternal({ action: 'retryPublishRow' });
+        await tick(60);
+        await env.sendExternal({ action: 'pausePublishQueue' });  // 检查期间停止
+        const rt = await pRetry;
+        await tick(400);
+        ok(rt && !rt.ok, `重试期间停止 → 重试被拒（实际 ${JSON.stringify(rt)}）`);
+        ok(env.createdUrls.length === createdBefore, `重试期间停止未创建新页（实际新增 ${env.createdUrls.length - createdBefore}）`);
+        const stR = await env.sendExternal({ action: 'getPublishState' });
+        ok(stR.state === 'paused', '保持暂停');
+
+        // 继续路径：资源检查期间收到停止
+        const env2 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, commitFetchDelayMs: 250 });
+        await env2.sendExternal({ action: 'openBatchPublish', rows: [311, 312] });
+        await tick(400);
+        const t1 = await env2.run('loadPublishTask()');
+        await env2.sendInternal({ action: 'publishFilled', row: 311, taskId: t1.taskId }, { tab: { id: t1.currentTabId }, frameId: 0 });
+        await tick(300);
+        await env2.sendExternal({ action: 'pausePublishQueue' });
+        await tick(300);
+        const created2 = env2.createdUrls.length;
+        env2.run('memSampleCache = { at: 0, value: null }');
+        const pResume = env2.sendExternal({ action: 'resumePublishQueue' });
+        await tick(60);
+        await env2.sendExternal({ action: 'pausePublishQueue' });  // 检查期间停止
+        const rs = await pResume;
+        await tick(400);
+        ok(rs && !rs.ok, `继续期间停止 → 继续被拒（实际 ${JSON.stringify(rs)}）`);
+        ok(env2.createdUrls.length === created2, `继续期间停止未创建新页（实际新增 ${env2.createdUrls.length - created2}）`);
+
+        // 普通推进路径
+        const env3 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, commitFetchDelayMs: 250 });
+        const p3 = env3.sendExternal({ action: 'openBatchPublish', rows: [321, 322] });
+        await tick(60);
+        await env3.sendExternal({ action: 'pausePublishQueue' });
+        await p3;
+        await tick(500);
+        ok(env3.createdUrls.length === 0, `普通推进期间停止未创建新页（实际 ${env3.createdUrls.length}）`);
+    }
+
+    console.log('\n【27】旧停止可被「明确继续」解除；新停止不能被抹掉；重复停止幂等');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [331, 332, 333] });
+        await tick(300);
+        let t0 = await env.run('loadPublishTask()');
+        // 第 1 款填完 → 自动开第 2 页
+        await env.sendInternal({ action: 'publishFilled', row: 331, taskId: t0.taskId }, { tab: { id: t0.currentTabId }, frameId: 0 });
+        await tick(300);
+        t0 = await env.run('loadPublishTask()');
+        ok(env.createdUrls.length === 2 && t0.currentRow === 332, `第 2 款在填（开页 ${env.createdUrls.length} / 当前 ${t0.currentRow}）`);
+
+        await env.sendExternal({ action: 'pausePublishQueue' });
+        await tick(300);
+        // 手动停止时当前行仍有效 → 「继续」只恢复等待，不重复开页
+        const created = env.createdUrls.length;
+        const r1 = await env.sendExternal({ action: 'resumePublishQueue' });
+        await tick(300);
+        ok(r1 && r1.ok, '手动停止可被明确继续解除', JSON.stringify(r1));
+        ok(env.createdUrls.length === created, '当前行仍有效时继续 → 只恢复等待，不重复开页');
+        const st1 = await env.sendExternal({ action: 'getPublishState' });
+        ok(st1.state === 'running', '状态回到 running');
+
+        // 当前行完成后自动推进
+        await env.sendInternal({ action: 'publishFilled', row: 332, taskId: t0.taskId }, { tab: { id: t0.currentTabId }, frameId: 0 });
+        await tick(300);
+        ok(env.createdUrls.length === created + 1, `当前行完成后自动开下一页（开页 ${env.createdUrls.length}）`);
+
+        // 重复停止不应报错
+        await env.sendExternal({ action: 'pausePublishQueue' });
+        await env.sendExternal({ action: 'pausePublishQueue' });
+        await tick(300);
+        const st = await env.sendExternal({ action: 'getPublishState' });
+        ok(st.state === 'paused', '重复停止后仍为暂停');
+        const r2 = await env.sendExternal({ action: 'resumePublishQueue' });
+        await tick(200);
+        ok(r2 && r2.ok, '再次继续成功（幂等）');
+    }
+
+    console.log('\n【28】批次最后一款异常 → 重试可恢复（资源允许）／资源不足拒绝');
+    {
+        // 批次 3 的第 3 款超时/关页 → 资源充足可重试
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 3 } });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [341, 342, 343, 344] });
+        await tick(300);
+        await driveFills(env, 2);                 // 前两款填完
+        await tick(300);
+        let t = await env.run('loadPublishTask()');
+        ok(t.batchFilled === 3 && t.currentRow === 343, `第 3 款在填且本批已开 3（实际 ${t.batchFilled}/${t.currentRow}）`);
+        for (const f of env.L.onRemoved) f(t.currentTabId);   // 第 3 款标签被关
+        await tick(300);
+        const createdBefore = env.createdUrls.length;
+        const rt = await env.sendExternal({ action: 'retryPublishRow' });
+        await tick(300);
+        ok(rt && rt.ok && rt.row === 343, `批次最后一款可重试（实际 ${JSON.stringify(rt)}）`);
+        ok(env.createdUrls.length === createdBefore + 1, '重试开了一页');
+        t = await env.run('loadPublishTask()');
+        ok(t.batchFilled === 1, `重试计入新批次（本批已开 ${t.batchFilled}）`);
+        ok(t.remaining.join(',') === '343,344', `异常行保留在队列（实际 ${t.remaining.join(',')}）`);
+        ok(t.filledCount === 2, `已填记录未重复入账（实际 ${t.filledCount}）`);
+        // 旧标签迟到完成不得推进新重试的当前标签
+        const late = await env.sendInternal({ action: 'publishFilled', row: 343, taskId: t.taskId },
+            { tab: { id: 999999 }, frameId: 0 });
+        ok(late && !late.ok, '旧标签迟到完成被拒绝', JSON.stringify(late));
+        const t2 = await env.run('loadPublishTask()');
+        ok(t2.filledCount === 2 && t2.currentRow === 343, '新当前标签未被旧消息推进');
+
+        // 资源不足 → 重试拒绝
+        const env2 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env2.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 3 } });
+        await env2.sendExternal({ action: 'openBatchPublish', rows: [351, 352, 353] });
+        await tick(300);
+        const t3 = await env2.run('loadPublishTask()');
+        for (const f of env2.L.onRemoved) f(t3.currentTabId);
+        await tick(300);
+        // 把提交余量压到下限以下（换一个低余量环境沿用同一任务较难，这里直接用 60 页上限）
+        for (let i = 0; i < 60; i++) env2.tabs.push({ id: 8000 + i, url: 'https://post.alibaba.com/product/publish?row=' + (600 + i) });
+        const created3 = env2.createdUrls.length;
+        const rt3 = await env2.sendExternal({ action: 'retryPublishRow' });
+        await tick(300);
+        ok(rt3 && !rt3.ok, `资源/页面上限不足时重试拒绝（实际 ${JSON.stringify(rt3)}）`);
+        ok(env2.createdUrls.length === created3, '资源不足时未开页');
+
+        // 默认 50 款的第 50 款同理
+        const env4 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env4.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 50 } });
+        const rows4 = Array.from({ length: 60 }, (_, i) => 400 + i);
+        await env4.sendExternal({ action: 'openBatchPublish', rows: rows4 });
+        await tick(300);
+        await driveFills(env4, 49);
+        await tick(300);
+        const t4 = await env4.run('loadPublishTask()');
+        ok(t4.batchFilled === 50 && t4.currentRow === 449, `第 50 款在填（实际 ${t4.batchFilled}/${t4.currentRow}）`);
+        for (const f of env4.L.onRemoved) f(t4.currentTabId);
+        await tick(300);
+        const c4 = env4.createdUrls.length;
+        const rt4 = await env4.sendExternal({ action: 'retryPublishRow' });
+        await tick(300);
+        ok(rt4 && rt4.ok, `默认 50 款的第 50 款可重试（实际 ${JSON.stringify(rt4)}）`);
+        ok(env4.createdUrls.length === c4 + 1, '第 50 款重试开了一页');
+    }
+
+    console.log('\n【29】失效页面不允许靠「继续」空等');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [361, 362] });
+        await tick(300);
+        const t0 = await env.run('loadPublishTask()');
+        for (const f of env.L.onRemoved) f(t0.currentTabId);
+        await tick(300);
+        const created = env.createdUrls.length;
+        const res = await env.sendExternal({ action: 'resumePublishQueue' });
+        await tick(300);
+        ok(res && !res.ok, `失效当前行时「继续」被拒并给出指引（实际 ${JSON.stringify(res)}）`);
+        ok(/重试当前行/.test(res.message || ''), '拒绝信息指向「重试当前行」');
+        ok(env.createdUrls.length === created, '未开新页');
+        const st = await env.sendExternal({ action: 'getPublishState' });
+        ok(st.state === 'paused' && st.pauseReason === 'tabClosed', '仍保持 tabClosed');
+    }
     console.log('\n' + '='.repeat(50));
     console.log(`通过: ${pass}   失败: ${fail}`);
     if (failures.length) { console.log('失败项:'); failures.forEach(f => console.log('  - ' + f)); }

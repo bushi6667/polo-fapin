@@ -188,8 +188,33 @@ function withPublishLock(fn) {
 const PUBLISH_TICK_ALARM = 'publishTick';
 
 // 停止闸门：收到停止意图时【立即】置位，不受互斥链排队影响。
-// 用于保证「资源检查/开页途中收到停止」时不再创建新页。
+// 用「代次(epoch)」区分"操作开始前的旧停止"与"操作开始后新到达的停止"：
+//   - 用户明确继续/重试/新建 → beginPublishRunIntent()：清掉旧停止并记录当前代次
+//   - 之后任何停止 → markPublishStop()：代次 +1，置位
+//   - 开页前最终确认 publishStopBlocked()：被置位 或 代次已变 → 禁止创建新页
 let publishStopRequested = false;
+let publishStopEpoch = 0;   // 每次停止意图 +1
+let publishRunEpoch = 0;    // 最近一次"明确要继续/重试/新建"时的停止代次
+
+function markPublishStop() {
+    publishStopRequested = true;
+    publishStopEpoch += 1;
+}
+
+// 只能在操作【开始时】调用：清除开始前已存在的旧停止，不能覆盖开始后新到达的停止
+function beginPublishRunIntent() {
+    publishStopRequested = false;
+    publishRunEpoch = publishStopEpoch;
+    return publishRunEpoch;
+}
+
+// 最终开页前确认：是否已被停止（含操作开始后新到达的停止）
+function publishStopBlocked() {
+    return publishStopRequested || publishStopEpoch !== publishRunEpoch;
+}
+
+// 单行重试上限（重试会重置批次计数，需另设上限防止无限开页）
+const PUBLISH_ROW_RETRY_MAX = 5;
 
 // 允许重试的暂停原因（只有这些"卡住"状态才谈得上重试）
 const RETRYABLE_REASONS = ['tabClosed', 'rowTimeout', 'openFail'];
@@ -207,7 +232,7 @@ async function canOpenPublishPage(t, opts) {
     if (t.state !== 'running' && !o.allowPaused) {
         return { ok: false, reason: 'notRunning', detail: '任务未在运行' };
     }
-    if (publishStopRequested) {
+    if (publishStopBlocked()) {
         return { ok: false, reason: 'stopping', detail: '已收到停止请求，不再开新页' };
     }
     const cur = getFilePrefix();
@@ -491,10 +516,18 @@ function pausePublishTask(reason, detail) {
 
 async function resumePublishTask() {
     return withPublishLock(async () => {
+    beginPublishRunIntent();   // 用户明确的继续意图：清掉"开始前"的旧停止，记录代次
     const t = await loadPublishTask();
     if (!t) { notifyAssistant('publishResumeRejected', { message: '没有可继续的发品任务' }); return { ok: false, message: '没有可继续的发品任务' }; }
     if (t.state === 'running') { notifyAssistant('publishResumeRejected', { message: '任务正在运行中' }); return { ok: false, message: '任务正在运行中' }; }
     if (t.remaining.length === 0) { notifyAssistant('publishResumeRejected', { message: '队列已空' }); return { ok: false, message: '队列已空' }; }
+
+    // 当前行处于"页面已失效"的暂停态：不能靠"继续"空等，必须走明确的重试/跳过
+    if (t.currentRow !== null && RETRYABLE_REASONS.indexOf(t.pauseReason) >= 0) {
+        const msg = `第 ${t.currentRow} 行需要明确处理：请点「↻ 重试当前行」重开该页，或「⏭ 跳过当前行」`;
+        notifyAssistant('publishResumeRejected', { message: msg });
+        return { ok: false, message: msg };
+    }
 
     // 继续前强制刷新采样：不能用失败/过期缓存先检查
     memSampleCache = { at: 0, value: null };
@@ -519,7 +552,12 @@ async function resumePublishTask() {
     t.batchSize = s.batchSize;
     t.pageLimit = s.pageLimit;
     t.rowTimeoutMs = s.rowTimeoutMs;
-    publishStopRequested = false;
+
+    // 设置读取期间若收到停止请求 → 保持暂停，不继续（不前功尽弃地清除新停止）
+    if (publishStopBlocked()) {
+        notifyAssistant('publishResumeRejected', { message: '已收到停止请求，未继续' });
+        return { ok: false, message: '已收到停止请求，未继续' };
+    }
 
     t.state = 'running';
     t.pauseReason = '';
@@ -543,7 +581,12 @@ async function resumePublishTask() {
 }
 
 // ---------- 打开下一个标签（唯一开页入口） ----------
+// 紧邻 tabs.create 前做最终停止确认：尚未调用 tabs.create 时收到停止，一律不创建。
 async function openPublishTab(rowNum, taskId) {
+    if (publishStopBlocked()) {
+        console.warn('⛔ 开页前确认到停止请求，未创建新页');
+        return { blocked: true, reason: 'stopping' };
+    }
     const baseUrl = 'https://post.alibaba.com/product/easyListing.htm?spm=a2700.micro_product_manager.0.0.40e03e5fPaTwSu';
     const url = baseUrl + '&row=' + rowNum + '&task=' + encodeURIComponent(taskId);
     const tab = await chrome.tabs.create({ url });
@@ -558,8 +601,8 @@ async function publishTickOnce() {
         if (!publishRunning(t)) { stopPublishTick(); return; }
 
         // 文件切换检查：任务绑定文件 ≠ 当前文件 → 暂停，防串数据
-        if (t.fileKey && t.fileKey !== getFilePrefix()) {
-            await pausePublishTaskLocked('fileSwitch', `当前文件已切换（任务绑定 ${t.fileKey}），任务已暂停以防数据互串`);
+        if (taskFileKey(t) !== getFilePrefix()) {
+            await pausePublishTaskLocked('fileSwitch', `当前文件已切换（任务绑定 ${taskFileKey(t) || '(无文件名)'}），任务已暂停以防数据互串`);
             return;
         }
         // 当前行超时
@@ -591,7 +634,7 @@ async function processPublishQueueLocked() {
     if (t.currentRow !== null) return;
 
     // 停止闸门：已收到停止请求就不再开新页
-    if (publishStopRequested) {
+    if (publishStopBlocked()) {
         await pausePublishTaskLocked('manual', '已收到停止请求');
         return;
     }
@@ -613,7 +656,7 @@ async function processPublishQueueLocked() {
     // 开页前重读状态：停止/文件切换若在资源检查期间到达，不得用旧快照开页
     const t2 = await loadPublishTask();
     if (!publishRunning(t2) || t2.currentRow !== null) return;
-    if (publishStopRequested) { await pausePublishTaskLocked('manual', '已收到停止请求'); return; }
+    if (publishStopBlocked()) { await pausePublishTaskLocked('manual', '已收到停止请求'); return; }
     if (taskFileKey(t2) !== getFilePrefix()) {
         await pausePublishTaskLocked('fileSwitch', `当前文件与任务绑定文件不一致（任务 ${taskFileKey(t2) || '(无文件名)'} / 当前 ${getFilePrefix() || '(无文件名)'}）`);
         return;
@@ -627,11 +670,30 @@ async function processPublishQueueLocked() {
         await pausePublishTaskLocked('openFail', `第 ${rowNum} 行开页失败：${e.message}`);
         return;
     }
+    if (!tab || tab.blocked) {
+        // 开页前被停止拦下：未创建任何标签，保持暂停
+        await pausePublishTaskLocked('manual', '开页前收到停止请求，未创建新页');
+        return;
+    }
 
     t2.currentRow = rowNum;
     t2.currentTabId = tab.id;
     t2.currentStartedAt = Date.now();
+    t2.currentRowRetries = 0;
     t2.batchFilled = (t2.batchFilled || 0) + 1;
+
+    if (publishStopBlocked()) {
+        // 创建请求已发出（无法撤回）：记账保留该页，保持暂停且不再开下一页，也不自动关闭
+        t2.state = 'paused';
+        t2.pauseReason = 'manual';
+        t2.pauseDetail = '开页途中收到停止请求：已保留当前页，任务保持暂停';
+        await savePublishTask(t2);
+        stopPublishTick();
+        await appendPublishLog({ level: 'open-stop', row: rowNum, tabId: tab.id });
+        await broadcastPublishState();
+        return;
+    }
+
     await savePublishTask(t2);
     ensurePublishTick();
 
@@ -678,6 +740,7 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
         t.currentRow = null;
         t.currentTabId = null;
         t.currentStartedAt = 0;
+        t.currentRowRetries = 0;   // 该行已入账，重试计数归零
         await savePublishTask(t);
         await appendPublishLog({ level: 'filled', row, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilledDone, paused: wasPaused });
 
@@ -704,9 +767,12 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
 }
 
 // ---------- 单行重试 / 明确跳过（用户主动触发） ----------
-// 重试同样要开一个页面 → 必须过同一套闸门（状态/停止/文件/资源/页面上限），并计入本批已开数
+// 语义：异常行「带入下一批」—— 重试重置下一批计数并把该页计入新批次；
+//       不再受"本批已开数"上限阻挡（否则每批最后一款失败后无法恢复）。
+//       仍受 页面总量 / 内存 / 文件 / 停止 闸门限制，另有单行重试上限防无限开页。
 async function retryPublishRow() {
     return withPublishLock(async () => {
+        beginPublishRunIntent();   // 用户明确的重试意图：清掉"开始前"的旧停止，记录代次
         const t = await loadPublishTask();
         if (!t) return { ok: false, message: '没有发品任务' };
         if (t.state === 'running') return { ok: false, message: '任务正在运行，不能重试' };
@@ -715,18 +781,16 @@ async function retryPublishRow() {
             return { ok: false, message: `当前暂停原因（${t.pauseReason || '未知'}）不支持重试；请用「继续下一批」或「跳过当前行」` };
         }
         if (t.currentRow === null) return { ok: false, message: '当前没有待重试的行' };
-
-        // 重试要再开一页 → 受本批已开数限制，避免反复重试无限开页
-        if ((t.batchFilled || 0) >= t.batchSize) {
-            return { ok: false, message: `本批已开 ${t.batchFilled}/${t.batchSize} 页达上限，不能再开页；请用「跳过当前行」或「继续下一批」` };
+        if ((t.currentRowRetries || 0) >= PUBLISH_ROW_RETRY_MAX) {
+            return { ok: false, message: `该行已重试 ${t.currentRowRetries} 次达上限，请「跳过当前行」或检查页面` };
         }
 
-        // 临时放行停止闸门：重试是用户明确的开页意图
-        const wasStopped = publishStopRequested;
-        publishStopRequested = false;
+        // 重试 = 该异常行进入下一批：先重置下一批计数，再开页
+        t.batchFilled = 0;
+        t.batchFilledDone = 0;
+
         const pre = await canOpenPublishPage(t, { allowPaused: true, allowCurrentRow: true });
         if (!pre.ok) {
-            if (wasStopped) publishStopRequested = true;
             if (pre.reason !== 'stopping') await pausePublishTaskLocked(pre.reason, pre.detail);
             return { ok: false, message: pre.detail };
         }
@@ -736,26 +800,35 @@ async function retryPublishRow() {
         try {
             tab = await openPublishTab(row, t.taskId);
         } catch (e) {
-            if (wasStopped) publishStopRequested = true;
             return { ok: false, message: '重开失败：' + e.message };
         }
+        if (!tab || tab.blocked) {
+            return { ok: false, message: '已收到停止请求，未重试（未创建新页）' };
+        }
+
+        // 标签已创建（无法撤回）：先记账并保留，不自动关闭
         t.currentTabId = tab.id;
         t.currentStartedAt = Date.now();
-        // 继续前同步最新设置（每批款数 / 页面上限 / 行超时），使界面上改的批次真正生效
-        const s = await getPublishSettings();
-        t.batchSize = s.batchSize;
-        t.pageLimit = s.pageLimit;
-        t.rowTimeoutMs = s.rowTimeoutMs;
-        publishStopRequested = false;
+        t.currentRowRetries = (t.currentRowRetries || 0) + 1;
+        t.batchFilled = 1;   // 新批次：这一页计入新批次
+
+        if (publishStopBlocked()) {
+            t.state = 'paused';
+            t.pauseReason = 'manual';
+            t.pauseDetail = '重试开页途中收到停止请求：已保留当前页，任务保持暂停';
+            await savePublishTask(t);
+            stopPublishTick();
+            await appendPublishLog({ level: 'retry-stop', row, tabId: tab.id, retries: t.currentRowRetries });
+            await broadcastPublishState();
+            return { ok: false, message: '已收到停止请求：已保留当前页，任务保持暂停' };
+        }
 
         t.state = 'running';
         t.pauseReason = '';
         t.pauseDetail = '';
-        t.batchFilled = (t.batchFilled || 0) + 1;
         await savePublishTask(t);
-        publishStopRequested = false;
         ensurePublishTick();
-        await appendPublishLog({ level: 'retry', row, tabId: tab.id, batchOpened: t.batchFilled });
+        await appendPublishLog({ level: 'retry', row, tabId: tab.id, batchOpened: t.batchFilled, retries: t.currentRowRetries });
         await broadcastPublishState();
         return { ok: true, row };
     });
@@ -773,6 +846,7 @@ async function skipPublishRow() {
         t.currentRow = null;
         t.currentTabId = null;
         t.currentStartedAt = 0;
+        t.currentRowRetries = 0;   // 该行已跳过，重试计数归零
         t.state = t.remaining.length === 0 ? 'done' : 'running';
         t.pauseReason = '';
         t.pauseDetail = '';
@@ -1063,7 +1137,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 async function handleSharedAction(request, sendResponse) {
     // ---------- 发品任务控制（发品助手页 file:// 与扩展内部均可） ----------
     if (request.action === 'pausePublishQueue') {
-        publishStopRequested = true;   // 立即置闸门：资源检查/开页途中收到停止也不再创建新页
+        markPublishStop();   // 立即置闸门并递增停止代次：资源检查/开页途中也不再创建新页
         pausePublishTask('manual', '用户手动停止').then(() => {
             buildPublishStatePayload().then(p => sendResponse({ ok: true, state: p.state }));
         }).catch(e => sendResponse({ ok: false, error: e.message }));
@@ -1243,10 +1317,11 @@ async function handleSharedAction(request, sendResponse) {
                 currentRow: null,
                 currentTabId: null,
                 currentStartedAt: 0,
+                currentRowRetries: 0,
                 startedAt: now
             };
             await savePublishTask(task);
-            publishStopRequested = false;
+            beginPublishRunIntent();   // 新任务：清掉旧停止并记录代次
             console.log(`📋 发品任务已创建 ${task.taskId}，共 ${task.total} 款，批次 ${task.batchSize}`);
             await appendPublishLog({ level: 'create', taskId: task.taskId, total: task.total, batchSize: task.batchSize, fileKey: task.fileKey });
 
@@ -1572,7 +1647,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === 'pausePublishQueue') {
-        publishStopRequested = true;   // 立即置闸门（同上）
+        markPublishStop();   // 立即置闸门并递增停止代次（同上）
         loadPublishTask().then(t => {
             if (!t) { sendResponse({ ok: false, message: '没有发品任务' }); return; }
             pausePublishTask('manual', '用户手动停止').then(() => sendResponse({ ok: true }));
