@@ -504,18 +504,218 @@ async function driveFills(env, maxFills) {
     }
 
     // ---------- 场景：单行重试 / 跳过 ----------
-    console.log('\n【18】单行重试 / 明确跳过');
+    console.log('\n【18】单行重试：运行中拒绝；卡住态允许且受资源/页面/批次闸门约束');
     {
         const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
         await env.sendExternal({ action: 'openBatchPublish', rows: [161, 162] });
         await tick(250);
+        // 运行中重试 → 拒绝
+        const rRunning = await env.sendExternal({ action: 'retryPublishRow' });
+        ok(rRunning && !rRunning.ok, '运行中重试被拒绝', JSON.stringify(rRunning));
+        const before = env.createdUrls.length;
+
+        // 模拟标签被关闭 → 进入可重试的暂停态
+        const t0 = await env.run('loadPublishTask()');
+        for (const f of env.L.onRemoved) f(t0.currentTabId);
+        await tick(250);
+        const st1 = await env.sendExternal({ action: 'getPublishState' });
+        ok(st1.pauseReason === 'tabClosed', `进入 tabClosed（实际 ${st1.pauseReason}）`);
         const rt = await env.sendExternal({ action: 'retryPublishRow' });
-        ok(rt && rt.ok && rt.row === 161, `重试当前行（实际 ${JSON.stringify(rt)}）`);
+        await tick(200);
+        ok(rt && rt.ok && rt.row === 161, `卡住态可重试（实际 ${JSON.stringify(rt)}）`);
+        ok(env.createdUrls.length === before + 1, '重试开了一页');
+        const t1 = await env.run('loadPublishTask()');
+        ok(t1.batchFilled === 2, `重试计入本批已开数（实际 ${t1.batchFilled}）`);
+
         const sk = await env.sendExternal({ action: 'skipPublishRow' });
         await tick(250);
-        const st = await env.sendExternal({ action: 'getPublishState' });
+        const st2 = await env.sendExternal({ action: 'getPublishState' });
         ok(sk && sk.ok && sk.row === 161, '明确跳过当前行');
-        ok(st.remaining === 1, `跳过推进（剩 ${st.remaining}）`);
+        ok(st2.remaining === 1, `跳过推进（剩 ${st2.remaining}）`);
+    }
+
+    // ---------- 本轮验收反馈新增：重试不得绕过闸门 ----------
+    console.log('\n【19】重试绕过闸门 → 低内存 / 60 页 / 批次上限 均拒绝');
+    {
+        // 低内存
+        const envA = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await envA.sendExternal({ action: 'openBatchPublish', rows: [201, 202] });
+        await tick(250);
+        const tA = await envA.run('loadPublishTask()');
+        for (const f of envA.L.onRemoved) f(tA.currentTabId);
+        await tick(250);
+        envA.commitFreeMiBSet = 120; // 无法改已建 env，改用下面重建
+        // 直接构造：暂停态 + 低提交余量
+        const envA2 = createEnv({ physAvailGiB: 10, commitFreeMiB: 120 });
+        await envA2.sendExternal({ action: 'openBatchPublish', rows: [203, 204] });
+        await tick(250);
+        const tA2 = await envA2.run('loadPublishTask()');
+        for (const f of envA2.L.onRemoved) f(tA2.currentTabId);
+        await tick(250);
+        // 让下一次采样用低余量（资源已被闸门拦截，重试也必须被拦）
+        const createdA = envA2.createdUrls.length;
+        const rtA = await envA2.sendExternal({ action: 'retryPublishRow' });
+        await tick(200);
+        ok(rtA && !rtA.ok, `低提交余量下重试被拒绝（实际 ${JSON.stringify(rtA)}）`);
+        ok(envA2.createdUrls.length === createdA, '低余量下重试未开页');
+
+        // 60 个目标页面
+        const envB = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await envB.sendExternal({ action: 'openBatchPublish', rows: [211, 212] });
+        await tick(250);
+        const tB = await envB.run('loadPublishTask()');
+        for (const f of envB.L.onRemoved) f(tB.currentTabId);
+        await tick(250);
+        // 补足到 60 个目标页
+        for (let i = 0; i < 60; i++) envB.tabs.push({ id: 5000 + i, url: 'https://post.alibaba.com/product/publish?row=' + (700 + i) });
+        const createdB = envB.createdUrls.length;
+        const rtB = await envB.sendExternal({ action: 'retryPublishRow' });
+        await tick(200);
+        ok(rtB && !rtB.ok, `60 页下重试被拒绝（实际 ${JSON.stringify(rtB)}）`);
+        ok(envB.createdUrls.length === createdB, '60 页下重试未开页');
+
+        // 批次已开数达上限
+        const envC = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await envC.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 1 } });
+        await envC.sendExternal({ action: 'openBatchPublish', rows: [221, 222] });
+        await tick(250);
+        const tC = await envC.run('loadPublishTask()');
+        for (const f of envC.L.onRemoved) f(tC.currentTabId);
+        await tick(250);
+        const createdC = envC.createdUrls.length;
+        const rtC = await envC.sendExternal({ action: 'retryPublishRow' });
+        await tick(200);
+        ok(rtC && !rtC.ok, `批次已达上限时重试被拒绝（实际 ${JSON.stringify(rtC)}）`);
+        ok(envC.createdUrls.length === createdC, '批次上限下重试未开页');
+    }
+
+    // ---------- 并发新建任务 ----------
+    console.log('\n【20】并发 openBatchPublish → 只允许一次成功');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        const [r1, r2] = await Promise.all([
+            env.sendExternal({ action: 'openBatchPublish', rows: [2, 3] }),
+            env.sendExternal({ action: 'openBatchPublish', rows: [4, 5] })
+        ]);
+        await tick(300);
+        const okCount = [r1, r2].filter(x => x && x.ok).length;
+        ok(okCount === 1, `只有一次创建成功（实际 ${okCount}）`);
+        const t = await env.run('loadPublishTask()');
+        const kept = t.remaining.join(',');
+        ok(kept === '2,3' || kept === '4,5', `原队列完整保留其一（实际 ${kept}）`);
+        ok(t.total === 2, '未被覆盖成混合队列');
+    }
+
+    // ---------- 旧任务读新文件 ----------
+    console.log('\n【21】旧任务读取新文件数据 → 必须失败，不回退当前文件');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        env.store['B__product__row2'] = { row: 2, title_en: 'B 文件的产品' };
+        // 任务绑定空文件名（''）
+        await env.sendExternal({ action: 'openBatchPublish', rows: [2, 3] });
+        await tick(250);
+        const t0 = await env.run('loadPublishTask()');
+        // 切到 B 文件
+        await env.sendExternal({ action: 'setCurrentFilename', filename: 'B.xlsx' });
+        await tick(300);
+        const r = await env.sendExternal({ action: 'getProductByRow', rowNum: 2, taskId: t0.taskId });
+        ok(r && !r.ok, `旧任务读新文件被拒绝（实际 ${JSON.stringify(r)}）`);
+        const rBad = await env.sendExternal({ action: 'getProductByRow', rowNum: 2, taskId: 'pt_not_exist' });
+        ok(rBad && !rBad.ok, '不存在的 taskId 被拒绝');
+    }
+
+    // ---------- 文件切换后继续/重试 ----------
+    console.log('\n【22】文件切换后：继续 / 重试 一律拒绝并保持 fileSwitch');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [231, 232] });
+        await tick(250);
+        const t0 = await env.run('loadPublishTask()');
+        // 先让当前行完成（清掉 currentRow），再切文件
+        await env.sendInternal({ action: 'publishFilled', row: 231, taskId: t0.taskId }, { tab: { id: t0.currentTabId }, frameId: 0 });
+        await tick(250);
+        await env.sendExternal({ action: 'setCurrentFilename', filename: 'B2.xlsx' });
+        await tick(300);
+        const created = env.createdUrls.length;
+        const res = await env.sendExternal({ action: 'resumePublishQueue' });
+        await tick(300);
+        ok(res && !res.ok, `切文件后继续被拒（实际 ${JSON.stringify(res)}）`);
+        ok(env.createdUrls.length === created, '未开新页');
+        const st = await env.sendExternal({ action: 'getPublishState' });
+        ok(st.pauseReason === 'fileSwitch', `保持 fileSwitch（实际 ${st.pauseReason}）`);
+
+        // 空文件名任务 → 有文件名：同样受闸门约束
+        const env2 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env2.sendExternal({ action: 'openBatchPublish', rows: [241, 242] });
+        await tick(250);
+        const t1 = await env2.run('loadPublishTask()');
+        for (const f of env2.L.onRemoved) f(t1.currentTabId);
+        await tick(250);
+        await env2.sendExternal({ action: 'setCurrentFilename', filename: 'C.xlsx' });
+        await tick(300);
+        const created2 = env2.createdUrls.length;
+        const rt = await env2.sendExternal({ action: 'retryPublishRow' });
+        await tick(200);
+        ok(rt && !rt.ok, `空文件名任务切文件后重试被拒（实际 ${JSON.stringify(rt)}）`);
+        ok(env2.createdUrls.length === created2, '未开新页');
+    }
+
+    // ---------- 同名同步不误暂停 ----------
+    console.log('\n【23】同名 setCurrentFilename → 不暂停任务');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [251, 252] });
+        await tick(250);
+        const r = await env.sendExternal({ action: 'setCurrentFilename', filename: '' }); // 与当前同名（都是 ''）
+        await tick(250);
+        ok(r && r.ok && r.unchanged, '同名同步被识别为 unchanged', JSON.stringify(r));
+        const st = await env.sendExternal({ action: 'getPublishState' });
+        ok(st.state === 'running', `任务未被误暂停（实际 ${st.state}）`);
+    }
+
+    // ---------- 检查期间停止 ----------
+    console.log('\n【24】资源检查期间收到停止 → 不再创建新页');
+    {
+        // 让提交端点挂起，使 processPublishQueue 卡在等待；期间发停止
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, commitFetchHang: true });
+        const p = env.sendExternal({ action: 'openBatchPublish', rows: [261, 262] });
+        await tick(60);                         // 让它进入资源检查
+        env.sendExternal({ action: 'pausePublishQueue' });   // 立即置停止闸门
+        await tick(300);
+        const t = await env.run('loadPublishTask()');
+        ok(t && t.state === 'paused', `已暂停（实际 ${t && t.state}）`);
+        ok(env.createdUrls.length === 0, `停止后未创建新页（实际 ${env.createdUrls.length}）`);
+        await p.catch(() => {});
+    }
+
+    // ---------- 批次大小设置生效 ----------
+    console.log('\n【25】批次大小设置对当前（暂停）任务生效，运行中不可改');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 50 } });
+        await env.sendExternal({ action: 'openBatchPublish', rows: [271, 272, 273, 274] });
+        await tick(250);
+        // 运行中：设置不改变当前任务批次
+        const s1 = await env.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 3 } });
+        ok(s1 && s1.ok && s1.settings.batchSize === 3, '设置对象已更新为 3');
+        let t = await env.run('loadPublishTask()');
+        ok(t.batchSize === 50, `运行中任务批次不变（实际 ${t.batchSize}）`);
+        // 暂停 → 设置同步到任务
+        await env.sendExternal({ action: 'pausePublishQueue' });
+        await tick(250);
+        await env.sendExternal({ action: 'setPublishSettings', patch: { batchSize: 3 } });
+        await tick(250);
+        t = await env.run('loadPublishTask()');
+        ok(t.batchSize === 3, `暂停后任务批次已同步为 3（实际 ${t.batchSize}）`);
+        // 继续后按 3 款分批
+        const createdBefore = env.createdUrls.length;
+        await env.sendExternal({ action: 'resumePublishQueue' });
+        await tick(200);
+        await driveFills(env, 3);
+        await tick(250);
+        const st = await env.sendExternal({ action: 'getPublishState' });
+        ok(st.batchSize === 3, `继续后仍为 3（实际 ${st.batchSize}）`);
+        ok(env.createdUrls.length <= createdBefore + 3, `一批不超过 3 页（实际新增 ${env.createdUrls.length - createdBefore}）`);
     }
 
     // ---------- 汇总 ----------

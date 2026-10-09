@@ -4423,7 +4423,7 @@ async function loadBatchProduct(rowNum) {
             updateProductInfo(currentProduct);
             log('✓ 从批量数据加载产品: 行' + rowNum, 'success');
 
-            const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows' });
+            const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows', taskId: getTaskFromUrl() });
             // 只依据「已核实保存」记录跳过；跳过后必须正常推进队列，不能卡死
             if (uploadedResp && uploadedResp.ok && uploadedResp.rows && uploadedResp.rows[rowNum]) {
                 log(`⚠️ 第${rowNum}行已核实保存，跳过自动填入`, 'warn');

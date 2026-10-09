@@ -1743,10 +1743,10 @@ body::after {
                             <button class="stop-btn" id="pubToggleBtn" onclick="togglePublishRun()">⏹ 停止</button>
                         </span>
                     </div>
-                    <div class="progress-bar">
+                    <div class="progress-bar" id="pubBarRow">
                         <div class="progress-fill" id="batchPublishFill" style="width: 0%;"></div>
                     </div>
-                    <div class="progress-text">
+                    <div class="progress-text" id="pubTextRow">
                         <span id="batchPublishCounter">0/0</span>
                         <span id="batchPublishCurrent">-</span>
                     </div>
@@ -3329,6 +3329,8 @@ function checkExtension() {
             updateExtensionStatus();
             syncMemPauseMBToExtension();
             checkExtensionReloaded();
+            // 每次（重新）连上扩展都重新拉一次发品任务状态，避免刷新/断线后面板状态丢失
+            refreshPublishState();
             try {
                 if (!extensionPort) {
                     extensionPort = chrome.runtime.connect(EXTENSION_ID, { name: 'assistant-channel' });
@@ -3355,6 +3357,7 @@ function checkExtension() {
                         setTimeout(() => checkExtension(), 300);
                     });
                     console.log('🔌 已建立扩展长连接');
+                    refreshPublishState();   // 连上后立刻同步一次发品任务状态
                 }
             } catch (e) {
                 console.warn('建立长连接失败:', e);
@@ -3491,12 +3494,18 @@ function renderPublishState(s) {
     const paused = s.state === 'paused';
     const done = s.state === 'done';
 
-    if (s.state === 'idle') { showPublishProgress(false); return; }
+    const idle = (s.state === 'idle');
+    // idle 也展示面板（只留设置区），否则开始前无法设置每批款数
     showPublishProgress(true);
+    const barRow = document.getElementById('pubBarRow');
+    const textRow = document.getElementById('pubTextRow');
+    if (barRow) barRow.style.display = idle ? 'none' : 'block';
+    if (textRow) textRow.style.display = idle ? 'none' : 'flex';
 
     const st = publishStatusEl();
     if (st) {
-        if (done) st.textContent = `✅ 全部预填完成（${filled}/${total} 款，待保存）`;
+        if (idle) st.textContent = `⚙ 未开始 · 每批 ${s.settingsBatchSize || s.batchSize || 50} 款`;
+        else if (done) st.textContent = `✅ 全部预填完成（${filled}/${total} 款，待保存）`;
         else if (paused) st.textContent = `⏸ 已暂停 · ${PUBLISH_REASON_TEXT[s.pauseReason] || s.pauseReason || ''}`;
         else st.textContent = `🚀 正在预填 ${filled}/${total}`;
     }
@@ -3522,6 +3531,7 @@ function renderPublishState(s) {
 
     const btn = publishToggleEl();
     if (btn) {
+        btn.style.display = idle ? 'none' : 'inline-block';
         if (running) { btn.textContent = '⏹ 停止'; btn.disabled = false; }
         else if (done) { btn.textContent = '已完成'; btn.disabled = true; }
         else { btn.textContent = '▶ 继续下一批'; btn.disabled = false; }
@@ -3532,8 +3542,13 @@ function renderPublishState(s) {
     const rb = publishRetryEl(); if (rb) rb.style.display = stuck ? 'inline-block' : 'none';
     const sb = publishSkipEl(); if (sb) sb.style.display = stuck ? 'inline-block' : 'none';
 
+    // 每批款数：运行中不可改（改的是"下一批"，由扩展在继续时同步到任务）
     const inp = publishBatchInput();
-    if (inp && document.activeElement !== inp) inp.value = String(s.batchSize || 50);
+    if (inp) {
+        if (document.activeElement !== inp) inp.value = String(s.batchSize || s.settingsBatchSize || 50);
+        inp.disabled = (s.editableBatchSize === false);
+        inp.title = inp.disabled ? '运行中不可修改；停止后可改「下一批」款数' : '每批预填款数（1-60）';
+    }
 }
 
 function handlePublishState(s) { renderPublishState(s); }

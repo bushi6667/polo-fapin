@@ -187,6 +187,44 @@ function withPublishLock(fn) {
 // 巡检用 alarm（可唤醒被 MV3 回收的后台）；setInterval 只作同进程加速
 const PUBLISH_TICK_ALARM = 'publishTick';
 
+// 停止闸门：收到停止意图时【立即】置位，不受互斥链排队影响。
+// 用于保证「资源检查/开页途中收到停止」时不再创建新页。
+let publishStopRequested = false;
+
+// 允许重试的暂停原因（只有这些"卡住"状态才谈得上重试）
+const RETRYABLE_REASONS = ['tabClosed', 'rowTimeout', 'openFail'];
+
+// 任务绑定的文件标识：空字符串也是合法绑定值（未设置文件名时 getFilePrefix() 返回 ''）
+function taskFileKey(t) {
+    return (t && t.fileKey !== undefined && t.fileKey !== null) ? String(t.fileKey) : '';
+}
+
+// 统一开页前置闸门：状态 / 停止意图 / 文件一致性 / 在填页面 / 资源与页面上限
+// 所有开页入口（普通推进、重试）都必须先过这里
+async function canOpenPublishPage(t, opts) {
+    const o = opts || {};
+    if (!t) return { ok: false, reason: 'noTask', detail: '没有发品任务' };
+    if (t.state !== 'running' && !o.allowPaused) {
+        return { ok: false, reason: 'notRunning', detail: '任务未在运行' };
+    }
+    if (publishStopRequested) {
+        return { ok: false, reason: 'stopping', detail: '已收到停止请求，不再开新页' };
+    }
+    const cur = getFilePrefix();
+    const tf = taskFileKey(t);
+    if (tf !== cur) {
+        return { ok: false, reason: 'fileSwitch', detail: `当前文件与任务绑定文件不一致（任务 ${tf || '(无文件名)'} / 当前 ${cur || '(无文件名)'}）` };
+    }
+    if (t.currentRow !== null && !o.allowCurrentRow) {
+        return { ok: false, reason: 'busy', detail: '已有正在填写的行' };
+    }
+    const g = await checkPublishResources();
+    if (!g.ok) {
+        return { ok: false, reason: g.reasons[0].reason, detail: g.reasons.map(x => x.detail).join('；') };
+    }
+    return { ok: true, g };
+}
+
 // ---------- 设置（持久化 + 边界收敛） ----------
 async function getPublishSettings() {
     return new Promise((resolve) => {
@@ -197,14 +235,25 @@ async function getPublishSettings() {
 }
 
 async function setPublishSettings(patch) {
-    const cur = await getPublishSettings();
-    const next = { ...cur, ...patch };
-    next.batchSize = Math.min(60, Math.max(1, parseInt(next.batchSize, 10) || PUBLISH_DEFAULTS.batchSize));
-    // 页面上限安全边界固定为 60，不允许调高
-    next.pageLimit = Math.min(60, Math.max(1, parseInt(next.pageLimit, 10) || PUBLISH_DEFAULTS.pageLimit));
-    next.rowTimeoutMs = Math.max(60000, parseInt(next.rowTimeoutMs, 10) || PUBLISH_DEFAULTS.rowTimeoutMs);
-    await new Promise(r => chrome.storage.local.set({ [PUBLISH_SETTINGS_KEY]: next }, r));
-    return next;
+    return withPublishLock(async () => {
+        const cur = await getPublishSettings();
+        const next = { ...cur, ...patch };
+        next.batchSize = Math.min(60, Math.max(1, parseInt(next.batchSize, 10) || PUBLISH_DEFAULTS.batchSize));
+        // 页面上限安全边界固定为 60，不允许调高
+        next.pageLimit = Math.min(60, Math.max(1, parseInt(next.pageLimit, 10) || PUBLISH_DEFAULTS.pageLimit));
+        next.rowTimeoutMs = Math.max(60000, parseInt(next.rowTimeoutMs, 10) || PUBLISH_DEFAULTS.rowTimeoutMs);
+        await new Promise(r => chrome.storage.local.set({ [PUBLISH_SETTINGS_KEY]: next }, r));
+
+        // 暂停中的任务：立即同步为"下一批"的设置（运行中不改当前批次，避免计数错乱）
+        const t = await loadPublishTask();
+        if (t && t.state === 'paused') {
+            t.batchSize = next.batchSize;
+            t.pageLimit = next.pageLimit;
+            t.rowTimeoutMs = next.rowTimeoutMs;
+            await savePublishTask(t);
+        }
+        return next;
+    });
 }
 
 async function getMemPauseThresholdMB() {
@@ -374,8 +423,9 @@ function publishRunning(t) { return !!t && t.state === 'running'; }
 async function buildPublishStatePayload() {
     const t = await loadPublishTask();
     const pages = await countTargetTabs();
+    const settings = await getPublishSettings();
     // 已核实保存记录按文件隔离；本任务待保存数 = 本任务已填完且未核实保存的行
-    const fileKey = (t && t.fileKey) || getFilePrefix();
+    const fileKey = t ? taskFileKey(t) : getFilePrefix();
     const savedMap = await getVerifiedSavedMap(fileKey);
     const savedCount = Object.keys(savedMap).length;
     const filledRows = (t && Array.isArray(t.filledRows)) ? t.filledRows : [];
@@ -384,9 +434,12 @@ async function buildPublishStatePayload() {
         ok: true,
         state: t ? t.state : 'idle',
         taskId: t ? t.taskId : null,
-        batchSize: t ? t.batchSize : PUBLISH_DEFAULTS.batchSize,
-        batchOpened: t ? (t.batchFilled || 0) : 0,     // 本批已开页数
-        batchFilled: t ? (t.batchFilledDone || 0) : 0, // 本批已填完数
+        fileKey,
+        batchSize: t ? t.batchSize : settings.batchSize,   // idle 时显示真实设置值，不是硬编码 50
+        settingsBatchSize: settings.batchSize,
+        editableBatchSize: !t || t.state !== 'running',     // 运行中不允许改当前批次
+        batchOpened: t ? (t.batchFilled || 0) : 0,          // 本批已开页数
+        batchFilled: t ? (t.batchFilledDone || 0) : 0,      // 本批已填完数
         filledCount: t ? t.filledCount : 0,
         total: t ? t.total : 0,
         remaining: t ? t.remaining.length : 0,
@@ -396,7 +449,7 @@ async function buildPublishStatePayload() {
         pauseDetail: t ? t.pauseDetail : '',
         currentRow: t ? t.currentRow : null,
         pages,
-        pageLimit: t ? t.pageLimit : PUBLISH_DEFAULTS.pageLimit
+        pageLimit: t ? t.pageLimit : settings.pageLimit
     };
 }
 
@@ -452,6 +505,21 @@ async function resumePublishTask() {
         notifyAssistant('publishResumeRejected', { message: '资源条件不满足：' + detail });
         return { ok: false, message: '资源条件不满足：' + detail };
     }
+
+    // 文件一致性：继续前必须与任务绑定文件一致（空 fileKey 也是合法绑定值）
+    if (taskFileKey(t) !== getFilePrefix()) {
+        const d = `当前文件与任务绑定文件不一致（任务 ${taskFileKey(t) || '(无文件名)'} / 当前 ${getFilePrefix() || '(无文件名)'}）`;
+        await pausePublishTaskLocked('fileSwitch', d);
+        notifyAssistant('publishResumeRejected', { message: d });
+        return { ok: false, message: d };
+    }
+
+    // 继续前同步最新设置（每批款数 / 页面上限 / 行超时），使界面上改的批次真正生效
+    const s = await getPublishSettings();
+    t.batchSize = s.batchSize;
+    t.pageLimit = s.pageLimit;
+    t.rowTimeoutMs = s.rowTimeoutMs;
+    publishStopRequested = false;
 
     t.state = 'running';
     t.pauseReason = '';
@@ -522,21 +590,34 @@ async function processPublishQueueLocked() {
     // 已有在填页面：恢复等待该标签，绝不重复开页
     if (t.currentRow !== null) return;
 
+    // 停止闸门：已收到停止请求就不再开新页
+    if (publishStopRequested) {
+        await pausePublishTaskLocked('manual', '已收到停止请求');
+        return;
+    }
+
     // 本批已开页数达上限 → 暂停，等用户主动继续（不因关页/保存自动继续）
     if ((t.batchFilled || 0) >= t.batchSize) {
         await pausePublishTaskLocked('batch', `本批已开 ${t.batchFilled}/${t.batchSize} 页达上限，剩 ${t.remaining.length} 款；处理完已开页面后点「继续下一批」`);
         return;
     }
 
-    const g = await checkPublishResources();
-    if (!g.ok) {
-        await pausePublishTaskLocked(g.reasons[0].reason, g.reasons.map(x => x.detail).join('；'));
+    const pre = await canOpenPublishPage(t);
+    if (!pre.ok) {
+        if (pre.reason === 'stopping') await pausePublishTaskLocked('manual', pre.detail);
+        else await pausePublishTaskLocked(pre.reason, pre.detail);
         return;
     }
+    const g = pre.g;
 
-    // 开页前重读状态：停止若在资源检查期间到达，不得用旧 running 快照开页
+    // 开页前重读状态：停止/文件切换若在资源检查期间到达，不得用旧快照开页
     const t2 = await loadPublishTask();
     if (!publishRunning(t2) || t2.currentRow !== null) return;
+    if (publishStopRequested) { await pausePublishTaskLocked('manual', '已收到停止请求'); return; }
+    if (taskFileKey(t2) !== getFilePrefix()) {
+        await pausePublishTaskLocked('fileSwitch', `当前文件与任务绑定文件不一致（任务 ${taskFileKey(t2) || '(无文件名)'} / 当前 ${getFilePrefix() || '(无文件名)'}）`);
+        return;
+    }
 
     const rowNum = t2.remaining[0];
     let tab;
@@ -623,26 +704,58 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
 }
 
 // ---------- 单行重试 / 明确跳过（用户主动触发） ----------
+// 重试同样要开一个页面 → 必须过同一套闸门（状态/停止/文件/资源/页面上限），并计入本批已开数
 async function retryPublishRow() {
     return withPublishLock(async () => {
         const t = await loadPublishTask();
         if (!t) return { ok: false, message: '没有发品任务' };
+        if (t.state === 'running') return { ok: false, message: '任务正在运行，不能重试' };
+        if (t.state !== 'paused') return { ok: false, message: '当前状态不可重试' };
+        if (RETRYABLE_REASONS.indexOf(t.pauseReason) < 0) {
+            return { ok: false, message: `当前暂停原因（${t.pauseReason || '未知'}）不支持重试；请用「继续下一批」或「跳过当前行」` };
+        }
         if (t.currentRow === null) return { ok: false, message: '当前没有待重试的行' };
+
+        // 重试要再开一页 → 受本批已开数限制，避免反复重试无限开页
+        if ((t.batchFilled || 0) >= t.batchSize) {
+            return { ok: false, message: `本批已开 ${t.batchFilled}/${t.batchSize} 页达上限，不能再开页；请用「跳过当前行」或「继续下一批」` };
+        }
+
+        // 临时放行停止闸门：重试是用户明确的开页意图
+        const wasStopped = publishStopRequested;
+        publishStopRequested = false;
+        const pre = await canOpenPublishPage(t, { allowPaused: true, allowCurrentRow: true });
+        if (!pre.ok) {
+            if (wasStopped) publishStopRequested = true;
+            if (pre.reason !== 'stopping') await pausePublishTaskLocked(pre.reason, pre.detail);
+            return { ok: false, message: pre.detail };
+        }
+
         const row = t.currentRow;
         let tab;
         try {
             tab = await openPublishTab(row, t.taskId);
         } catch (e) {
+            if (wasStopped) publishStopRequested = true;
             return { ok: false, message: '重开失败：' + e.message };
         }
         t.currentTabId = tab.id;
         t.currentStartedAt = Date.now();
+        // 继续前同步最新设置（每批款数 / 页面上限 / 行超时），使界面上改的批次真正生效
+        const s = await getPublishSettings();
+        t.batchSize = s.batchSize;
+        t.pageLimit = s.pageLimit;
+        t.rowTimeoutMs = s.rowTimeoutMs;
+        publishStopRequested = false;
+
         t.state = 'running';
         t.pauseReason = '';
         t.pauseDetail = '';
+        t.batchFilled = (t.batchFilled || 0) + 1;
         await savePublishTask(t);
+        publishStopRequested = false;
         ensurePublishTick();
-        await appendPublishLog({ level: 'retry', row, tabId: tab.id });
+        await appendPublishLog({ level: 'retry', row, tabId: tab.id, batchOpened: t.batchFilled });
         await broadcastPublishState();
         return { ok: true, row };
     });
@@ -815,8 +928,9 @@ function colorKey(rowNum) {
     return getFilePrefix() + 'color__' + rowNum;
 }
 
-function uploadedKey() {
-    return getFilePrefix() + 'uploaded';
+function uploadedKey(fileKey) {
+    const k = (fileKey === undefined || fileKey === null) ? getFilePrefix() : String(fileKey);
+    return k + 'uploaded';
 }
 
 function productKey() {
@@ -949,6 +1063,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 async function handleSharedAction(request, sendResponse) {
     // ---------- 发品任务控制（发品助手页 file:// 与扩展内部均可） ----------
     if (request.action === 'pausePublishQueue') {
+        publishStopRequested = true;   // 立即置闸门：资源检查/开页途中收到停止也不再创建新页
         pausePublishTask('manual', '用户手动停止').then(() => {
             buildPublishStatePayload().then(p => sendResponse({ ok: true, state: p.state }));
         }).catch(e => sendResponse({ ok: false, error: e.message }));
@@ -1056,11 +1171,7 @@ async function handleSharedAction(request, sendResponse) {
     }
     if (request.action === 'getProductByRow') {
         const rowNum = request.rowNum;
-        // 产品读取按任务绑定文件查询：页2/页3 的迟到消息不依赖可变的全局文件名
-        const resolvePrefix = (request.taskId)
-            ? loadPublishTask().then(t => (t && t.taskId === request.taskId && t.fileKey) ? t.fileKey : getFilePrefix())
-            : Promise.resolve(getFilePrefix());
-        resolvePrefix.then(prefix => {
+        const finish = (prefix) => {
             const key = prefix + 'product__row' + rowNum;
             chrome.storage.local.get(key, (result) => {
                 const product = result[key] || null;
@@ -1071,7 +1182,21 @@ async function handleSharedAction(request, sendResponse) {
                 }
                 sendResponse({ ok: !!product, data: product });
             });
-        });
+        };
+        const hasTaskId = (request.taskId !== undefined && request.taskId !== null && request.taskId !== '');
+        if (hasTaskId) {
+            // taskId 已提供：必须匹配存在的任务，且按任务绑定文件读取；不匹配一律拒绝（不回退当前文件）
+            loadPublishTask().then(t => {
+                if (!t || t.taskId !== request.taskId) {
+                    console.warn(`⛔ getProductByRow 任务标识不匹配（请求 ${request.taskId}），已拒绝，不回退当前文件`);
+                    sendResponse({ ok: false, error: '任务标识不匹配，已拒绝（不回退当前文件）' });
+                    return;
+                }
+                finish(taskFileKey(t));
+            });
+        } else {
+            finish(getFilePrefix());
+        }
         return true;
     }
     if (request.action === 'openPublishPage') {
@@ -1088,44 +1213,49 @@ async function handleSharedAction(request, sendResponse) {
             return true;
         }
 
-        // 新任务不得覆盖未完成任务（含用户手动停止的）：无任何 force 绕过
-        const prev = await loadPublishTask();
-        if (prev && prev.state === 'running') {
-            sendResponse({ ok: false, error: '已有正在进行的发品任务，已保留原队列；请先停止或等其结束' });
-            return true;
-        }
-        if (prev && prev.state === 'paused' && prev.remaining.length > 0) {
-            sendResponse({ ok: false, error: `存在暂停中的任务（剩 ${prev.remaining.length} 款）。请先点「继续下一批」` });
-            return true;
-        }
+        // 任务存在检查 + 创建必须在同一串行段内：并发请求只允许一次成功
+        const result = await withPublishLock(async () => {
+            const prev = await loadPublishTask();
+            if (prev && prev.state === 'running') {
+                return { ok: false, error: '已有正在进行的发品任务，已保留原队列；请先停止或等其结束' };
+            }
+            if (prev && prev.state === 'paused' && prev.remaining.length > 0) {
+                return { ok: false, error: `存在暂停中的任务（剩 ${prev.remaining.length} 款）。请先点「继续下一批」` };
+            }
 
-        const s = await getPublishSettings();
-        const now = Date.now();
-        const task = {
-            taskId: 'pt_' + now + '_' + Math.random().toString(36).slice(2, 8),
-            fileKey: getFilePrefix(),
-            total: rows.length,
-            remaining: [...rows],
-            filledCount: 0,
-            batchSize: s.batchSize,
-            batchFilled: 0,
-            pageLimit: s.pageLimit,
-            rowTimeoutMs: s.rowTimeoutMs,
-            state: 'running',
-            pauseReason: '',
-            pauseDetail: '',
-            currentRow: null,
-            currentTabId: null,
-            currentStartedAt: 0,
-            startedAt: now
-        };
-        await savePublishTask(task);
-        console.log(`📋 发品任务已创建 ${task.taskId}，共 ${task.total} 款，批次 ${task.batchSize}`);
-        await appendPublishLog({ level: 'create', taskId: task.taskId, total: task.total, batchSize: task.batchSize });
+            const s = await getPublishSettings();
+            const now = Date.now();
+            const task = {
+                taskId: 'pt_' + now + '_' + Math.random().toString(36).slice(2, 8),
+                fileKey: getFilePrefix(),
+                total: rows.length,
+                remaining: [...rows],
+                filledCount: 0,
+                filledRows: [],
+                batchSize: s.batchSize,
+                batchFilled: 0,
+                batchFilledDone: 0,
+                pageLimit: s.pageLimit,
+                rowTimeoutMs: s.rowTimeoutMs,
+                state: 'running',
+                pauseReason: '',
+                pauseDetail: '',
+                currentRow: null,
+                currentTabId: null,
+                currentStartedAt: 0,
+                startedAt: now
+            };
+            await savePublishTask(task);
+            publishStopRequested = false;
+            console.log(`📋 发品任务已创建 ${task.taskId}，共 ${task.total} 款，批次 ${task.batchSize}`);
+            await appendPublishLog({ level: 'create', taskId: task.taskId, total: task.total, batchSize: task.batchSize, fileKey: task.fileKey });
 
-        await processPublishQueue();
+            await processPublishQueueLocked();   // 锁内调用，避免把带锁函数嵌套进锁
+            return { ok: true, count: rows.length, taskId: task.taskId, batchSize: task.batchSize };
+        });
+
         await broadcastPublishState();
-        sendResponse({ ok: true, count: rows.length, taskId: task.taskId, batchSize: task.batchSize });
+        sendResponse(result);
         return true;
     }
     if (request.action === 'publishCompleted') {
@@ -1143,11 +1273,22 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'getUploadedRows') {
-        // rows 只返回「当前任务文件」下的已核实保存行（不是整张嵌套表）
         const t = await loadPublishTask();
-        const fileKey = (t && t.fileKey) || getFilePrefix();
+        const hasTaskId = (request.taskId !== undefined && request.taskId !== null && request.taskId !== '');
+        // 页2/页3 带 taskId → 按任务绑定文件查询；助手页列表不带 → 按当前文件查询
+        let fileKey;
+        if (hasTaskId) {
+            if (!t || t.taskId !== request.taskId) {
+                sendResponse({ ok: false, error: '任务标识不匹配，已拒绝' });
+                return true;
+            }
+            fileKey = taskFileKey(t);
+        } else {
+            fileKey = getFilePrefix();
+        }
         const verified = await getVerifiedSavedMap(fileKey);
-        const legacy = await new Promise(r => chrome.storage.local.get(uploadedKey(), v => r(v[uploadedKey()] || {})));
+        const legacyKey = uploadedKey(fileKey);
+        const legacy = await new Promise(r => chrome.storage.local.get(legacyKey, v => r(v[legacyKey] || {})));
         sendResponse({ ok: true, rows: verified, legacy, fileKey });
         return true;
     }
@@ -1215,13 +1356,20 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'setCurrentFilename') {
-        // 文件切换：先暂停在跑的发品任务（防串数据），再切换当前文件
-        pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').catch(() => {});
-        CURRENT_FILENAME = request.filename || '';
-        console.log(`📄 当前文件名切换为: ${CURRENT_FILENAME || '(默认)'}`);
-        chrome.storage.local.set({ current_filename: CURRENT_FILENAME }, () => {
-            sendResponse({ ok: true, filename: CURRENT_FILENAME });
-        });
+        const nextName = request.filename || '';
+        if (nextName === CURRENT_FILENAME) {
+            // 同名同步：不无理由暂停任务
+            sendResponse({ ok: true, filename: CURRENT_FILENAME, unchanged: true });
+            return true;
+        }
+        // 先真正完成暂停（等锁释放）再切换当前文件，避免暂停与切换竞态
+        pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').then(() => {
+            CURRENT_FILENAME = nextName;
+            console.log(`📄 当前文件名切换为: ${CURRENT_FILENAME || '(默认)'}`);
+            chrome.storage.local.set({ current_filename: CURRENT_FILENAME }, () => {
+                sendResponse({ ok: true, filename: CURRENT_FILENAME });
+            });
+        }).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'getPsEditResult') {
@@ -1389,6 +1537,8 @@ chrome.runtime.onConnectExternal.addListener((port) => {
             assistantPort = port;
             assistantTabId = port.sender?.tab?.id || null;
             console.log('✅ [onConnectExternal] 发品助手长连接已建立, tabId=', assistantTabId);
+            // 连接建立后主动推一次任务状态：页面刷新/重连后能立刻恢复面板与暂停原因
+            broadcastPublishState().catch(() => {});
             port.onDisconnect.addListener(() => {
                 console.log('🔌 [onConnectExternal] 发品助手长连接已断开');
                 assistantPort = null;
@@ -1422,6 +1572,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === 'pausePublishQueue') {
+        publishStopRequested = true;   // 立即置闸门（同上）
         loadPublishTask().then(t => {
             if (!t) { sendResponse({ ok: false, message: '没有发品任务' }); return; }
             pausePublishTask('manual', '用户手动停止').then(() => sendResponse({ ok: true }));
@@ -1791,10 +1942,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'setCurrentFilename') {
-        CURRENT_FILENAME = request.filename || '';
-        chrome.storage.local.set({ current_filename: CURRENT_FILENAME }, () => {
-            sendResponse({ ok: true, filename: CURRENT_FILENAME });
-        });
+        const nextName = request.filename || '';
+        if (nextName === CURRENT_FILENAME) {
+            sendResponse({ ok: true, filename: CURRENT_FILENAME, unchanged: true });
+            return true;
+        }
+        pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').then(() => {
+            CURRENT_FILENAME = nextName;
+            console.log(`📄 当前文件名切换为: ${CURRENT_FILENAME || '(默认)'}`);
+            chrome.storage.local.set({ current_filename: CURRENT_FILENAME }, () => {
+                sendResponse({ ok: true, filename: CURRENT_FILENAME });
+            });
+        }).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
 
