@@ -3046,6 +3046,9 @@ function renderDetail() {
                             <button class="batch-color-btn" onclick="startBatchColorChange()" id="batchColorBtn" style="justify-content: center;">
                                 🚀 一键换色
                             </button>
+                            <button class="batch-color-btn" onclick="startColorChangeForRows()" id="colorRowsBtn" style="justify-content: center;">
+                                🔁 指定重生成
+                            </button>
                             <button class="color-change-btn" onclick="startColorChange(${p.row})" id="colorChangeBtn" style="justify-content: center;">
                                 🎨 AI换色
                             </button>
@@ -3883,23 +3886,104 @@ function startBatchColorChange() {
     const ok = confirm(`将从 row${remainingList[0].row} 开始，对 ${remainingCount} 款产品依次执行 AI 换色（从当前款到最后一款）。\n\n每款产品处理完后再处理下一款，处理过程中可随时点"停止"按钮中断。\n\n确定开始？`);
     if (!ok) return;
 
+    beginColorBatch(remainingList, '一键换色');
+}
+
+// 批量换色统一启动入口：一键换色与「指定重生成」共用
+function beginColorBatch(queueList, label) {
     batchColorState = {
         running: true,
         stopRequested: false,
-        queue: remainingList.map((p, i) => ({ ...p, _idx: i })),
+        queue: queueList.map((p, i) => ({ ...p, _idx: i })),
         currentIndex: 0,
         successCount: 0,
         failCount: 0,
         startTime: Date.now(),
-        startRow: remainingList[0].row,
+        startRow: queueList[0].row,
         lastAdvancedRow: null,
         lastProcessedTimestamp: 0,
-        pollTimer: null
+        pollTimer: null,
+        label: label || '批量换色'
     };
 
     showBatchColorProgress();
     startBatchColorPolling();
     processNextBatchColor();
+}
+
+// 解析行号输入：空格 / 英文逗号 / 中文逗号 / 分号 / 顿号 / 换行分隔，支持 a-b 区间
+function parseRowNumbers(text) {
+    const seen = new Set();
+    const out = [];
+    const push = (n) => {
+        if (Number.isInteger(n) && n > 0 && !seen.has(n)) { seen.add(n); out.push(n); }
+    };
+    const norm = String(text || '').replace(/\s*[-~—]\s*/g, '-');
+    for (const t of norm.split(/[\s,，;；、]+/).filter(Boolean)) {
+        const m = t.match(/^(\d+)-(\d+)$/);
+        if (m) {
+            let a = parseInt(m[1], 10);
+            let b = parseInt(m[2], 10);
+            if (a > b) { const tmp = a; a = b; b = tmp; }
+            if (b - a > 2000) continue; // 防误输入把区间撑爆
+            for (let i = a; i <= b; i++) push(i);
+        } else if (/^\d+$/.test(t)) {
+            push(parseInt(t, 10));
+        }
+    }
+    return out;
+}
+
+// 指定重生成：输入行号，只跑这些行（复用一键换色的队列/进度/停止/超时逻辑）
+function startColorChangeForRows() {
+    if (!products || products.length === 0) {
+        showToast('⚠️ 请先上传 Excel');
+        return;
+    }
+    if (batchColorState && batchColorState.running) {
+        showToast('⚠️ 换色任务正在进行中');
+        return;
+    }
+    if (!extensionInstalled) {
+        showToast('⚠️ 请确认扩展已安装');
+        return;
+    }
+
+    const lastInput = localStorage.getItem('polo_color_rows_last') || '';
+    const input = prompt(
+        '输入要重新生成的行号\n（空格 / 逗号 / 换行分隔，支持 315-357 区间）\n\n例：32 42 44 48 49 52',
+        lastInput
+    );
+    if (input === null) return;
+
+    const rows = parseRowNumbers(input);
+    if (rows.length === 0) {
+        showToast('⚠️ 没解析到有效行号');
+        return;
+    }
+
+    const byRow = new Map(products.map(p => [p.row, p]));
+    const queue = [];
+    const missing = [];
+    for (const r of rows) {
+        const p = byRow.get(r);
+        if (p) queue.push(p); else missing.push(r);
+    }
+    if (queue.length === 0) {
+        showToast(`⚠️ 这些行号都不在当前 Excel：${missing.slice(0, 8).join(' ')}${missing.length > 8 ? ' ...' : ''}`);
+        return;
+    }
+
+    const missMsg = missing.length
+        ? `\n\n⚠️ 不在当前 Excel 中，将跳过 ${missing.length} 个：\n${missing.slice(0, 30).join(' ')}${missing.length > 30 ? ' ...' : ''}`
+        : '';
+    const ok = confirm(
+        `将对指定的 ${queue.length} 款产品依次执行 AI 换色：\n\n${queue.map(p => p.row).join(' ')}${missMsg}\n\n确定开始？`
+    );
+    if (!ok) return;
+
+    localStorage.setItem('polo_color_rows_last', input.trim());
+    beginColorBatch(queue, '指定重生成');
 }
 
 // 轮询兜底：SW 休眠导致 port/tabs.sendMessage 失效时，从 storage 读取完成事件推进
@@ -4008,6 +4092,7 @@ function stopBatchColorChange() {
 
 function finishBatchColor(completed) {
     if (!batchColorState) return;
+    const batchLabel = batchColorState.label || '批量换色';
     if (batchColorState.currentTimeoutId) {
         clearTimeout(batchColorState.currentTimeoutId);
         batchColorState.currentTimeoutId = null;
@@ -4023,12 +4108,12 @@ function finishBatchColor(completed) {
     const timeStr = minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
 
     if (completed) {
-        updateBatchColorStatus(`✅ 已完成 ${success} 款${fail > 0 ? `，失败 ${fail} 款` : ''}（用时 ${timeStr}）`);
+        updateBatchColorStatus(`✅ ${batchLabel}完成 ${success} 款${fail > 0 ? `，失败 ${fail} 款` : ''}（用时 ${timeStr}）`);
         updateBatchColorFill(100);
-        showToast(`✅ 批量换色完成！${success} 款成功${fail > 0 ? `，${fail} 款失败` : ''}，用时 ${timeStr}`);
+        showToast(`✅ ${batchLabel}完成！${success} 款成功${fail > 0 ? `，${fail} 款失败` : ''}，用时 ${timeStr}`);
     } else {
-        updateBatchColorStatus(`⏸ 已停止。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）`);
-        showToast(`⏸ 批量换色已停止。完成 ${success} 款，失败 ${fail} 款`);
+        updateBatchColorStatus(`⏸ ${batchLabel}已停止。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）`);
+        showToast(`⏸ ${batchLabel}已停止。完成 ${success} 款，失败 ${fail} 款`);
     }
 
     if (colorPollTimer) { clearInterval(colorPollTimer); colorPollTimer = null; }
@@ -4040,6 +4125,8 @@ function finishBatchColor(completed) {
         batchColorState = null;
         const btn = document.getElementById('batchColorBtn');
         if (btn) { btn.disabled = false; btn.innerHTML = '🚀 一键换色'; }
+        const rowsBtn = document.getElementById('colorRowsBtn');
+        if (rowsBtn) rowsBtn.disabled = false;
     }, 5000);
 }
 
@@ -4048,6 +4135,8 @@ function showBatchColorProgress() {
     if (el) el.style.display = 'block';
     const btn = document.getElementById('batchColorBtn');
     if (btn) { btn.disabled = true; btn.innerHTML = '⏳ 批量运行中...'; }
+    const rowsBtn = document.getElementById('colorRowsBtn');
+    if (rowsBtn) rowsBtn.disabled = true;
 }
 
 function updateBatchColorProgress() {
@@ -4062,7 +4151,7 @@ function updateBatchColorProgress() {
     if (product && batchColorCurrentEl) {
         batchColorCurrentEl.textContent = `正在处理 row${product.row} (${product.title_en || '未命名'})`;
     }
-    updateBatchColorStatus(`🚀 批量换色中 ${current}/${total}`);
+    updateBatchColorStatus(`🚀 ${batchColorState.label || '批量换色'}中 ${current}/${total}`);
 }
 
 function updateBatchColorStatus(text) {
