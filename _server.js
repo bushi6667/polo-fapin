@@ -13,9 +13,57 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { execFile } = require('child_process');
 
 const PORT = 8765;
 const BASE_DIR = __dirname;
+
+// ---------- 内存指标采样（只读；供扩展发品资源闸门查询系统提交额度） ----------
+// 说明：chrome.system.memory 只有物理内存，拿不到 Windows「提交额度」。
+// 这里用 CIM 查询 Win32_OperatingSystem 的 Total/FreeVirtualMemory（KB）换算：
+//   commitLimit = TotalVirtualMemorySize * 1024
+//   committed   = (TotalVirtualMemorySize - FreeVirtualMemory) * 1024
+// 口径与 Windows 事件 2004 的提交额度一致，且不受系统语言影响。
+// 安全：不接受任何参数，不执行客户端提供的命令；结果缓存 10 秒合并并发请求。
+const MEM_SAMPLE_TTL_MS = 10000;
+let memInfoCache = { at: 0, value: null };
+let memInfoPending = null;
+
+function sampleCommitMemory() {
+  if (memInfoCache.value && Date.now() - memInfoCache.at < MEM_SAMPLE_TTL_MS) {
+    return Promise.resolve(memInfoCache.value);
+  }
+  if (memInfoPending) return memInfoPending;
+
+  const cmd =
+    "$o = Get-CimInstance Win32_OperatingSystem;" +
+    "$limit = [long]$o.TotalVirtualMemorySize * 1024;" +
+    "$free = [long]$o.FreeVirtualMemory * 1024;" +
+    "ConvertTo-Json -Compress -InputObject @{ commitLimitBytes = $limit; committedBytes = ($limit - $free) }";
+
+  memInfoPending = new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd],
+      { timeout: 8000, windowsHide: true }, (err, stdout) => {
+        if (err) { resolve({ error: '采样失败: ' + (err.message || '未知') }); return; }
+        try {
+          const j = JSON.parse(String(stdout || '').trim());
+          const commitLimitBytes = Number(j.commitLimitBytes);
+          const committedBytes = Number(j.committedBytes);
+          if (!Number.isFinite(commitLimitBytes) || !Number.isFinite(committedBytes) ||
+              commitLimitBytes <= 0 || committedBytes < 0 || committedBytes > commitLimitBytes) {
+            resolve({ error: '采样输出数值非法' });
+            return;
+          }
+          const value = { commitLimitBytes, committedBytes, sampledAt: Date.now() };
+          memInfoCache = { at: Date.now(), value };
+          resolve(value);
+        } catch (e) {
+          resolve({ error: '解析失败: ' + e.message });
+        }
+      });
+  }).then((v) => { memInfoPending = null; return v; });
+  return memInfoPending;
+}
 
 // 静态资源 MIME 类型映射（支持中文页面的 charset）
 const MIME_TYPES = {
@@ -117,6 +165,15 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
         res.end(JSON.stringify({ message: '✅ 已保存', script: 'app.echoToOE("已保存到本地");' }));
       });
+    });
+    return;
+  }
+
+  // ---------- 内存指标端点（GET /mem-info，只读数值，不接受参数） ----------
+  if (req.method === 'GET' && req.url === '/mem-info') {
+    sampleCommitMemory().then((v) => {
+      res.writeHead(v.error ? 503 : 200, { 'Content-Type': 'application/json; charset=utf-8', ...corsHeaders });
+      res.end(JSON.stringify({ ok: !v.error, ...v }));
     });
     return;
   }
