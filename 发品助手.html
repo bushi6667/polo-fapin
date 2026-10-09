@@ -4098,10 +4098,14 @@ function stopBatchColorChange() {
     if (!batchColorState || !batchColorState.running) return;
     batchColorState.stopRequested = true;
     updateBatchColorStatus('⏸ 正在停止...');
+    // 立即收尾：扩展侧没有取消通道，若只设标记，推进只能等单款超时（最长 6 分钟），表现为「卡住」
+    // finishBatchColor 内部会清超时、停轮询、恢复按钮
+    finishBatchColor(false);
 }
 
 function finishBatchColor(completed) {
     if (!batchColorState) return;
+    const finishedState = batchColorState;
     const batchLabel = batchColorState.label || '批量换色';
     if (batchColorState.currentTimeoutId) {
         clearTimeout(batchColorState.currentTimeoutId);
@@ -4130,9 +4134,11 @@ function finishBatchColor(completed) {
     if (psPollTimer) { clearInterval(psPollTimer); psPollTimer = null; }
 
     setTimeout(() => {
+        // 5 秒内若已开新任务，勿干扰新任务的状态与按钮
+        if (batchColorState && batchColorState !== finishedState) return;
         const el = batchColorProgressEl();
         if (el) el.style.display = 'none';
-        batchColorState = null;
+        if (batchColorState === finishedState) batchColorState = null;
         const btn = document.getElementById('batchColorBtn');
         if (btn) { btn.disabled = false; btn.innerHTML = '🚀 一键换色'; }
         const rowsBtn = document.getElementById('colorRowsBtn');
