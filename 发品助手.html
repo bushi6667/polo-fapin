@@ -3675,22 +3675,46 @@ function handlePsEditComplete(request) {
 }
 
 function handleColorTaskComplete(request) {
-    const { rowNum } = request;
-    console.log('🎨 收到换色完成消息:', rowNum);
-    advanceBatchColorForRow(rowNum, 'message');
+    const { rowNum, batchId } = request;
+    console.log('🎨 收到换色完成消息:', rowNum, batchId || '');
+    advanceBatchColorForRow(rowNum, 'message', batchId);
 }
 
 // 统一推进入口：消息触发和轮询兜底都走这里，靠 lastAdvancedRow 去重防双触发
-function advanceBatchColorForRow(rowNum, source) {
-    if (!batchColorState || !batchColorState.running || batchColorState.stopRequested) return;
-    const currentProduct = batchColorState.queue[batchColorState.currentIndex];
-    if (!currentProduct || currentProduct.row !== rowNum) return;
-    // 同一行只推进一次
+// 「继续」待办 = 失败行 + 尚未派发的行（**不含**仍在生成中的在途行）
+function computeColorResumeRows() {
+    if (!batchColorState) return [];
+    const inFlight = batchColorState.inFlightRow;
+    const rest = batchColorState.queue.slice(batchColorState.currentIndex)
+        .filter(p => p.row !== inFlight)
+        .map(p => p.row);
+    return [...(batchColorState.failedRows || []), ...rest];
+}
+
+function refreshColorResumeRowsFromState() {
+    setColorResumeRows(computeColorResumeRows());
+}
+
+function advanceBatchColorForRow(rowNum, source, msgBatchId) {
+    if (!batchColorState) return;
+    // ① 任务标识校验：带 batchId 的消息必须属于当前任务（拒绝旧任务迟到消息）
+    if (msgBatchId && batchColorState.batchId && msgBatchId !== batchColorState.batchId) {
+        console.warn(`🎨 row${rowNum} 完成消息属于旧任务(${msgBatchId})，已忽略 (${source})`);
+        return;
+    }
+    // ② 只接受"当前在途行"的完成 —— 暂停后仍在生成的那一款也能正常入账
+    if (batchColorState.inFlightRow !== rowNum) {
+        console.warn(`🎨 row${rowNum} 不是当前在途行(在途=${batchColorState.inFlightRow})，已忽略 (${source})`);
+        return;
+    }
+    // ③ 同一行只推进一次（重复完成消息）
     if (batchColorState.lastAdvancedRow === rowNum) {
         console.log(`🎨 row${rowNum} 已推进过，跳过 (${source})`);
         return;
     }
     batchColorState.lastAdvancedRow = rowNum;
+    batchColorState.inFlightRow = null;
+    batchColorState.inFlightSince = 0;
 
     loadColorImagesFromExtension(rowNum);
 
@@ -3700,6 +3724,16 @@ function advanceBatchColorForRow(rowNum, source) {
     }
     batchColorState.successCount++;
     batchColorState.currentIndex++;
+
+    // ④ 暂停中：只记录真实完成、刷新剩余列表，**不自动派发下一款**
+    if (!batchColorState.running || batchColorState.stopRequested) {
+        refreshColorResumeRowsFromState();
+        updateBatchColorProgress();
+        showToast(`✅ row${rowNum} 换色完成（任务暂停中，未自动派发下一款）`);
+        console.log(`🎨 暂停中记录完成: row${rowNum} (${source})`);
+        return;
+    }
+
     updateBatchColorProgress();
     showToast(`✅ row${rowNum} 换色完成`);
     console.log(`🎨 推进批量换色: row${rowNum} (${source})`);
@@ -4233,7 +4267,14 @@ function beginColorBatch(queueList, label) {
         pollTimer: null,
         label: label || '批量换色',
         failedRows: [],
-        lastMemMB: 0
+        lastMemMB: 0,
+        // 任务标识：完成消息据此拒绝旧任务/重复消息
+        batchId: 'cb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+        // 在途行：已派发、仍在豆包生成中的行。与「是否允许派发后续款」解耦——
+        // 暂停只阻止派发，不丢在途行的真实完成。
+        inFlightRow: null,
+        inFlightSince: 0,
+        pausedReason: ''
     };
 
     // 新任务启动即清空「继续」待办（旧待办已被本次任务取代）
@@ -4384,6 +4425,11 @@ function resumeColorBatch() {
         showToast('⚠️ 换色任务正在进行中');
         return;
     }
+    // 在途行仍在豆包生成：不允许「继续」重复提交它，等它结束后再继续
+    if (batchColorState && batchColorState.inFlightRow) {
+        showToast(`⚠️ row${batchColorState.inFlightRow} 仍在豆包生成中，请等它结束后再「继续」`);
+        return;
+    }
     if (!extensionInstalled) {
         showToast('⚠️ 请确认扩展已安装');
         return;
@@ -4515,7 +4561,7 @@ function startBatchColorPolling() {
                 if (currentProduct && currentProduct.row === evt.rowNum) {
                     console.log(`🎨 轮询兜底捕获完成事件: row${evt.rowNum}`);
                     batchColorState.lastProcessedTimestamp = evt.timestamp;
-                    advanceBatchColorForRow(evt.rowNum, 'poll');
+                    advanceBatchColorForRow(evt.rowNum, 'poll', evt.batchId);
                 }
             });
             // 运行期间持续资源检查（与发下一款前的判断完全一致）
@@ -4613,16 +4659,22 @@ function sendNextBatchColor() {
     const product = batchColorState.queue[batchColorState.currentIndex];
     // 重置去重标记，允许新行被推进
     batchColorState.lastAdvancedRow = null;
+    // 记录在途行：暂停后它仍会在豆包继续生成，其完成消息必须能落地
+    batchColorState.inFlightRow = product.row;
+    batchColorState.inFlightSince = Date.now();
     updateBatchColorProgress();
 
     const imagePath = getMainImagePath(product.row);
     chrome.runtime.sendMessage(EXTENSION_ID, {
-        action: 'startColorChange', task: { imagePath, prompt: COLOR_PROMPT, rowNum: product.row }
+        action: 'startColorChange',
+        task: { imagePath, prompt: COLOR_PROMPT, rowNum: product.row, batchId: batchColorState.batchId }
     }, (response) => {
         if (chrome.runtime.lastError || !response || !response.ok) {
             console.warn(`row${product.row} 启动失败:`, chrome.runtime.lastError?.message || response?.error);
             batchColorState.failCount++;
             batchColorState.failedRows.push(product.row);
+            batchColorState.inFlightRow = null;
+            batchColorState.inFlightSince = 0;
             batchColorState.currentIndex++;
             setTimeout(processNextBatchColor, 500);
             return;
@@ -4680,12 +4732,15 @@ function finishBatchColor(completed, reason) {
     if (!batchColorState) return;
     const finishedState = batchColorState;
     const batchLabel = batchColorState.label || '批量换色';
-    if (batchColorState.currentTimeoutId) {
+    // 在途行仍会在豆包继续生成：保留其超时定时器与完成轮询，让完成/失败都能入账
+    const hasInFlight = !!batchColorState.inFlightRow;
+    if (!hasInFlight && batchColorState.currentTimeoutId) {
         clearTimeout(batchColorState.currentTimeoutId);
         batchColorState.currentTimeoutId = null;
     }
-    stopBatchColorPolling();
+    if (!hasInFlight) stopBatchColorPolling();
     batchColorState.running = false;
+    batchColorState.pausedReason = reason || '';
     const total = batchColorState.queue.length;
     const success = batchColorState.successCount;
     const fail = batchColorState.failCount;
@@ -4694,11 +4749,8 @@ function finishBatchColor(completed, reason) {
     const seconds = elapsed % 60;
     const timeStr = minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`;
 
-    // 记下「失败 + 未处理」的行，供「继续」按钮续跑（主动停止 / 中途失败都能接上）
-    const leftOver = [
-        ...((batchColorState.failedRows || [])),
-        ...batchColorState.queue.slice(batchColorState.currentIndex).map(p => p.row)
-    ];
+    // 记下「失败 + 尚未派发」的行（**不含**仍在生成中的在途行，否则「继续」会重复提交它）
+    const leftOver = computeColorResumeRows();
     setColorResumeRows(leftOver);
 
     if (completed) {
@@ -4708,9 +4760,12 @@ function finishBatchColor(completed, reason) {
     } else {
         const why = reason ? `（${reason}）` : '';
         // 停止只作用于后续排队：已在生成中的那一款无法取消，界面必须说明，不能假装已取消
+        const waiting = batchColorState.inFlightRow
+            ? `；row${batchColorState.inFlightRow} 仍在豆包生成中，完成后会自动计入，请等它结束后再「继续」`
+            : '';
         const note = '；停止只作用于后续排队，已在豆包生成中的那一款不会被取消';
-        updateBatchColorStatus(`⏸ ${batchLabel}已停止${why}。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）${note}`);
-        showToast(`⏸ ${batchLabel}已暂停${why}。完成 ${success} 款，还剩 ${leftOver.length} 款可点「继续」${note}`);
+        updateBatchColorStatus(`⏸ ${batchLabel}已停止${why}。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）${note}${waiting}`);
+        showToast(`⏸ ${batchLabel}已暂停${why}。完成 ${success} 款，还剩 ${leftOver.length} 款可点「继续」${note}${waiting}`);
     }
 
     if (colorPollTimer) { clearInterval(colorPollTimer); colorPollTimer = null; }
@@ -4723,6 +4778,11 @@ function finishBatchColor(completed, reason) {
         if (btn) { btn.disabled = false; btn.innerHTML = '🚀 一键换色'; }
         const rowsBtn = document.getElementById('colorRowsBtn');
         if (rowsBtn) rowsBtn.disabled = false;
+        if (batchColorState.inFlightRow) {
+            // 在途行还在豆包生成：保留面板与状态，等它结束（不重复提交该款）
+            restoreBatchColorUI();
+            return;
+        }
         if (getColorResumeRows().length > 0) {
             // 还有没跑完的：保留进度面板、按钮停在「继续」，state 不置空（供再次续跑）
             restoreBatchColorUI();
