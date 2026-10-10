@@ -2203,11 +2203,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ ok: false, error: '执行身份不匹配，已拒绝' });
                     return;
                 }
-                const event = { rowNum, timestamp: Date.now(), results: request.results, batchId };
-                chrome.storage.local.set({ [eventKey]: event }, () => {
+                // 同一份不可变终态载荷：存储事件与所有通知通道共用，贯穿结果与执行/文件身份
+                const payload = Object.freeze({
+                    rowNum,
+                    batchId,
+                    fileKey: exec.fileKey || '',
+                    fileFolder: exec.fileFolder || DEFAULT_FILE_FOLDER,
+                    execStartedAt: exec.startedAt || 0,
+                    results: request.results || null,
+                    timestamp: Date.now()
+                });
+                chrome.storage.local.set({ [eventKey]: payload }, () => {
                     console.log(`💾 换色完成事件已持久化: row${rowNum} (batch ${batchId || '-'})`);
                 });
-                notifyColorTaskComplete(rowNum, batchId);
+                notifyColorTaskComplete(rowNum, batchId, payload);
                 sendResponse({ ok: true });
             }).catch(() => sendResponse({ ok: false, error: '身份校验异常' }));
             return true;
@@ -2705,8 +2714,9 @@ async function openDoubaoAndStartTask(task) {
         const resp = await sendStartColorTask(tab.id, task);
         if (!resp || !resp.ok) {
             if (resp && resp.busy) {
-                console.warn('⛔ 豆包仍在执行上一个任务，未接收新任务；恢复原执行身份');
-                await saveActiveColorExec(prevExec || null);
+                console.warn('⛔ 豆包仍在执行上一个任务，未接收新任务；撤销本次待派发记录并恢复原执行身份');
+                await savePendingColorTask(null);            // 撤销本次待派发
+                await saveActiveColorExec(prevExec || null); // 恢复原活动执行身份
                 return { ok: false, busy: true, error: resp.error || '豆包仍在执行上一个任务', tabId: doubaoTabId };
             }
             // 通信失败（页面可能尚未就绪）：保留 pending 身份，等页面自行拉取
@@ -2858,7 +2868,7 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                             // 同时存 IndexedDB
                             if (dataUrl) {
                                 const color = colorMatch[1];
-                                const idbKey = colorImageIDBKey(bound.fileKey !== undefined ? bound.fileKey : CURRENT_FILENAME, rowNum, color);
+                                const idbKey = colorImageIDBKey(bound.fileFolder === DEFAULT_FILE_FOLDER ? '' : bound.fileFolder, rowNum, color);
                                 saveColorImageToIDB(idbKey, dataUrl).then(() => {
                                     console.log(`💾 颜色图已存 IndexedDB(预取): ${idbKey}`);
                                 });
@@ -2953,10 +2963,18 @@ async function downloadDoubaoImage(url, filename, rowNum) {
 
 const COLOR_NAMES = ['white', 'black', 'gray', 'navy'];
 
-async function notifyColorTaskComplete(rowNum, batchId) {
+async function notifyColorTaskComplete(rowNum, batchId, payload) {
+    // 终态载荷必须与存储事件同源：结果/执行身份/文件身份一并送达，页面才能正确判定成败
+    const extra = payload ? {
+        results: payload.results || null,
+        fileKey: payload.fileKey || '',
+        fileFolder: payload.fileFolder || '',
+        execStartedAt: payload.execStartedAt || 0,
+        timestamp: payload.timestamp
+    } : {};
     if (assistantPort) {
         try {
-            assistantPort.postMessage({ action: 'colorTaskComplete', rowNum, batchId });
+            assistantPort.postMessage(Object.assign({ action: 'colorTaskComplete', rowNum, batchId }, extra));
             console.log('✅ 已通过长连接通知发品助手换色完成');
             return;
         } catch (e) {
@@ -2967,7 +2985,7 @@ async function notifyColorTaskComplete(rowNum, batchId) {
 
     if (assistantTabId) {
         try {
-            await chrome.tabs.sendMessage(assistantTabId, { action: 'colorTaskComplete', rowNum, batchId });
+            await chrome.tabs.sendMessage(assistantTabId, Object.assign({ action: 'colorTaskComplete', rowNum, batchId }, extra));
             console.log('✅ 已通过 tabs.sendMessage 通知发品助手换色完成');
             return;
         } catch (e) {
@@ -2977,7 +2995,7 @@ async function notifyColorTaskComplete(rowNum, batchId) {
 
     try {
         const result = await new Promise((resolve) => {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'colorTaskComplete', rowNum, batchId }, (response) => {
+            chrome.runtime.sendMessage(EXTENSION_ID, Object.assign({ action: 'colorTaskComplete', rowNum, batchId }, extra), (response) => {
                 if (chrome.runtime.lastError) {
                     resolve({ ok: false, error: chrome.runtime.lastError.message });
                 } else {

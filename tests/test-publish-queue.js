@@ -68,6 +68,7 @@ function createEnv(opts = {}) {
         }
     };
 
+    const sentMessages = [];
     const chrome = {
         runtime: {
             id: 'test-extension-id',
@@ -78,7 +79,13 @@ function createEnv(opts = {}) {
             onConnectExternal: { addListener: f => L.onConnect.push(f) },
             onInstalled: { addListener: f => L.onInstalled.push(f) },
             onStartup: { addListener: f => L.onStartup.push(f) },
-            sendMessage: () => {},
+            // 兼容两种调用签名：(msg, cb) 与 (extensionId, msg, cb)
+            sendMessage: (a, b, c) => {
+                const msg = (b && typeof b === 'object') ? b : a;
+                const cb = typeof c === 'function' ? c : (typeof b === 'function' ? b : null);
+                sentMessages.push(msg);
+                if (cb) cb({ ok: true });
+            },
             connect: () => ({ onMessage: { addListener() {} }, onDisconnect: { addListener() {} }, postMessage() {} })
         },
         storage: { local: storageLocal },
@@ -170,7 +177,7 @@ function createEnv(opts = {}) {
         setTimeout(() => cb(undefined), 800);
     });
 
-    return { ctx, run, store, tabs, createdUrls, alarms, L, sendInternal, sendExternal };
+    return { ctx, run, store, sentMessages, tabs, createdUrls, alarms, L, sendInternal, sendExternal };
 }
 
 function seedUploaded(env, rows) {
@@ -1222,6 +1229,43 @@ async function driveFills(env, maxFills) {
         ok(env4.store['polo_active_color_exec'].state === 'accepted', '接收确认后身份提升为 accepted');
         const a2 = await env4.sendInternal({ action: 'colorTaskAccepted', rowNum: 999, batchId: 'B4' }, { tab: { id: 1 } });
         ok(a2 && a2.ok === false, '身份不符的接收确认被拒绝');
+    }
+
+    // ---------- 完成载荷：results 必须贯穿所有通知通道 ----------
+    console.log('\n【39】完成终态载荷：results 必须随通知一并送达（否则成功被判失败）');
+    {
+        const EXEC = { batchId: 'B', rowNum: 412, source: 'batch', state: 'accepted', fileKey: 'A__', fileFolder: 'A文件', startedAt: Date.now() };
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, initialStore: { 'polo_active_color_exec': EXEC } });
+        await tick(200);
+        const RESULTS = { success: false, error: '上传失败', downloads: [] };
+        await env.sendInternal({ action: 'colorTaskComplete', rowNum: 412, results: RESULTS, batchId: 'B' }, { tab: { id: 1 } });
+        await tick(300);
+
+        // 存储事件：同一份载荷
+        const ev = env.store['color_task_complete_event'];
+        ok(ev && ev.results && ev.results.error === '上传失败', `存储事件携带 results（实际 ${JSON.stringify(ev && ev.results)}）`);
+        ok(ev && ev.fileKey === 'A__' && ev.fileFolder === 'A文件', '存储事件携带执行/文件身份');
+
+        // 通知通道：也必须带 results（这是页面判定成败的唯一依据）
+        const notified = env.sentMessages.filter(m => m && m.action === 'colorTaskComplete');
+        ok(notified.length > 0, `至少发出一次完成通知（${notified.length} 次）`);
+        const n0 = notified[notified.length - 1] || {};
+        ok(n0.results && n0.results.error === '上传失败', `通知载荷携带 results（实际 ${JSON.stringify(n0.results)}）`);
+        ok(n0.fileKey === 'A__' && n0.fileFolder === 'A文件', '通知载荷携带文件身份');
+        ok(n0.rowNum === 412 && n0.batchId === 'B', '通知载荷携带行号与批次标识');
+
+        // 成功结果同样贯穿
+        const env2 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, initialStore: { 'polo_active_color_exec': JSON.parse(JSON.stringify(EXEC)) } });
+        await tick(200);
+        const OKR = {
+            success: true,
+            downloads: ['white', 'black', 'gray', 'navy'].map(c => ({ ok: true, filename: `row412_${c}.png` }))
+        };
+        await env2.sendInternal({ action: 'colorTaskComplete', rowNum: 412, results: OKR, batchId: 'B' }, { tab: { id: 1 } });
+        await tick(300);
+        const n1 = env2.sentMessages.filter(m => m && m.action === 'colorTaskComplete').pop() || {};
+        ok(n1.results && Array.isArray(n1.results.downloads) && n1.results.downloads.length === 4,
+            `成功结果四色明细随通知送达（实际 ${n1.results && n1.results.downloads && n1.results.downloads.length} 条）`);
     }
 
     // ---------- 汇总 ----------

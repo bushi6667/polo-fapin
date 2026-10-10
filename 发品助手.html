@@ -2242,6 +2242,8 @@ function handleFile(file) {
                 } catch (e) {}
             }
             loadedFileName = fileName;
+            // 真实初始化入口：文件就绪后恢复上次换色任务（保持暂停、不自动派发）
+            setTimeout(() => { try { restoreColorBatchState(); } catch (e) { console.warn('恢复换色任务失败:', e); } }, 300);
             try { localStorage.setItem('polo_loaded_filename', fileName); } catch (e) {}
             const skippedCount = parseProducts(jsonData);
             let toastMsg = '✅ 加载成功，共 ' + products.length + ' 款产品';
@@ -2633,6 +2635,8 @@ function loadFromLocalStorage() {
             if (savedColMap) currentColMap = JSON.parse(savedColMap);
             const savedFn = localStorage.getItem('polo_loaded_filename');
             if (savedFn) loadedFileName = savedFn;
+            // 真实启动入口：产品与文件名就绪后恢复换色任务（保持暂停、不自动派发）
+            setTimeout(() => { try { restoreColorBatchState(); } catch (e) { console.warn('恢复换色任务失败:', e); } }, 300);
             renderProductList();
             document.getElementById('stats').style.display = 'flex';
             const categoryMap = {};
@@ -3345,6 +3349,9 @@ function checkExtension() {
                         if (msg.action === 'colorTaskComplete') {
                             handleColorTaskComplete(msg);
                         }
+                        if (msg.action === 'colorFileSwitched') {
+                            handleColorFileSwitched(msg);
+                        }
                         if (msg.action === 'publishState') {
                             handlePublishState(msg);
                         }
@@ -3437,6 +3444,11 @@ function setupPsEditMessageListener() {
             chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 if (request.action === 'colorTaskComplete') {
                     handleColorTaskComplete(request);
+                    sendResponse({ ok: true });
+                    return true;
+                }
+                if (request.action === 'colorFileSwitched') {
+                    handleColorFileSwitched(request);
                     sendResponse({ ok: true });
                     return true;
                 }
@@ -3703,13 +3715,22 @@ function currentFileKey() {
     return loadedFileName ? String(loadedFileName).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_') + '__' : '';
 }
 
+// 换色待办所属文件：有任务时用【任务绑定的文件】，不被当前文件接管
+function colorBatchFileKey() {
+    if (batchColorState && typeof batchColorState.fileKey === 'string' && batchColorState.fileKey) {
+        return batchColorState.fileKey;
+    }
+    return currentFileKey();
+}
+
 // ===== 换色任务状态持久化：刷新/重连后恢复队列与在途身份，不自动重复派发 =====
 const COLOR_BATCH_STATE_KEY = 'polo_color_batch_state';
 
 function saveColorBatchState() {
     if (!batchColorState) { localStorage.removeItem(COLOR_BATCH_STATE_KEY); return; }
     const snap = {
-        fileKey: currentFileKey(),
+        // 绑定任务创建时的文件：切文件后原任务仍归原文件，不被新文件接管
+        fileKey: (typeof batchColorState.fileKey === 'string' && batchColorState.fileKey) ? batchColorState.fileKey : currentFileKey(),
         batchId: batchColorState.batchId || null,
         label: batchColorState.label || '批量换色',
         rows: batchColorState.queue.map(p => p.row),
@@ -3719,15 +3740,24 @@ function saveColorBatchState() {
         failedRows: batchColorState.failedRows || [],
         skippedRows: batchColorState.skippedRows || [],
         inFlightRow: batchColorState.inFlightRow,
+        inFlightSince: batchColorState.inFlightSince || 0,
+        pendingAckRow: batchColorState.pendingAckRow || null,   // 未确认接收的阻挡事实必须持久化
+        pausedReason: batchColorState.pausedReason || '',
         running: batchColorState.running,
         startTime: batchColorState.startTime
     };
-    localStorage.setItem(COLOR_BATCH_STATE_KEY, JSON.stringify(snap));
+    // 单一全局快照会互相覆盖：按文件分槽保存，保留每个文件自己的未完成任务
+    localStorage.setItem(COLOR_BATCH_STATE_KEY + '::' + snap.fileKey, JSON.stringify(snap));
+    localStorage.setItem(COLOR_BATCH_STATE_KEY, JSON.stringify(snap));   // 兼容读取
+    return snap;
 }
 
 function loadColorBatchState() {
     try {
-        const raw = localStorage.getItem(COLOR_BATCH_STATE_KEY);
+        // 优先读当前文件的专属槽位，再回退兼容槽位
+        const cur = currentFileKey();
+        const raw = localStorage.getItem(COLOR_BATCH_STATE_KEY + '::' + cur)
+            || localStorage.getItem(COLOR_BATCH_STATE_KEY);
         return raw ? JSON.parse(raw) : null;
     } catch (_) { return null; }
 }
@@ -3744,6 +3774,13 @@ function restoreColorBatchState() {
     }
     const byRow = new Map((products || []).map(p => [p.row, p]));
     const queue = snap.rows.map(r => byRow.get(r)).filter(Boolean);
+    // 产品缺失时不能 filter 后沿用旧 currentIndex：停下说明身份缺失，交用户处理
+    if (queue.length !== snap.rows.length) {
+        const missing = snap.rows.filter(r => !byRow.get(r));
+        updateBatchColorStatus(`⚠️ 上次换色任务有 ${missing.length} 款不在当前 Excel（${missing.slice(0, 20).join(' ')}），未自动恢复。请确认文件是否一致`);
+        showToast(`⚠️ 上次换色任务缺 ${missing.length} 款，未自动恢复：请确认 Excel 文件`);
+        return false;
+    }
     if (queue.length === 0) return false;
     batchColorState = {
         running: false,               // 恢复后保持暂停；需用户明确继续
@@ -3762,16 +3799,55 @@ function restoreColorBatchState() {
         skippedRows: snap.skippedRows || [],
         lastMemMB: 0,
         batchId: snap.batchId || null,
+        fileKey: snap.fileKey || currentFileKey() || '',
         inFlightRow: snap.inFlightRow || null,
-        inFlightSince: 0,
+        inFlightSince: snap.inFlightSince || 0,
+        pendingAckRow: snap.pendingAckRow || null,
         timedOutRows: getColorTimeoutRows(),
-        pausedReason: snap.inFlightRow ? '刷新后恢复：等待在途款结束' : '刷新后恢复'
+        pausedReason: snap.pausedReason || (snap.inFlightRow ? '刷新后恢复：等待在途款结束' : '刷新后恢复')
     };
     showBatchColorProgress();
-    if (batchColorState.inFlightRow) startBatchColorPolling();   // 在途款仍要能补收完成
+    if (batchColorState.inFlightRow) {
+        startBatchColorPolling();   // 在途款仍要能补收完成
+        // 恢复原期限的剩余时间，重新武装超时兜底（否则通知永久缺失会再次无限等待）
+        const elapsed = batchColorState.inFlightSince ? (Date.now() - batchColorState.inFlightSince) : 0;
+        const remain = Math.max(5000, (typeof BATCH_COLOR_COMPLETE_TIMEOUT === 'number' ? BATCH_COLOR_COMPLETE_TIMEOUT : 600000) - elapsed);
+        const row = batchColorState.inFlightRow;
+        if (batchColorState.currentTimeoutId) clearTimeout(batchColorState.currentTimeoutId);
+        batchColorState.currentTimeoutId = setTimeout(() => {
+            if (!batchColorState || batchColorState.inFlightRow !== row) return;
+            const product = { row };
+            setupBatchColorTimeoutReentry(product);
+        }, remain);
+        const timeoutEl = document.getElementById('colorTimeoutHint');
+        if (timeoutEl) { timeoutEl.style.display = 'block'; }
+    }
     updateBatchColorProgress();
-    updateBatchColorStatus(`♻️ 已恢复上次换色任务（${queue.length} 款，第 ${batchColorState.currentIndex + 1} 款起）${batchColorState.inFlightRow ? '；row' + batchColorState.inFlightRow + ' 仍在执行，完成后会自动计入' : ''}`);
+    updateBatchColorStatus(`♻️ 已恢复上次换色任务（${queue.length} 款，第 ${batchColorState.currentIndex + 1} 款起）${batchColorState.inFlightRow ? '；row' + batchColorState.inFlightRow + ' 仍在执行，完成后会自动计入' : (batchColorState.pendingAckRow ? `；row${batchColorState.pendingAckRow} 未确认接收` : '')}`);
     return true;
+}
+
+// 恢复后重新武装超时：复用生产超时逻辑（不改判定口径）
+function setupBatchColorTimeoutReentry(product) {
+    const row = product.row;
+    if (!batchColorState || batchColorState.inFlightRow !== row) return;
+    batchColorState.failCount++;
+    if (!Array.isArray(batchColorState.failedRows)) batchColorState.failedRows = [];
+    if (batchColorState.failedRows.indexOf(row) < 0) batchColorState.failedRows.push(row);
+    batchColorState.inFlightRow = null;
+    batchColorState.inFlightSince = 0;
+    batchColorState.currentIndex++;
+    batchColorState.running = false;
+    batchColorState.pausedReason = `row${row} 换色超时（待确认）`;
+    const prev = getColorTimeoutRows();
+    if (prev.indexOf(row) < 0) setColorTimeoutRows([...prev, row]);
+    saveColorBatchState();
+    refreshColorResumeRowsFromState();
+    updateBatchColorProgress();
+    const msg = `⏱ row${row} 换色超时：豆包是否已结束【未确认】。已暂停后续派发；请先点「🔍 查询执行状态」，再用「✅ 已生成 / ↻ 重试 / ⏭ 跳过」明确处理`;
+    updateBatchColorStatus(msg);
+    showToast(msg);
+    syncBatchColorTimeoutActions();
 }
 
 function refreshColorResumeRowsFromState() {
@@ -3816,14 +3892,23 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
     const verdict = judgeColorTaskResult(results, rowNum);
     if (!verdict.ok) {
         console.warn(`⚠️ row${rowNum} 换色未完整成功：${verdict.reason}`);
+        if (batchColorState.currentTimeoutId) {
+            clearTimeout(batchColorState.currentTimeoutId);
+            batchColorState.currentTimeoutId = null;
+        }
         batchColorState.failCount++;
         if (!Array.isArray(batchColorState.failedRows)) batchColorState.failedRows = [];
         if (batchColorState.failedRows.indexOf(rowNum) < 0) batchColorState.failedRows.push(rowNum);
         batchColorState.currentIndex++;
+        // 失败/部分完成是明确终态：暂停并保留可处理行（不做"运行中却不推进"的悬空状态）
+        batchColorState.running = false;
+        batchColorState.stopRequested = false;
+        batchColorState.pausedReason = `row${rowNum} 换色失败（${verdict.reason}）`;
         saveColorBatchState();
         refreshColorResumeRowsFromState();
         updateBatchColorProgress();
-        showToast(`❌ row${rowNum} 换色失败（${verdict.reason}），已放入「继续」列表`);
+        updateBatchColorStatus(`❌ row${rowNum} 换色失败：${verdict.reason}。该行已放入「继续」列表，可重试或跳过`);
+        showToast(`❌ row${rowNum} 换色失败（${verdict.reason}），已暂停并放入「继续」列表`);
         console.log(`🎨 失败入账: row${rowNum} (${source})`);
         return;
     }
@@ -4419,6 +4504,7 @@ function beginColorBatch(queueList, label) {
         inFlightRow: null,
         inFlightSince: 0,
         pendingAckRow: null,    // 已委派但未确认接收的行（阻挡后续派发）
+        fileKey: currentFileKey(),   // 任务创建时绑定文件：切文件后不被接管
         timedOutRows: [],       // 已判超时、等待人工确认的行（迟到完成只提示，不重复入账）
         pausedReason: ''
     };
@@ -4499,14 +4585,14 @@ function buildRowPreviewLines(queue, max = 15) {
 const COLOR_RESUME_KEY = 'polo_color_resume_rows';
 
 function getColorResumeRows() {
-    const raw = localStorage.getItem(COLOR_RESUME_KEY + '::' + currentFileKey()) || '';
+    const raw = localStorage.getItem(COLOR_RESUME_KEY + '::' + colorBatchFileKey()) || '';
     return raw.split(/\s+/).filter(Boolean).map(Number).filter(n => Number.isInteger(n) && n > 0);
 }
 
 function setColorResumeRows(rows) {
     const list = Array.isArray(rows) ? rows.filter(r => Number.isInteger(r) && r > 0) : [];
     const uniq = [...new Set(list)]; // 按传入顺序去重
-    const key = COLOR_RESUME_KEY + '::' + currentFileKey();
+    const key = COLOR_RESUME_KEY + '::' + colorBatchFileKey();
     if (uniq.length === 0) {
         localStorage.removeItem(key);
     } else {
@@ -4519,13 +4605,13 @@ function setColorResumeRows(rows) {
 const COLOR_TIMEOUT_KEY = 'polo_color_timeout_rows';
 
 function getColorTimeoutRows() {
-    const raw = localStorage.getItem(COLOR_TIMEOUT_KEY + '::' + currentFileKey()) || '';
+    const raw = localStorage.getItem(COLOR_TIMEOUT_KEY + '::' + colorBatchFileKey()) || '';
     return raw.split(/\s+/).filter(Boolean).map(Number).filter(n => Number.isInteger(n) && n > 0);
 }
 
 function setColorTimeoutRows(rows) {
     const uniq = [...new Set((Array.isArray(rows) ? rows : []).filter(r => Number.isInteger(r) && r > 0))];
-    const key = COLOR_TIMEOUT_KEY + '::' + currentFileKey();
+    const key = COLOR_TIMEOUT_KEY + '::' + colorBatchFileKey();
     if (uniq.length === 0) localStorage.removeItem(key);
     else localStorage.setItem(key, uniq.join(' '));
     if (batchColorState) batchColorState.timedOutRows = uniq;
@@ -4991,6 +5077,20 @@ function sendNextBatchColor() {
             const msg = busy
                 ? `⏸ row${product.row} 未被豆包接收（仍在执行上一个任务）。已暂停派发，请先「🔍 查询执行状态」再处理`
                 : `⏸ row${product.row} 委派未确认接收（${pending ? '通信失败/待页面就绪' : '启动失败'}）。已暂停派发并保留该行，请先「🔍 查询执行状态」再处理`;
+            updateBatchColorStatus(msg);
+            showToast(msg);
+            return;
+        }
+        // 新页路径：后台只记为 pending，页面不得当作已接收去启动执行超时
+        if (response.pending || response.unconfirmed) {
+            batchColorState.inFlightRow = null;
+            batchColorState.inFlightSince = 0;
+            batchColorState.pendingAckRow = product.row;
+            batchColorState.running = false;
+            batchColorState.pausedReason = `row${product.row} 已提交但未确认接收（等待豆包页面就绪）`;
+            saveColorBatchState();
+            refreshColorResumeRowsFromState();
+            const msg = `⏸ row${product.row} 已提交但未确认接收（等待豆包页面就绪）。已暂停派发并保留该行，请先「🔍 查询执行状态」再处理`;
             updateBatchColorStatus(msg);
             showToast(msg);
             return;

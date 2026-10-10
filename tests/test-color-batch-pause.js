@@ -36,7 +36,7 @@ const FN_NAMES = [
     'getColorTimeoutRows', 'setColorTimeoutRows', 'syncBatchColorTimeoutActions',
     'checkColorExecStatus', 'resolveTimeoutRow',
     'judgeColorTaskResult', 'currentFileKey', 'saveColorBatchState', 'loadColorBatchState',
-    'restoreColorBatchState', 'handleColorFileSwitched'
+    'restoreColorBatchState', 'handleColorFileSwitched', 'colorBatchFileKey', 'setupBatchColorTimeoutReentry'
 ];
 
 // 四色齐全的成功结果（生产判定要求 white/black/gray/navy 全部 ok）
