@@ -687,7 +687,7 @@ async function driveFills(env, maxFills) {
         const p = env.sendExternal({ action: 'openBatchPublish', rows: [261, 262] });
         await tick(60);                         // 让它进入资源检查
         env.sendExternal({ action: 'pausePublishQueue' });   // 立即置停止闸门
-        await tick(300);
+        await tick(3800);                       // 等资源检查的 3 秒超时走完
         const t = await env.run('loadPublishTask()');
         ok(t && t.state === 'paused', `已暂停（实际 ${t && t.state}）`);
         ok(env.createdUrls.length === 0, `停止后未创建新页（实际 ${env.createdUrls.length}）`);
@@ -1031,6 +1031,46 @@ async function driveFills(env, maxFills) {
         const st4 = await env4.sendExternal({ action: 'getPublishState' });
         ok(st4.rowRetryable === true, '60 页拒绝后行失效事实仍保留');
     }
+    // ---------- 换色与发品共用的内存闸门 ----------
+    console.log('\n【35】getMemoryGate（换色与发品共用同一套判断）');
+    {
+        // 物理充足但提交余量仅 120MiB → 不允许
+        const envA = createEnv({ physAvailGiB: 10, commitFreeMiB: 120 });
+        const gA = await envA.sendExternal({ action: 'getMemoryGate' });
+        ok(gA && gA.ok && gA.allowed === false, `提交余量 120MiB → 不允许（实际 ${JSON.stringify(gA && gA.allowed)}）`);
+        ok(/提交剩余/.test(gA.reasonText || ''), `原因说明提交剩余（实际 ${gA.reasonText}）`);
+        ok(gA.physAvailableMB > 9000, `物理内存仍充足（${gA.physAvailableMB}MiB）`);
+
+        // 服务不可用 → 不允许（监测失败即暂停，不静默放行）
+        const envB = createEnv({ physAvailGiB: 10, commitFetchFails: true });
+        const gB = await envB.sendExternal({ action: 'getMemoryGate' });
+        ok(gB && gB.allowed === false, '本地服务不可用 → 不允许');
+        ok(/提交额度监测不可用/.test(gB.reasonText || ''), `原因标为监测不可用（实际 ${gB.reasonText}）`);
+
+        // 物理低于阈值 → 不允许
+        const envC = createEnv({ physAvailGiB: 1, commitFreeMiB: 8192 });
+        const gC = await envC.sendExternal({ action: 'getMemoryGate' });
+        ok(gC && gC.allowed === false, '物理低于阈值 → 不允许');
+        ok(/可用物理内存/.test(gC.reasonText || ''), `原因说明物理内存（实际 ${gC.reasonText}）`);
+
+        // 提交使用率 ≥ 90% → 不允许
+        const envD = createEnv({ commitLimitGiB: 64, commitFreeMiB: 8192, physAvailGiB: 10 });
+        envD.memOverrideUsedPct = null;
+        const gD0 = await envD.sendExternal({ action: 'getMemoryGate' });
+        ok(gD0 && gD0.allowed === true, `资源充足 → 允许（实际 ${JSON.stringify(gD0 && gD0.allowed)}）`);
+        // 使用率 95%：用大 limit 让"提交剩余"规则不先命中（free=5% 且 > 4096MiB）
+        const envE = createEnv({ physAvailGiB: 10, commitLimitGiB: 100, commitFreeMiB: 5 * 1024 });
+        const gE = await envE.sendExternal({ action: 'getMemoryGate' });
+        ok(gE && gE.allowed === false, `提交使用率 95% → 不允许（usedPct=${gE && gE.commitUsedPct}）`);
+        ok(/提交已用/.test(gE.reasonText || ''), `原因说明使用率（实际 ${gE && gE.reasonText}）`);
+
+        // 恢复后允许
+        const envF = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        const gF = await envF.sendExternal({ action: 'getMemoryGate', forceRefresh: true });
+        ok(gF && gF.allowed === true, '资源恢复 → 允许继续');
+        ok(typeof gF.sampledAt === 'number' && gF.sampledAt > 0, '返回采样时间');
+    }
+
     // ---------- 汇总 ----------
     console.log('\n' + '='.repeat(50));
     console.log(`通过: ${pass}   失败: ${fail}`);

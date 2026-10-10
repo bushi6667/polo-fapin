@@ -4271,35 +4271,10 @@ function syncMemPauseMBToExtension(v) {
 }
 
 // 查询整机可用内存（走扩展 system.memory）；失败/超时返回 null，调用方放行不阻塞
+// 资源保护失效只提示一次（否则静默失效：用户会以为保护在用）
 let memQueryWarned = false;
-function querySystemMemoryMB() {
-    return new Promise((resolve) => {
-        let done = false;
-        const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 3000);
-        try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getSystemMemory' }, (resp) => {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                if (chrome.runtime.lastError || !resp || !resp.ok) {
-                    const why = chrome.runtime.lastError?.message || resp?.error || '未知';
-                    console.warn('[mem] 查询失败:', why);
-                    // 只提示一次：否则静默失效——用户会以为保护在用
-                    if (!memQueryWarned) {
-                        memQueryWarned = true;
-                        showToast(`⚠️ 内存保护未生效：${why}。请在 chrome://extensions 重新加载扩展`);
-                    }
-                    resolve(null);
-                    return;
-                }
-                memQueryWarned = false;
-                resolve(resp.availableMB);
-            });
-        } catch (e) {
-            if (!done) { done = true; clearTimeout(timer); resolve(null); }
-        }
-    });
-}
+// 注：原先只查物理内存的 querySystemMemoryMB() 已移除，
+// 统一改走 queryMemoryGate()（与发品侧共用同一套判断：物理内存 + 系统提交额度 + 监测失败）
 
 // 阈值框绑定：元素在静态 HTML 里（#memPauseBox），页面级只绑一次，不随详情面板重渲染
 function initMemPauseBox() {
@@ -4543,11 +4518,20 @@ function startBatchColorPolling() {
                     advanceBatchColorForRow(evt.rowNum, 'poll');
                 }
             });
-            // 顺带刷新内存读数（只更新显示，不影响推进逻辑）
-            querySystemMemoryMB().then((mb) => {
-                if (mb === null || !batchColorState || !batchColorState.running) return;
-                batchColorState.lastMemMB = mb;
-                updateBatchColorProgress();
+            // 运行期间持续资源检查（与发下一款前的判断完全一致）
+            queryMemoryGate().then((gate) => {
+                if (!batchColorState || !batchColorState.running) return;
+                if (gate && typeof gate.physAvailableMB === 'number') {
+                    batchColorState.lastMemMB = gate.physAvailableMB;
+                    updateBatchColorProgress();
+                }
+                if (!gate) {
+                    finishBatchColor(false, '资源监测不可用（扩展或本地内存服务未就绪），已暂停');
+                    return;
+                }
+                if (!gate.allowed) {
+                    finishBatchColor(false, gate.reasonText || '资源不足');
+                }
             });
         } catch (e) {
             console.warn('批量换色轮询异常:', e);
@@ -4562,6 +4546,35 @@ function stopBatchColorPolling() {
     }
 }
 
+// 资源闸门查询：与发品侧共用扩展的【同一套】判断
+// （物理可用 < 用户阈值 ｜ 提交剩余 < 4096MiB ｜ 提交已用 ≥ 90% ｜ 监测失败/超时/数据不可信）
+function queryMemoryGate(forceRefresh) {
+    return new Promise((resolve) => {
+        let done = false;
+        const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 4000);
+        try {
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getMemoryGate', forceRefresh: forceRefresh === true }, (resp) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                if (chrome.runtime.lastError || !resp || !resp.ok) {
+                    const why = chrome.runtime.lastError?.message || resp?.error || '未知';
+                    console.warn('[memGate] 查询失败:', why);
+                    if (!memQueryWarned) {
+                        memQueryWarned = true;
+                        showToast(`⚠️ 换色资源保护未生效：${why}。请检查扩展是否重载、本地内存服务是否已启动`);
+                    }
+                    resolve(null);
+                    return;
+                }
+                resolve(resp);
+            });
+        } catch (e) {
+            if (!done) { done = true; clearTimeout(timer); resolve(null); }
+        }
+    });
+}
+
 function processNextBatchColor() {
     if (!batchColorState || !batchColorState.running) return;
     if (batchColorState.stopRequested) {
@@ -4573,14 +4586,17 @@ function processNextBatchColor() {
         return;
     }
 
-    // 内存水位闸门：可用内存不足则自动暂停，剩余行进「继续」待办
-    querySystemMemoryMB().then((availMB) => {
+    // 资源闸门：不足或监测不可用即暂停，剩余行进「继续」待办（不自动恢复）
+    queryMemoryGate(true).then((gate) => {
         if (!batchColorState || !batchColorState.running) return;
-        const threshold = getMemPauseMB();
-        if (availMB !== null) batchColorState.lastMemMB = availMB;
-        if (availMB !== null && availMB < threshold) {
-            console.warn(`⚠️ 可用内存 ${availMB}MB < 阈值 ${threshold}MB，自动暂停`);
-            finishBatchColor(false, `内存不足：可用 ${availMB}MB < ${threshold}MB`);
+        if (gate && typeof gate.physAvailableMB === 'number') batchColorState.lastMemMB = gate.physAvailableMB;
+        if (!gate) {
+            finishBatchColor(false, '资源监测不可用（扩展或本地内存服务未就绪），已暂停');
+            return;
+        }
+        if (!gate.allowed) {
+            console.warn('⚠️ 换色资源闸门暂停:', gate.reasonText);
+            finishBatchColor(false, gate.reasonText || '资源不足');
             return;
         }
         sendNextBatchColor();
@@ -4691,8 +4707,10 @@ function finishBatchColor(completed, reason) {
         showToast(`✅ ${batchLabel}完成！${success} 款成功${fail > 0 ? `，${fail} 款失败` : ''}，用时 ${timeStr}`);
     } else {
         const why = reason ? `（${reason}）` : '';
-        updateBatchColorStatus(`⏸ ${batchLabel}已停止${why}。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）`);
-        showToast(`⏸ ${batchLabel}已暂停${why}。完成 ${success} 款，还剩 ${leftOver.length} 款可点「继续」`);
+        // 停止只作用于后续排队：已在生成中的那一款无法取消，界面必须说明，不能假装已取消
+        const note = '；停止只作用于后续排队，已在豆包生成中的那一款不会被取消';
+        updateBatchColorStatus(`⏸ ${batchLabel}已停止${why}。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）${note}`);
+        showToast(`⏸ ${batchLabel}已暂停${why}。完成 ${success} 款，还剩 ${leftOver.length} 款可点「继续」${note}`);
     }
 
     if (colorPollTimer) { clearInterval(colorPollTimer); colorPollTimer = null; }

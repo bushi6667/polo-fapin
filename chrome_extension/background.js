@@ -405,11 +405,12 @@ async function sampleMemory(forceRefresh) {
 }
 
 // ---------- 资源闸门：任一条件满足即暂停；监测失败一律暂停（禁止静默放行） ----------
-async function checkPublishResources(forceRefresh) {
+// ---------- 内存闸门（不含页面上限）：发品与换色共用同一套判断，避免两套规则漂移 ----------
+// 判据：物理可用 < 用户阈值 ｜ 提交剩余 < 4096MiB ｜ 提交已用 ≥ 90% ｜ 监测失败/超时/数据不可信
+async function assessMemoryResources(forceRefresh) {
     const settings = await getPublishSettings();
     const threshold = await getMemPauseThresholdMB();
     const mem = await sampleMemory(forceRefresh);
-    const pages = await countTargetTabs();
     const r = [];
 
     if (mem.physAvailableMB === null) {
@@ -426,10 +427,17 @@ async function checkPublishResources(forceRefresh) {
             r.push({ reason: 'memory', detail: `提交已用 ${mem.commitUsedPct}% ≥ ${settings.commitUsedPctMax}%` });
         }
     }
-    if (pages >= settings.pageLimit) {
-        r.push({ reason: 'pageLimit', detail: `已打开目标页面 ${pages} 个 ≥ 上限 ${settings.pageLimit}` });
+    return { ok: r.length === 0, reasons: r, mem, settings, threshold };
+}
+
+async function checkPublishResources(forceRefresh) {
+    const a = await assessMemoryResources(forceRefresh);
+    const pages = await countTargetTabs();
+    const r = a.reasons.slice();
+    if (pages >= a.settings.pageLimit) {
+        r.push({ reason: 'pageLimit', detail: `已打开目标页面 ${pages} 个 ≥ 上限 ${a.settings.pageLimit}` });
     }
-    return { ok: r.length === 0, reasons: r, mem, pages, settings, threshold };
+    return { ok: r.length === 0, reasons: r, mem: a.mem, pages, settings: a.settings, threshold: a.threshold };
 }
 
 function stopPublishTick() {
@@ -1250,6 +1258,28 @@ async function handleSharedAction(request, sendResponse) {
     }
     if (request.action === 'clearDiagLog') {
         chrome.storage.local.remove(PUBLISH_LOG_KEY, () => sendResponse({ ok: true }));
+        return true;
+    }
+    // 内存闸门查询：发品与换色共用同一套判断（换色侧不再自成一套规则）
+    if (request.action === 'getMemoryGate') {
+        assessMemoryResources(request.forceRefresh === true).then(a => {
+            sendResponse({
+                ok: true,
+                allowed: a.ok,
+                reasons: a.reasons,
+                reasonText: a.reasons.map(x => x.detail).join('；'),
+                physAvailableMB: a.mem.physAvailableMB,
+                physError: a.mem.physError,
+                commitFreeMB: a.mem.commitFreeMB,
+                commitLimitMB: a.mem.commitLimitMB,
+                commitUsedPct: a.mem.commitUsedPct,
+                commitError: a.mem.commitError,
+                sampledAt: a.mem.sampledAt,
+                thresholdMB: a.threshold,
+                commitFreeMinMB: a.settings.commitFreeMinMB,
+                commitUsedPctMax: a.settings.commitUsedPctMax
+            });
+        }).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'retryPublishRow') {
