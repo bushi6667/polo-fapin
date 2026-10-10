@@ -1285,16 +1285,42 @@ async function handleSharedAction(request, sendResponse) {
         chrome.storage.local.remove(PUBLISH_LOG_KEY, () => sendResponse({ ok: true }));
         return true;
     }
+    // 豆包确认接收：把"待派发身份"提升为"已接收执行身份"
+    if (request.action === 'colorTaskAccepted') {
+        const batchId = (typeof request.batchId === 'string' && request.batchId) ? request.batchId : null;
+        getActiveColorExec().then((exec) => {
+            if (!exec) { sendResponse({ ok: false, error: '无待派发身份' }); return; }
+            if ((exec.batchId || null) !== batchId || exec.rowNum !== request.rowNum) {
+                console.warn(`⚠️ 接收确认与待派发身份不符，忽略（收到 row${request.rowNum}/batch ${batchId || '(缺失)'}）`);
+                sendResponse({ ok: false, error: '身份不符' });
+                return;
+            }
+            saveActiveColorExec(Object.assign({}, exec, { state: 'accepted', acceptedAt: Date.now() }))
+                .then(() => sendResponse({ ok: true }));
+        }).catch(() => sendResponse({ ok: false, error: '身份读取异常' }));
+        return true;
+    }
     // 查询当前换色执行身份与豆包执行状态（供页面做超时后的明确处理动作）
     if (request.action === 'getColorExecStatus') {
         (async () => {
-            let engine = { ok: false, error: '无法查询豆包执行状态' };
+            let engine = null;
+            let engineKnown = false;
             try {
                 const tab = await findDoubaoTab();
-                if (tab) engine = await chrome.tabs.sendMessage(tab.id, { action: 'getColorTaskStatus' });
-            } catch (e) { engine = { ok: false, error: e.message }; }
+                if (tab) {
+                    engine = await chrome.tabs.sendMessage(tab.id, { action: 'getColorTaskStatus' });
+                    // 只有引擎明确回传布尔 isProcessing 才算"状态已知"；缺字段一律按未知处理
+                    engineKnown = !!(engine && engine.ok === true && typeof engine.isProcessing === 'boolean');
+                }
+            } catch (e) { engine = { ok: false, error: e.message }; engineKnown = false; }
             const exec = await getActiveColorExec();
-            sendResponse({ ok: true, exec, engine });
+            sendResponse({
+                ok: true,
+                exec,
+                engine: engine || { ok: false, error: '未找到豆包页面' },
+                engineKnown,
+                queriedAt: Date.now()
+            });
         })();
         return true;
     }
@@ -2001,7 +2027,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig'];
+    const sharedActions = ['saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse);
         return true;
@@ -2607,13 +2633,16 @@ async function findDoubaoTab() {
 async function openDoubaoAndStartTask(task) {
     console.log('🎨 启动豆包AI换色任务:', task);
     pendingColorTask = task;
-    // 派发【前】写入持久化执行身份（含行号与来源）；批量与单款都写，语义明确区分
-    await saveActiveColorExec({
+    // 保留上一份"已接收"身份：豆包繁忙被拒时不得覆盖原活动执行身份
+    const prevExec = await getActiveColorExec();
+    const nextExec = {
         batchId: (task && typeof task.batchId === 'string' && task.batchId) ? task.batchId : null,
         rowNum: task && task.rowNum,
         source: (task && task.batchId) ? 'batch' : 'single',
+        state: 'pending',   // pending=待派发 / accepted=豆包已确认接收
         startedAt: Date.now()
-    });
+    };
+    await saveActiveColorExec(nextExec);
     await savePendingColorTask(task);
 
     let tab = await findDoubaoTab();
@@ -2623,15 +2652,29 @@ async function openDoubaoAndStartTask(task) {
         await chrome.tabs.update(tab.id, { active: true });
         console.log('📌 找到已有豆包标签页:', tab.id);
         await new Promise(r => setTimeout(r, 1000));
-        sendStartColorTask(tab.id, task);
+        // 必须等待接收结果：busy / 拒绝要传回页面，不能无条件返回 ok:true
+        const resp = await sendStartColorTask(tab.id, task);
+        if (!resp || !resp.ok) {
+            if (resp && resp.busy) {
+                console.warn('⛔ 豆包仍在执行上一个任务，未接收新任务；恢复原执行身份');
+                await saveActiveColorExec(prevExec || null);
+                return { ok: false, busy: true, error: resp.error || '豆包仍在执行上一个任务', tabId: doubaoTabId };
+            }
+            // 通信失败（页面可能尚未就绪）：保留 pending 身份，等页面自行拉取
+            console.warn('⚠️ 派发通信失败，保留待派发状态:', (resp && resp.error) || '无响应');
+            return { ok: false, pending: true, error: (resp && resp.error) || '通信失败', tabId: doubaoTabId };
+        }
+        await saveActiveColorExec(Object.assign({}, nextExec, { state: 'accepted', acceptedAt: Date.now() }));
         await savePendingColorTask(null);
-    } else {
-        console.log('🌐 打开新的豆包标签页...');
-        const newTab = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
-        doubaoTabId = newTab.id;
-        await saveDoubaoTabId(newTab.id);
+        return { ok: true, tabId: doubaoTabId, accepted: true };
     }
-    return { ok: true, tabId: doubaoTabId };
+
+    console.log('🌐 打开新的豆包标签页...');
+    const newTab = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
+    doubaoTabId = newTab.id;
+    await saveDoubaoTabId(newTab.id);
+    // 新页加载后再派发：身份先记为 pending，doubao 真正启动后回传 accepted
+    return { ok: true, tabId: doubaoTabId, pending: true };
 }
 
 async function openDoubaoForAiEdit(task) {
@@ -2659,10 +2702,14 @@ function sendStartAiEditTask(tabId, task) {
     });
 }
 
-function sendStartColorTask(tabId, task) {
-    chrome.tabs.sendMessage(tabId, { action: 'startColorTask', task }).catch(err => {
-        console.log('⚠️ 发送任务失败，等待页面加载:', err.message);
-    });
+async function sendStartColorTask(tabId, task) {
+    try {
+        const resp = await chrome.tabs.sendMessage(tabId, { action: 'startColorTask', task });
+        return resp || { ok: false, error: '豆包页面无响应' };
+    } catch (e) {
+        console.log('⚠️ 发送任务失败，等待页面加载:', e.message);
+        return { ok: false, error: e.message };
+    }
 }
 
 async function uploadDoubaoImage(tabId, imagePath) {

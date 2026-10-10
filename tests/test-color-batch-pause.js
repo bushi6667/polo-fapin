@@ -43,7 +43,15 @@ function extractConst(name) {
     return m[0].trim();
 }
 
-const SRC = [extractConst('COLOR_RESUME_KEY'), extractConst('COLOR_TIMEOUT_KEY')]
+// 抽取顶层 let（例如 lastExecStatus），保证测试用的是生产变量
+function extractLet(name) {
+    const m = new RegExp('^\\s*let\\s+' + name + '\\s*=[^\\n]*$', 'm').exec(HTML);
+    if (!m) throw new Error('未找到变量: ' + name);
+    return m[0].trim();
+}
+
+const SRC = [extractConst('COLOR_RESUME_KEY'), extractConst('COLOR_TIMEOUT_KEY'),
+    extractConst('EXEC_STATUS_MAX_AGE_MS'), extractLet('lastExecStatus')]
     .concat(FN_NAMES.map(extractFn)).join('\n\n');
 
 // ---------- 环境 ----------
@@ -78,7 +86,15 @@ function createEnv(opts = {}) {
                 lastError: null,
                 sendMessage: (id, req, cb) => {
                     if (opts.execStatusResponse !== undefined) { cb(opts.execStatusResponse); return; }
-                    cb({ ok: true, exec: { rowNum: 1301, batchId: 'cb_TEST' }, engine: { ok: true, isProcessing: !!opts.engineBusy } });
+                    cb({
+                        ok: true,
+                        exec: { rowNum: opts.execRow || 1301, batchId: 'cb_TEST', state: 'accepted' },
+                        engine: opts.engineUnknown
+                            ? { ok: false, error: '无引擎响应' }
+                            : { ok: true, isProcessing: !!opts.engineBusy },
+                        engineKnown: opts.engineUnknown ? false : true,
+                        queriedAt: Date.now()
+                    });
                 }
             },
             storage: { local: {
@@ -105,7 +121,7 @@ function createEnv(opts = {}) {
         processNextBatchColor: () => { dispatched++; },
         beginColorBatch: () => { beginCalls++; },
         buildRowPreviewLines: () => ['preview'],
-        confirm: () => (opts.confirmReject ? false : true),
+        confirm: () => (opts.confirmAnswer !== undefined ? opts.confirmAnswer : !opts.confirmReject),
         EXTENSION_ID: 'test-extension-id',
         colorPollTimer: null,
         psPollTimer: null,
@@ -353,25 +369,32 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         env.clearTimers();
     }
 
-    // ---------- 14. 明确处理动作 ----------
-    console.log('\n【14】明确处理：查询执行状态 + 已生成/重试/跳过');
+    // ---------- 14. 明确处理动作（需先查询到"已知且不忙"的状态） ----------
+    console.log('\n【14】明确处理：先查询执行状态，再已生成/重试/跳过');
     {
-        // 查询执行状态（豆包仍忙）
-        const envBusy = createEnv({ engineBusy: true, timeoutMs: 60 });
+        // 查询：豆包仍忙 → 提示勿重发
+        const envBusy = createEnv({ engineBusy: true, timeoutMs: 60, confirmAnswer: false });
         envBusy.setState(mkState([2401, 2402], { running: true, inFlightRow: 2401 }));
         envBusy.run(`setupBatchColorTimeout({ row: 2401 })`);
         await tick(200);
         envBusy.run('checkColorExecStatus()');
         await tick(50);
         ok(envBusy.log.some(l => /仍在执行/.test(l)), `忙碌时提示勿重发（${envBusy.log.filter(l => /执行/.test(l)).join(' | ')}）`);
+        // 仍忙时直接处理、且拒绝人工覆盖 → 保持阻挡
+        envBusy.run(`resolveTimeoutRow('skip')`);
+        ok(envBusy.toasts.some(t => /已取消/.test(t)), '仍忙时需要人工确认才可覆盖');
+        ok(envBusy.run('getColorTimeoutRows()').length === 1, '仍忙时处理被拒（待确认集合不变）');
         envBusy.clearTimers();
 
-        // 已生成
+        // 已生成（先查询到空闲）
         const envDone = createEnv({ timeoutMs: 60 });
         const stDone = mkState([2501, 2502], { running: true, inFlightRow: 2501 });
         envDone.setState(stDone);
+        envDone.run('setColorResumeRows([2501, 2502])');
         envDone.run(`setupBatchColorTimeout({ row: 2501 })`);
         await tick(200);
+        envDone.run('checkColorExecStatus()');
+        await tick(50);
         envDone.run(`resolveTimeoutRow('done')`);
         ok(envDone.run('getColorTimeoutRows()').length === 0, '「已生成」后待确认集合清空');
         ok(stDone.successCount === 1, `「已生成」计入成功（实际 ${stDone.successCount}）`);
@@ -385,6 +408,8 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         envRetry.run('setColorResumeRows([2601, 2602])');
         envRetry.run(`setupBatchColorTimeout({ row: 2601 })`);
         await tick(200);
+        envRetry.run('checkColorExecStatus()');
+        await tick(50);
         envRetry.run(`resolveTimeoutRow('retry')`);
         ok(envRetry.run('getColorResumeRows()').indexOf(2601) >= 0, '「重试」保留在「继续」列表');
         envRetry.run('products = [{row:2601},{row:2602}]');
@@ -399,10 +424,88 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         envSkip.run('setColorResumeRows([2701, 2702])');
         envSkip.run(`setupBatchColorTimeout({ row: 2701 })`);
         await tick(200);
+        envSkip.run('checkColorExecStatus()');
+        await tick(50);
         envSkip.run(`resolveTimeoutRow('skip')`);
         ok(envSkip.run('getColorTimeoutRows()').length === 0, '「跳过」后待确认集合清空');
         ok(envSkip.run('getColorResumeRows()').indexOf(2701) < 0, '「跳过」后不再重发该行');
         envSkip.clearTimers();
+    }
+
+    // ---------- 17. 刷新后（batchColorState=null）处理动作仍同步持久化列表 ----------
+    console.log('\n【17】刷新后处理：done/skip 必须从持久化「继续」列表移除该行');
+    {
+        for (const act of ['done', 'skip']) {
+            const env = createEnv({ timeoutMs: 60 });
+            env.setState(null);   // 模拟刷新后内存状态为空
+            env.run(`setColorTimeoutRows([412])`);
+            env.run(`setColorResumeRows([412, 415])`);
+            env.run('checkColorExecStatus()');
+            await tick(50);
+            env.run(`resolveTimeoutRow('${act}')`);
+            const resume = env.run('getColorResumeRows()');
+            const timeout = env.run('getColorTimeoutRows()');
+            ok(timeout.length === 0, `[${act}] 待确认集合清空`);
+            ok(resume.indexOf(412) < 0, `[${act}] 刷新后仍从持久化「继续」列表移除 412（实际 ${resume.join(',')}）`);
+            ok(resume.indexOf(415) >= 0, `[${act}] 其它行保留（实际 ${resume.join(',')}）`);
+            env.clearTimers();
+        }
+        // 刷新后 retry：必须保留
+        const envR = createEnv({ timeoutMs: 60 });
+        envR.setState(null);
+        envR.run('setColorTimeoutRows([412])');
+        envR.run('setColorResumeRows([415])');
+        envR.run('checkColorExecStatus()');
+        await tick(50);
+        envR.run(`resolveTimeoutRow('retry')`);
+        const resumeR = envR.run('getColorResumeRows()');
+        ok(resumeR.indexOf(412) >= 0, `[retry] 刷新后保留在持久化「继续」列表（实际 ${resumeR.join(',')}）`);
+        envR.clearTimers();
+    }
+
+    // ---------- 18. 状态未知 / 未查询 / 过期 → 保持阻挡 ----------
+    console.log('\n【18】执行状态未知、未查询、已过期 → 处理被挡（未知不判空闲）');
+    {
+        // 未查询直接处理 → confirm 拒绝 → 无变化
+        const envNoQuery = createEnv({ timeoutMs: 60, confirmAnswer: false });
+        envNoQuery.setState(null);
+        envNoQuery.run('setColorTimeoutRows([3001])');
+        envNoQuery.run('setColorResumeRows([3001, 3002])');
+        envNoQuery.run(`resolveTimeoutRow('done')`);
+        ok(envNoQuery.run('getColorTimeoutRows()').length === 1, '未查询时处理被取消（待确认保留）');
+        ok(envNoQuery.run('getColorResumeRows()').indexOf(3001) >= 0, '未查询时「继续」列表不变');
+        envNoQuery.clearTimers();
+
+        // 查询失败（顶层 ok:false）→ 状态未知 → 仍被挡
+        const envFail = createEnv({ timeoutMs: 60, confirmAnswer: false, execStatusResponse: { ok: false, error: '扩展未响应' } });
+        envFail.setState(null);
+        envFail.run('setColorTimeoutRows([3101])');
+        envFail.run('checkColorExecStatus()');
+        await tick(50);
+        ok(envFail.log.some(l => /执行状态【未知】/.test(l)), '查询失败显示"状态未知"');
+        envFail.run(`resolveTimeoutRow('done')`);
+        ok(envFail.run('getColorTimeoutRows()').length === 1, '状态未知时处理被挡');
+
+        // 引擎无响应（engineKnown=false）→ 未知 → 仍被挡
+        const envUnknown = createEnv({ timeoutMs: 60, confirmAnswer: false, engineUnknown: true });
+        envUnknown.setState(null);
+        envUnknown.run('setColorTimeoutRows([3201])');
+        envUnknown.run('checkColorExecStatus()');
+        await tick(50);
+        ok(!envUnknown.log.some(l => /【已空闲】/.test(l)), '未知状态不得显示"已空闲"');
+        envUnknown.run(`resolveTimeoutRow('done')`);
+        ok(envUnknown.run('getColorTimeoutRows()').length === 1, '引擎未知时处理被挡');
+
+        // 状态过期 → 被挡
+        const envStale = createEnv({ timeoutMs: 60, confirmAnswer: false });
+        envStale.setState(null);
+        envStale.run('setColorTimeoutRows([3301])');
+        envStale.run('checkColorExecStatus()');
+        await tick(50);
+        envStale.run('lastExecStatus.at = Date.now() - 120000');   // 人为置为过期
+        envStale.run(`resolveTimeoutRow('skip')`);
+        ok(envStale.run('getColorTimeoutRows()').length === 1, '状态过期时处理被挡');
+        envStale.clearTimers();
     }
 
     console.log('\n【15】豆包忙碌派发接口返回真实拒绝 → 页面暂停，不当作已接收');

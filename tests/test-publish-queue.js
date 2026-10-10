@@ -99,7 +99,7 @@ function createEnv(opts = {}) {
                 const i = tabs.findIndex(x => x.id === id);
                 if (i >= 0) tabs.splice(i, 1);
             },
-            sendMessage: async () => {},
+            sendMessage: async () => (opts.tabsSendMessageResponse === undefined ? undefined : opts.tabsSendMessageResponse),
             onRemoved: { addListener: f => L.onRemoved.push(f) },
             onUpdated: { addListener: () => {} },
             update: async () => {}
@@ -1074,7 +1074,7 @@ async function driveFills(env, maxFills) {
     // ---------- 换色完成链路：batchId 由执行任务自带 ----------
     console.log('\n【36】换色完成链路：batchId 由执行任务自带返回，后台校验并原样传播');
     {
-        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192, tabsSendMessageResponse: { ok: true, accepted: true } });
         // 模拟已有豆包标签，走 findDoubaoTab 分支（该分支会清 pendingColorTask）
         env.tabs.push({ id: 7777, url: 'https://www.doubao.com/chat/xxx' });
 
@@ -1169,6 +1169,59 @@ async function driveFills(env, maxFills) {
         await tick(2600);
         const singleExec = env3.store['polo_active_color_exec'];
         ok(singleExec && singleExec.source === 'single' && singleExec.rowNum === 600, `单款也有执行记录（实际 ${JSON.stringify(singleExec)}）`);
+    }
+
+    // ---------- 豆包 busy 拒绝必须传播到页面 ----------
+    console.log('\n【38】豆包忙碌拒绝：后台必须返回 ok:false/busy，且不覆盖原执行身份');
+    {
+        const PREV = { batchId: 'OLD_BATCH', rowNum: 111, source: 'batch', state: 'accepted', startedAt: Date.now() };
+        const env = createEnv({
+            physAvailGiB: 10, commitFreeMiB: 8192,
+            initialStore: { 'polo_active_color_exec': PREV },
+            tabsSendMessageResponse: { ok: false, busy: true, error: '豆包正在执行上一个换色任务，未接收新任务' }
+        });
+        env.tabs.push({ id: 7777, url: 'https://www.doubao.com/chat/xxx' });
+        const r = await env.sendExternal({ action: 'startColorChange', task: { imagePath: 'x.jpg', prompt: 'p', rowNum: 412, batchId: 'NEW_BATCH' } });
+        await tick(2600);
+        // 直接调用生产函数校验返回值（sendExternal 有超时兜底）
+        const rr = await env.run(`openDoubaoAndStartTask({ imagePath:'x.jpg', prompt:'p', rowNum:412, batchId:'NEW_BATCH' })`);
+        await tick(1500);
+        ok(rr && rr.ok === false && rr.busy === true, `busy 被传播为 ok:false（实际 ${JSON.stringify(rr)}）`);
+        const exec = env.store['polo_active_color_exec'];
+        ok(exec && exec.batchId === 'OLD_BATCH', `原执行身份未被覆盖（实际 ${JSON.stringify(exec)}）`);
+
+        // 通信失败（页面未就绪）→ 保留待派发身份，不误报 busy
+        const env2 = createEnv({
+            physAvailGiB: 10, commitFreeMiB: 8192,
+            tabsSendMessageResponse: undefined
+        });
+        env2.tabs.push({ id: 8888, url: 'https://www.doubao.com/chat/yyy' });
+        const r2 = await env2.run(`openDoubaoAndStartTask({ imagePath:'y.jpg', prompt:'p', rowNum: 500, batchId:'B2' })`);
+        await tick(1500);
+        ok(r2 && r2.busy !== true, `通信失败不误报 busy（实际 ${JSON.stringify(r2)}）`);
+        ok(env2.store['polo_active_color_exec'].batchId === 'B2', '通信失败保留待派发身份');
+
+        // 接收成功 → 身份提升为 accepted
+        const env3 = createEnv({
+            physAvailGiB: 10, commitFreeMiB: 8192,
+            tabsSendMessageResponse: { ok: true, accepted: true }
+        });
+        env3.tabs.push({ id: 9999, url: 'https://www.doubao.com/chat/zzz' });
+        const r3 = await env3.run(`openDoubaoAndStartTask({ imagePath:'z.jpg', prompt:'p', rowNum: 600, batchId:'B3' })`);
+        await tick(1500);
+        ok(r3 && r3.ok === true && r3.accepted === true, `接收成功返回 accepted（实际 ${JSON.stringify(r3)}）`);
+        ok(env3.store['polo_active_color_exec'].state === 'accepted', `身份提升为 accepted（实际 ${env3.store['polo_active_color_exec'].state}）`);
+
+        // 豆包确认接收消息也能提升身份（新页路径）
+        const env4 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        await env4.run(`saveActiveColorExec({ batchId:'B4', rowNum: 700, source:'batch', state:'pending', startedAt: Date.now() })`);
+        await tick(50);
+        const a = await env4.sendInternal({ action: 'colorTaskAccepted', rowNum: 700, batchId: 'B4' }, { tab: { id: 1 } });
+        await tick(150);
+        ok(a && a.ok, 'colorTaskAccepted 被接受');
+        ok(env4.store['polo_active_color_exec'].state === 'accepted', '接收确认后身份提升为 accepted');
+        const a2 = await env4.sendInternal({ action: 'colorTaskAccepted', rowNum: 999, batchId: 'B4' }, { tab: { id: 1 } });
+        ok(a2 && a2.ok === false, '身份不符的接收确认被拒绝');
     }
 
     // ---------- 汇总 ----------

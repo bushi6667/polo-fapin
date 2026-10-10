@@ -4415,51 +4415,94 @@ function syncBatchColorTimeoutActions() {
     }
 }
 
+// 最近一次查询到的执行状态（只有 known=true 才算"已知"；未知一律不判空闲）
+let lastExecStatus = null;
+const EXEC_STATUS_MAX_AGE_MS = 60000;
+
 // 明确动作①：查询豆包执行状态（不做任何取消或关闭）
 function checkColorExecStatus() {
     showToast('🔍 正在查询豆包执行状态...');
     try {
         chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorExecStatus' }, (r) => {
             if (chrome.runtime.lastError || !r || !r.ok) {
-                showToast('❌ 查询失败：请确认扩展已重载、本地服务已启动');
+                const reason = (chrome.runtime.lastError && chrome.runtime.lastError.message) || (r && r.error) || '查询失败';
+                lastExecStatus = { at: Date.now(), known: false, busy: null, reason };
+                const msg = `❓ 执行状态【未知】：${reason}。保持阻挡（未知不等同于空闲），请勿直接处理`;
+                updateBatchColorStatus(msg);
+                showToast(msg);
                 return;
             }
-            const busy = !!(r.engine && r.engine.isProcessing);
-            const who = r.exec ? `row${r.exec.rowNum}${r.exec.batchId ? '' : '（单款）'}` : '无执行记录';
-            const msg = busy
-                ? `🔍 豆包【仍在执行】；执行记录 ${who}。请勿重发该款，也不要派发下一款，等它结束后再处理`
-                : `🔍 豆包【已空闲】；执行记录 ${who}。现在可以选择「✅ 已生成 / ↻ 重试 / ⏭ 跳过」`;
+            // 只有引擎明确回传布尔 isProcessing 才算已知
+            const known = r.engineKnown === true && !!(r.engine && typeof r.engine.isProcessing === 'boolean');
+            const busy = known ? !!r.engine.isProcessing : null;
+            lastExecStatus = {
+                at: Date.now(), known, busy,
+                exec: r.exec || null,
+                reason: known ? '' : ((r.engine && r.engine.error) || '无引擎响应')
+            };
+            const who = r.exec ? `row${r.exec.rowNum}${r.exec.batchId ? '' : '（单款）'}（${r.exec.state || 'pending'}）` : '无执行记录';
+            let msg;
+            if (!known) msg = `❓ 执行状态【未知】（${lastExecStatus.reason}）：无法确认豆包是否仍在执行 → 保持阻挡，未知不判空闲`;
+            else if (busy) msg = `⏳ 豆包【仍在执行】；执行记录 ${who}。请勿重发该款，也不要派发下一款`;
+            else msg = `✅ 豆包【已空闲】；执行记录 ${who}。现在可以选择「✅ 已生成 / ↻ 重试 / ⏭ 跳过」`;
             updateBatchColorStatus(msg);
             showToast(msg);
         });
-    } catch (e) { showToast('❌ 查询异常：' + e.message); }
+    } catch (e) {
+        lastExecStatus = { at: Date.now(), known: false, busy: null, reason: e.message };
+        showToast('❓ 查询异常：执行状态未知，处理按钮保持锁定');
+    }
 }
 
 // 明确动作②：处理待确认的超时行（done=已生成 / retry=重试 / skip=跳过）
+// 门槛：必须有"足够新且已知且不忙"的执行状态；未知/仍忙/未查询一律阻挡（可强制，但需明确确认）
 function resolveTimeoutRow(action) {
-    const rows = getColorTimeoutRows();
-    const row = rows[0];
+    const timeoutRows = getColorTimeoutRows();
+    const row = timeoutRows[0];
     if (row === undefined) { showToast('ℹ️ 没有待确认的超时行'); return; }
-    const rest = rows.slice(1);
-    setColorTimeoutRows(rest);
+
+    const st = lastExecStatus;
+    const fresh = !!st && (Date.now() - st.at) <= EXEC_STATUS_MAX_AGE_MS;
+    const gateOk = !!(fresh && st.known === true && st.busy === false);
+    if (!gateOk) {
+        const why = !st ? '尚未查询执行状态'
+            : !fresh ? '执行状态已过期（超过 60 秒）'
+            : st.known !== true ? `执行状态未知（${st.reason || '无引擎响应'}）`
+            : '豆包仍在执行中';
+        const label = action === 'done' ? '已生成' : (action === 'retry' ? '重试' : '跳过');
+        const force = confirm(
+            `⚠️ ${why}，无法确认豆包是否已结束。\n\n` +
+            `强行按「${label}」处理 row${row} 可能导致：\n` +
+            `· 该款仍在生成时被重复派发（重复生成 / 覆盖）\n` +
+            `· 或已生成的图未被计入\n\n` +
+            `确定要强行处理 row${row} 吗？`
+        );
+        if (!force) { showToast('已取消：请先点「🔍 查询执行状态」确认状态后再处理'); return; }
+    }
+
+    const rest = timeoutRows.slice(1);
+    // 持久化剩余列表必须同步更新：刷新后 batchColorState 可能为空，不能只改内存
+    const resumeRows = getColorResumeRows();
 
     if (action === 'done') {
+        setColorTimeoutRows(rest);
+        setColorResumeRows(resumeRows.filter(r => r !== row));   // 已生成 → 从剩余列表移除，不再重发
         if (batchColorState) {
             batchColorState.successCount++;
             batchColorState.failedRows = (batchColorState.failedRows || []).filter(r => r !== row);
-            batchColorState.currentIndex = Math.min(batchColorState.currentIndex, batchColorState.queue.length);
-            refreshColorResumeRowsFromState();
             updateBatchColorProgress();
         }
         showToast(`✅ row${row} 已按「已生成」处理（计入成功，不再重发）`);
     } else if (action === 'retry') {
-        // 该行仍在 failedRows 里，refresh 后会保留在「继续」列表
-        if (batchColorState) refreshColorResumeRowsFromState();
+        setColorTimeoutRows(rest);
+        // 重试 → 必须保留在剩余列表里
+        setColorResumeRows(resumeRows.indexOf(row) >= 0 ? resumeRows : [...resumeRows, row]);
         showToast(`↻ row${row} 已标记为「重试」：点「继续」时会重新派发`);
     } else if (action === 'skip') {
+        setColorTimeoutRows(rest);
+        setColorResumeRows(resumeRows.filter(r => r !== row));   // 跳过 → 从剩余列表移除
         if (batchColorState) {
             batchColorState.failedRows = (batchColorState.failedRows || []).filter(r => r !== row);
-            refreshColorResumeRowsFromState();
         }
         showToast(`⏭ row${row} 已标记为「跳过」`);
     }

@@ -477,6 +477,12 @@ async function runColorTask(task) {
     }
     isProcessing = true;
     colorTask = task;
+    // 确认接收：让后台把"待派发身份"提升为"已接收执行身份"
+    chrome.runtime.sendMessage({
+        action: 'colorTaskAccepted',
+        rowNum: task && task.rowNum,
+        batchId: (task && task.batchId) || null
+    }).catch(() => {});
     // 启动心跳，防止批量换色期间 SW 休眠丢失通知通道
     startHeartbeatForColorTask();
 
