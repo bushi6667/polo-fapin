@@ -250,7 +250,9 @@ function buildAttributeFields(product) {
             { lbl: '板型', val: hasVal(product.fit_en) ? product.fit_en : '', forceMode: 'direct' },
             { lbl: '设计', val: product.design_en || '', forceMode: 'direct' },
             { lbl: '长度', val: product.length_en || '', forceMode: 'direct' },
-            { lbl: '袖型', val: hasVal(product.sleeve_en) ? product.sleeve_en : 'Long Sleeve', fallback: 'Long Sleeve', forceMode: 'select' },
+            // 袖型：不得在缺数据时编造枚举值。空值 → 留空（跳过该字段）+ 告警，交由人工确认。
+            // 注：卫衣类目的「袖型」真实选项尚未核实（见袖型核查报告），禁止套用其它类目的枚举。
+            { lbl: '袖型', val: hasVal(product.sleeve_en) ? product.sleeve_en : '', fallback: '', forceMode: 'select' },
             { lbl: '产品特性', val: product.features_en || '', forceMode: 'tag' },
             { lbl: '性别', val: 'Men', forceMode: 'direct' },
             { lbl: '编织方法', val: hasVal(product.weaving_method_en) ? product.weaving_method_en : 'Knitted', fallback: 'Knit', forceMode: 'direct' },
@@ -1438,7 +1440,13 @@ async function fillAttributesPage3(product) {
         cat.includes("men's polo")
     );
     const _hasVal = (v) => v && String(v).trim() && String(v).toLowerCase() !== 'none';
-    const sleeveVal = _hasVal(product.sleeve_en) ? product.sleeve_en : 'Short Sleeve';
+    // 不在缺数据时编造袖子款式（原实现空值回落 'Short Sleeve'，属编造产品属性）。
+    // 空值 → 跳过该字段并记录待确认，由人工核对。
+    const sleeveVal = _hasVal(product.sleeve_en) ? product.sleeve_en : '';
+    if (isPolo && !sleeveVal) {
+        log('⚠️ 袖子款式：源数据为空，已跳过填入（留待人工确认，不编造选项）', 'warn');
+        results.push('⚠️ 袖子款式：源数据为空，已跳过（待确认）');
+    }
     if (isPolo && sleeveVal) {
         log('🔄 最后填袖子款式...', 'info');
         const sleeveLabels = ['袖子款式', '袖长', '袖型'];
