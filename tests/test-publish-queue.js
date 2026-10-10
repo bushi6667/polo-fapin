@@ -1071,6 +1071,51 @@ async function driveFills(env, maxFills) {
         ok(typeof gF.sampledAt === 'number' && gF.sampledAt > 0, '返回采样时间');
     }
 
+    // ---------- 换色完成链路：batchId 由执行任务自带 ----------
+    console.log('\n【36】换色完成链路：batchId 由执行任务自带返回，后台校验并原样传播');
+    {
+        const env = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        // 模拟已有豆包标签，走 findDoubaoTab 分支（该分支会清 pendingColorTask）
+        env.tabs.push({ id: 7777, url: 'https://www.doubao.com/chat/xxx' });
+
+        const r = await env.sendExternal({ action: 'startColorChange', task: { imagePath: 'x.jpg', prompt: 'p', rowNum: 412, batchId: 'cb_CHAIN' } });
+        await tick(2600);
+        ok(env.run('activeBatchId') === 'cb_CHAIN', `任务已启动并记录 activeBatchId（实际 ${env.run('activeBatchId')}）`);
+        ok(env.store['polo_pending_color_task'] === undefined, '待启动记录(storage)已被清空 —— 模拟真实运行时状态');
+
+        // content 完成：自带 batchId
+        const c1 = await env.sendInternal({ action: 'colorTaskComplete', rowNum: 412, results: { success: true }, batchId: 'cb_CHAIN' }, { tab: { id: 7777 } });
+        await tick(150);
+        ok(c1 && c1.ok, '正确标识的完成消息被接受');
+        const ev = env.store['color_task_complete_event'];
+        ok(ev && ev.rowNum === 412 && ev.batchId === 'cb_CHAIN', `完成事件原样带上 batchId（实际 ${JSON.stringify(ev && ev.batchId)}）`);
+
+        // content 完成：旧任务标识 → 拒绝，且不覆盖事件
+        const c2 = await env.sendInternal({ action: 'colorTaskComplete', rowNum: 412, results: {}, batchId: 'cb_OLD' }, { tab: { id: 7777 } });
+        await tick(150);
+        ok(c2 && c2.ok === false, `旧任务标识被后台拒绝（实际 ${JSON.stringify(c2)}）`);
+        ok(env.store['color_task_complete_event'].batchId === 'cb_CHAIN', '拒绝时不覆盖已有完成事件');
+
+        // content 完成：缺标识 → 批量任务下同样拒绝（不能冒充）
+        const c3 = await env.sendInternal({ action: 'colorTaskComplete', rowNum: 415, results: {} }, { tab: { id: 7777 } });
+        await tick(150);
+        ok(c3 && c3.ok === false, `批量任务下标缺失被拒绝（实际 ${JSON.stringify(c3)}）`);
+        ok(env.store['color_task_complete_event'].rowNum === 412, '缺标识消息未写入完成事件');
+
+        // 后端记录：缺标识消息也不会误用其它 pending 任务的标识
+        ok(env.store['color_task_complete_event'].batchId === 'cb_CHAIN', '事件标识未被污染');
+
+        // 单款任务（无 batchId）：activeBatchId 为空，不参与批量校验
+        const env2 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        env2.tabs.push({ id: 8888, url: 'https://www.doubao.com/chat/yyy' });
+        await env2.sendExternal({ action: 'startColorChange', task: { imagePath: 'y.jpg', prompt: 'p', rowNum: 900 } });
+        await tick(1300);
+        ok(env2.run('activeBatchId') === null, '单款任务不设批量标识');
+        const c4 = await env2.sendInternal({ action: 'colorTaskComplete', rowNum: 900, results: {} }, { tab: { id: 8888 } });
+        await tick(150);
+        ok(c4 && c4.ok, '单款任务完成仍可处理（语义与批量分开）');
+    }
+
     // ---------- 汇总 ----------
     console.log('\n' + '='.repeat(50));
     console.log(`通过: ${pass}   失败: ${fail}`);

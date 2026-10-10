@@ -3697,9 +3697,21 @@ function refreshColorResumeRowsFromState() {
 
 function advanceBatchColorForRow(rowNum, source, msgBatchId) {
     if (!batchColorState) return;
-    // ① 任务标识校验：带 batchId 的消息必须属于当前任务（拒绝旧任务迟到消息）
-    if (msgBatchId && batchColorState.batchId && msgBatchId !== batchColorState.batchId) {
-        console.warn(`🎨 row${rowNum} 完成消息属于旧任务(${msgBatchId})，已忽略 (${source})`);
+    // ① 任务标识校验：批量任务必须有标识，且必须匹配。
+    //    缺标识的消息一律拒绝（旧任务同行的迟到消息不得冒充新任务完成）；
+    //    单款任务不经过本函数（batchColorState 为空时已在上面返回），语义天然分开。
+    if (!batchColorState.batchId) {
+        console.warn(`🎨 当前没有批量任务标识，忽略 row${rowNum} 的完成消息 (${source})`);
+        return;
+    }
+    if (!msgBatchId || msgBatchId !== batchColorState.batchId) {
+        console.warn(`🎨 row${rowNum} 完成消息标识不匹配（收到 ${msgBatchId || '(缺失)'} / 当前 ${batchColorState.batchId}），已忽略 (${source})`);
+        return;
+    }
+    // ①b 迟到完成：该行此前已判超时（在途已清空）→ 只提示，不重复入账
+    if (Array.isArray(batchColorState.timedOutRows) && batchColorState.timedOutRows.indexOf(rowNum) >= 0) {
+        console.warn(`🎨 row${rowNum} 迟到完成（此前已判超时），仅提示不重复入账 (${source})`);
+        showToast(`ℹ️ row${rowNum} 迟到完成（此前已判超时），请确认该款是否已生成`);
         return;
     }
     // ② 只接受"当前在途行"的完成 —— 暂停后仍在生成的那一款也能正常入账
@@ -4274,6 +4286,7 @@ function beginColorBatch(queueList, label) {
         // 暂停只阻止派发，不丢在途行的真实完成。
         inFlightRow: null,
         inFlightSince: 0,
+        timedOutRows: [],       // 已判超时、等待人工确认的行（迟到完成只提示，不重复入账）
         pausedReason: ''
     };
 
@@ -4548,17 +4561,19 @@ function startColorChangeForRows() {
 // 轮询兜底：SW 休眠导致 port/tabs.sendMessage 失效时，从 storage 读取完成事件推进
 function startBatchColorPolling() {
     if (!batchColorState || batchColorState.pollTimer) return;
+    // 有在途行时即使已暂停也继续轮询：直接通知可能因断连丢失，需靠持久化完成事件补收
+    const pollActive = () => !!batchColorState && (batchColorState.running || !!batchColorState.inFlightRow);
     batchColorState.pollTimer = setInterval(() => {
-        if (!batchColorState || !batchColorState.running) return;
+        if (!pollActive()) return;
         try {
             chrome.storage.local.get(['color_task_complete_event'], (result) => {
-                if (chrome.runtime.lastError || !batchColorState || !batchColorState.running) return;
+                if (chrome.runtime.lastError || !pollActive()) return;
                 const evt = result['color_task_complete_event'];
                 if (!evt || !evt.rowNum || !evt.timestamp) return;
                 // 只处理比上次处理过的新事件
                 if (evt.timestamp <= batchColorState.lastProcessedTimestamp) return;
-                const currentProduct = batchColorState.queue[batchColorState.currentIndex];
-                if (currentProduct && currentProduct.row === evt.rowNum) {
+                // 只认当前在途行（暂停中同样成立）
+                if (batchColorState.inFlightRow === evt.rowNum) {
                     console.log(`🎨 轮询兜底捕获完成事件: row${evt.rowNum}`);
                     batchColorState.lastProcessedTimestamp = evt.timestamp;
                     advanceBatchColorForRow(evt.rowNum, 'poll', evt.batchId);
@@ -4689,14 +4704,27 @@ function setupBatchColorTimeout(product) {
         clearTimeout(batchColorState.currentTimeoutId);
     }
     batchColorState.currentTimeoutId = setTimeout(() => {
-        if (!batchColorState || !batchColorState.running) return;
-        const currentProduct = batchColorState.queue[batchColorState.currentIndex];
-        if (currentProduct && currentProduct.row === product.row) {
-            console.warn(`row${product.row} 换色超时，跳过`);
-            batchColorState.failCount++;
-            batchColorState.failedRows.push(product.row);
-            batchColorState.currentIndex++;
+        if (!batchColorState) return;
+        // 只有当前在途行才是本定时器的对象；暂停中也必须处理，否则该行会永久卡在"在途"
+        if (batchColorState.inFlightRow !== product.row) return;
+        console.warn(`row${product.row} 换色超时${batchColorState.running ? '' : '（任务处于暂停）'}`);
+        batchColorState.failCount++;
+        batchColorState.failedRows.push(product.row);
+        if (!Array.isArray(batchColorState.timedOutRows)) batchColorState.timedOutRows = [];
+        if (batchColorState.timedOutRows.indexOf(product.row) < 0) batchColorState.timedOutRows.push(product.row);
+        batchColorState.inFlightRow = null;
+        batchColorState.inFlightSince = 0;
+        batchColorState.currentIndex++;
+        refreshColorResumeRowsFromState();
+        updateBatchColorProgress();
+
+        if (batchColorState.running) {
             setTimeout(processNextBatchColor, 1000);
+        } else {
+            // 暂停中：不自动重发当前款，也不把"超时"当成"豆包已停止"
+            const msg = `⏱ row${product.row} 换色超时（未确认豆包是否仍在生成）。该行已放入「继续」列表，请自行确认后再继续`;
+            updateBatchColorStatus(msg);
+            showToast(msg);
         }
     }, BATCH_COLOR_COMPLETE_TIMEOUT);
 }

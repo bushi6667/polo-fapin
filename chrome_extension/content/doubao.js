@@ -517,7 +517,9 @@ async function runColorTask(task) {
     chrome.runtime.sendMessage({
         action: 'colorTaskComplete',
         results: results,
-        rowNum: rowNum
+        rowNum: rowNum,
+        // 由【本执行任务自身】携带批量标识返回：后台不得从可变的 pendingColorTask 反推身份
+        batchId: (task && task.batchId) || null
     }).catch(() => {});
 
     return results;

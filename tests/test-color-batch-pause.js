@@ -31,7 +31,8 @@ function ok(cond, name, extra) {
 // ---------- 被测源码（真实生产函数） ----------
 const FN_NAMES = [
     'computeColorResumeRows', 'refreshColorResumeRowsFromState', 'advanceBatchColorForRow',
-    'setColorResumeRows', 'getColorResumeRows', 'finishBatchColor', 'resumeColorBatch'
+    'setColorResumeRows', 'getColorResumeRows', 'finishBatchColor', 'resumeColorBatch',
+    'setupBatchColorTimeout', 'startBatchColorPolling'
 ];
 const SRC = FN_NAMES.map(extractFn).join('\n\n');
 
@@ -42,7 +43,9 @@ function createEnv(opts = {}) {
     const log = [];
     let dispatched = 0;
     let beginCalls = 0;
+    let storageGetCalls = 0;
     const timers = [];
+    let pollEvent = opts.pollEvent || null;   // 轮询读到的持久化完成事件
 
     const elStub = () => ({ style: {}, textContent: '', innerHTML: '', disabled: false,
         classList: { add() {}, remove() {}, toggle() {} }, querySelector: () => null });
@@ -55,10 +58,24 @@ function createEnv(opts = {}) {
             removeItem: (k) => store.delete(k)
         },
         document: { getElementById: () => elStub(), querySelector: () => null, querySelectorAll: () => [] },
+        // 计时器：把间隔压短以便测试（逻辑仍是真实回调）
         setTimeout: (fn, ms) => { const t = setTimeout(fn, ms); timers.push(t); return t; },
         clearTimeout: (t) => clearTimeout(t),
-        setInterval: (fn, ms) => { const t = setInterval(fn, ms); timers.push(t); return t; },
+        setInterval: (fn, ms) => { const t = setInterval(fn, Math.min(ms, 60)); timers.push(t); return t; },
         clearInterval: (t) => clearInterval(t),
+        chrome: {
+            runtime: { lastError: null },
+            storage: { local: {
+                get: (keys, cb) => {
+                    storageGetCalls++;
+                    if (opts.storageGetThrows) { cb({}); return; }
+                    const out = {};
+                    if (pollEvent) out['color_task_complete_event'] = pollEvent;
+                    cb(out);
+                }
+            } }
+        },
+        BATCH_COLOR_COMPLETE_TIMEOUT: opts.timeoutMs || 80,
         // UI / 依赖 mock
         showToast: (m) => toasts.push(m),
         updateBatchColorProgress: () => {},
@@ -66,7 +83,7 @@ function createEnv(opts = {}) {
         syncColorResumeButton: () => {},
         restoreBatchColorUI: () => {},
         stopBatchColorPolling: () => {},
-        updateBatchColorStatus: () => {},
+        updateBatchColorStatus: (m) => log.push('STATUS ' + m),
         updateBatchColorFill: () => {},
         setBatchColorToggle: () => {},
         processNextBatchColor: () => { dispatched++; },
@@ -78,12 +95,10 @@ function createEnv(opts = {}) {
         psPollTimer: null,
         products: [],
         extensionInstalled: true,
-        // 全局状态（每个用例自行设置）
         batchColorState: null
     };
     sandbox.globalThis = sandbox;
     const ctx = vm.createContext(sandbox);
-    // 先声明全局变量，再执行函数源码（函数内会读写 batchColorState）
     vm.runInContext('var batchColorState = null;', ctx);
     vm.runInContext(SRC, ctx, { filename: '发品助手.html:color-fns' });
 
@@ -92,9 +107,10 @@ function createEnv(opts = {}) {
         store, toasts, log,
         get dispatched() { return dispatched; },
         get beginCalls() { return beginCalls; },
+        get storageGetCalls() { return storageGetCalls; },
+        setPollEvent: (e) => { pollEvent = e; },
         run: (expr) => vm.runInContext(expr, ctx),
         clearTimers: () => { for (const t of timers) { clearTimeout(t); clearInterval(t); } },
-        // 构造一个"已派发 row1，正在生成"的暂停态
         setState: (s) => { sandbox.batchColorState = s; vm.runInContext('batchColorState = __s;', Object.assign(ctx, { __s: s })); }
     };
 }
@@ -118,6 +134,7 @@ function mkState(rows, opts = {}) {
         batchId: opts.batchId || 'cb_TEST',
         inFlightRow: opts.inFlightRow !== undefined ? opts.inFlightRow : rows[0],
         inFlightSince: Date.now(),
+        timedOutRows: opts.timedOutRows || [],
         pausedReason: ''
     };
 }
@@ -244,6 +261,89 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         env.run(`advanceBatchColorForRow(1001, 'message', 'cb_TEST')`);
         const after = env.run('getColorResumeRows()');
         ok(st.successCount === 1 && after.length === 0, `完成后无残留待办（成功 ${st.successCount}，待办 ${after.join(',')}）`);
+        env.clearTimers();
+    }
+
+    // ---------- 8. 缺标识 / 错标识 一律拒绝 ----------
+    console.log('\n【8】完成消息标识强制执行：缺标识、错标识都拒绝');
+    {
+        const env = createEnv();
+        const st = mkState([1101, 1102], { running: false, inFlightRow: 1101, batchId: 'NEW' });
+        env.setState(st);
+        env.run(`advanceBatchColorForRow(1101, 'message', null)`);
+        ok(st.successCount === 0, `缺标识消息被拒绝（成功数 ${st.successCount}）`);
+        env.run(`advanceBatchColorForRow(1101, 'message', undefined)`);
+        ok(st.successCount === 0, 'undefined 标识被拒绝');
+        env.run(`advanceBatchColorForRow(1101, 'message', 'OLD')`);
+        ok(st.successCount === 0, '旧任务同一行号的迟到消息被拒绝');
+        ok(st.inFlightRow === 1101, '在途行未被误清');
+        env.run(`advanceBatchColorForRow(1101, 'message', 'NEW')`);
+        ok(st.successCount === 1, '正确标识才入账');
+        env.clearTimers();
+    }
+
+    // ---------- 9. 暂停后仅存储事件、无直接通知 → 轮询补收 ----------
+    console.log('\n【9】暂停后只有持久化完成事件（无直接通知）→ 轮询能补收，且不派发');
+    {
+        const env = createEnv({ pollEvent: { rowNum: 1201, timestamp: Date.now() + 10000, batchId: 'cb_TEST' } });
+        const st = mkState([1201, 1202], { running: false, inFlightRow: 1201 });
+        env.setState(st);
+        env.run('startBatchColorPolling()');
+        await tick(300);
+        ok(env.storageGetCalls > 0, `暂停中轮询仍在读存储（读取 ${env.storageGetCalls} 次）`);
+        ok(st.successCount === 1, `轮询补收入账（成功数 ${st.successCount}）`);
+        ok(st.inFlightRow === null, '在途行已清空');
+        ok(env.dispatched === 0, `轮询补收后不自动派发（dispatch ${env.dispatched}）`);
+        const resume = env.run('getColorResumeRows()');
+        ok(resume.indexOf(1201) < 0, `补收行不在「继续」列表（实际 ${resume.join(',')}）`);
+        env.clearTimers();
+    }
+
+    // ---------- 10. 暂停中超时 → 可处理状态，不无限等待 ----------
+    console.log('\n【10】暂停中超时 → 更新可处理状态、提供恢复路径、不自动重发');
+    {
+        const env = createEnv({ timeoutMs: 60 });
+        const st = mkState([1301, 1302], { running: false, inFlightRow: 1301 });
+        env.setState(st);
+        env.run('setColorResumeRows([1301, 1302])');
+        env.run(`setupBatchColorTimeout({ row: 1301 })`);
+        await tick(200);
+        ok(st.inFlightRow === null, `超时后在途行被清空（否则永久拒绝继续）（实际 ${st.inFlightRow}）`);
+        ok(st.failCount === 1, `计入失败（实际 ${st.failCount}）`);
+        ok(Array.isArray(st.timedOutRows) && st.timedOutRows.indexOf(1301) >= 0, '记入超时待确认集合');
+        const resume = env.run('getColorResumeRows()');
+        ok(resume.indexOf(1301) >= 0, `超时行进入「继续」列表（实际 ${resume.join(',')}）`);
+        ok(env.dispatched === 0, `暂停中超时不自动派发（dispatch ${env.dispatched}）`);
+        ok(env.log.some(l => /未确认豆包/.test(l)), '提示"未确认豆包是否仍在生成"');
+        // 恢复路径可用：不再被在途行挡住
+        env.run('products = [{row:1301},{row:1302}]');
+        env.run('resumeColorBatch()');
+        ok(env.beginCalls === 1, `超时后「继续」可用（beginColorBatch ${env.beginCalls} 次）`);
+        env.clearTimers();
+    }
+
+    // ---------- 11. 超时后迟到完成 → 只提示，不重复入账 ----------
+    console.log('\n【11】超时后迟到完成 → 只提示不重复入账');
+    {
+        const env = createEnv();
+        const st = mkState([1401, 1402], { running: false, inFlightRow: null, timedOutRows: [1401], currentIndex: 1 });
+        env.setState(st);
+        env.run(`advanceBatchColorForRow(1401, 'message', 'cb_TEST')`);
+        ok(st.successCount === 0, `超时行迟到完成不重复入账（成功数 ${st.successCount}）`);
+        ok(env.toasts.some(t => /迟到完成/.test(t)), `给出迟到完成提示（${env.toasts.join(' | ')}）`);
+        env.clearTimers();
+    }
+
+    // ---------- 12. 运行中完成仍正常派发（回归） ----------
+    console.log('\n【12】运行中完成仍正常入账并派发（回归）');
+    {
+        const env = createEnv();
+        const st = mkState([1501, 1502, 1503], { running: true, inFlightRow: 1501 });
+        env.setState(st);
+        env.run(`advanceBatchColorForRow(1501, 'message', 'cb_TEST')`);
+        await tick(700);
+        ok(st.successCount === 1, `运行中入账（成功数 ${st.successCount}）`);
+        ok(env.dispatched === 1, `运行中正常派发下一款（dispatch ${env.dispatched}）`);
         env.clearTimers();
     }
 

@@ -1027,6 +1027,9 @@ async function realClickCDP(tabId, x, y) {
 
 let doubaoTabId = null;
 let pendingColorTask = null;
+// 当前批量换色任务标识（批量流程用；单款任务为 null）。
+// 只用于校验 colorTaskComplete 的身份，不从 pendingColorTask 反推。
+let activeBatchId = null;
 let pendingAiEditTask = null;
 
 const IDB_NAME = 'PoloColorImages';
@@ -2077,18 +2080,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log('🎨 换色任务完成:', request.results);
         const rowNum = request.rowNum;
         if (rowNum) {
-            // 带上批量任务标识（batchId）：页面据此拒绝旧任务与重复的完成消息
+            // 身份只认执行任务自带回来的 batchId，不从可变的 pendingColorTask 反推
+            const rawBatchId = request.batchId;
+            const batchId = (typeof rawBatchId === 'string' && rawBatchId) ? rawBatchId : null;
             const eventKey = 'color_task_complete_event';
-            const finish = (batchId) => {
-                const event = { rowNum, timestamp: Date.now(), results: request.results, batchId: batchId || null };
+
+            // 后台校验：与当前批量任务标识不符 → 记录并拒绝，不写事件、不通知（旧任务迟到消息不得冒充）
+            if (activeBatchId && batchId !== activeBatchId) {
+                console.warn(`⛔ 换色完成消息标识不匹配（收到 ${batchId || '(缺失)'} / 当前批量 ${activeBatchId}），已拒绝: row${rowNum}`);
+                sendResponse({ ok: false, error: 'batchId 不匹配，已拒绝' });
+                return true;
+            }
+
+            const finish = () => {
+                const event = { rowNum, timestamp: Date.now(), results: request.results, batchId };
                 chrome.storage.local.set({ [eventKey]: event }, () => {
                     console.log(`💾 换色完成事件已持久化: row${rowNum} (batch ${batchId || '-'})`);
                 });
-                notifyColorTaskComplete(rowNum, batchId || null);
+                notifyColorTaskComplete(rowNum, batchId);
             };
-            getPendingColorTask()
-                .then(pending => finish((pending && pending.batchId) || null))
-                .catch(() => finish(null));
+            finish();
         }
         sendResponse({ ok: true });
         return true;
@@ -2554,6 +2565,8 @@ async function findDoubaoTab() {
 async function openDoubaoAndStartTask(task) {
     console.log('🎨 启动豆包AI换色任务:', task);
     pendingColorTask = task;
+    // 当前批量任务标识：仅用于校验完成消息身份；不从 pendingColorTask 反推（它会被清空）
+    activeBatchId = (task && typeof task.batchId === 'string' && task.batchId) ? task.batchId : null;
     await savePendingColorTask(task);
 
     let tab = await findDoubaoTab();
