@@ -529,6 +529,12 @@ async function runColorTask(task) {
 // getColorTaskStatus 查询任务状态
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'startColorTask') {
+        // 忙碌时返回真实拒绝：页面不得把它当成"已接收"
+        if (isProcessing) {
+            log('已有任务进行中，拒绝接收新任务', 'warn');
+            sendResponse({ ok: false, busy: true, error: '豆包正在执行上一个换色任务，未接收新任务' });
+            return true;
+        }
         runColorTask(request.task);
         sendResponse({ ok: true, accepted: true });
         return true;

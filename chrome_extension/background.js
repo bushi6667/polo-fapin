@@ -988,6 +988,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 recoverPublishTaskOnStartup();
+recoverColorExecOnStartup();
 
 async function realClickCDP(tabId, x, y) {
     try {
@@ -1027,9 +1028,30 @@ async function realClickCDP(tabId, x, y) {
 
 let doubaoTabId = null;
 let pendingColorTask = null;
-// 当前批量换色任务标识（批量流程用；单款任务为 null）。
-// 只用于校验 colorTaskComplete 的身份，不从 pendingColorTask 反推。
-let activeBatchId = null;
+// 当前换色执行的【持久化身份】：{ batchId, rowNum, source:'batch'|'single', startedAt }
+// 派发前写入 storage，冷启动/校验前恢复；不从会被清空的 pendingColorTask 反推
+const ACTIVE_COLOR_EXEC_KEY = 'polo_active_color_exec';
+let activeColorExec = null;
+
+async function saveActiveColorExec(exec) {
+    activeColorExec = exec || null;
+    return new Promise((resolve) => {
+        if (exec) chrome.storage.local.set({ [ACTIVE_COLOR_EXEC_KEY]: exec }, resolve);
+        else chrome.storage.local.remove(ACTIVE_COLOR_EXEC_KEY, resolve);
+    });
+}
+
+async function getActiveColorExec() {
+    if (activeColorExec) return activeColorExec;
+    const r = await new Promise((resolve) => chrome.storage.local.get(ACTIVE_COLOR_EXEC_KEY, resolve));
+    activeColorExec = r[ACTIVE_COLOR_EXEC_KEY] || null;
+    return activeColorExec;
+}
+
+// 冷启动恢复：身份未知时不要静默当成单款任务
+async function recoverColorExecOnStartup() {
+    try { await getActiveColorExec(); } catch (_) {}
+}
 let pendingAiEditTask = null;
 
 const IDB_NAME = 'PoloColorImages';
@@ -1261,6 +1283,23 @@ async function handleSharedAction(request, sendResponse) {
     }
     if (request.action === 'clearDiagLog') {
         chrome.storage.local.remove(PUBLISH_LOG_KEY, () => sendResponse({ ok: true }));
+        return true;
+    }
+    // 查询当前换色执行身份与豆包执行状态（供页面做超时后的明确处理动作）
+    if (request.action === 'getColorExecStatus') {
+        (async () => {
+            let engine = { ok: false, error: '无法查询豆包执行状态' };
+            try {
+                const tab = await findDoubaoTab();
+                if (tab) engine = await chrome.tabs.sendMessage(tab.id, { action: 'getColorTaskStatus' });
+            } catch (e) { engine = { ok: false, error: e.message }; }
+            const exec = await getActiveColorExec();
+            sendResponse({ ok: true, exec, engine });
+        })();
+        return true;
+    }
+    if (request.action === 'clearColorExec') {
+        saveActiveColorExec(null).then(() => sendResponse({ ok: true }));
         return true;
     }
     // 内存闸门查询：发品与换色共用同一套判断（换色侧不再自成一套规则）
@@ -2080,26 +2119,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.log('🎨 换色任务完成:', request.results);
         const rowNum = request.rowNum;
         if (rowNum) {
-            // 身份只认执行任务自带回来的 batchId，不从可变的 pendingColorTask 反推
             const rawBatchId = request.batchId;
             const batchId = (typeof rawBatchId === 'string' && rawBatchId) ? rawBatchId : null;
             const eventKey = 'color_task_complete_event';
-
-            // 后台校验：与当前批量任务标识不符 → 记录并拒绝，不写事件、不通知（旧任务迟到消息不得冒充）
-            if (activeBatchId && batchId !== activeBatchId) {
-                console.warn(`⛔ 换色完成消息标识不匹配（收到 ${batchId || '(缺失)'} / 当前批量 ${activeBatchId}），已拒绝: row${rowNum}`);
-                sendResponse({ ok: false, error: 'batchId 不匹配，已拒绝' });
-                return true;
-            }
-
-            const finish = () => {
+            // 身份校验基于【持久化执行身份】：冷启动后同样有效；不得被旧消息覆盖
+            getActiveColorExec().then((exec) => {
+                if (!exec) {
+                    console.warn(`⛔ 无当前执行身份记录，拒绝换色完成消息: row${rowNum}（不静默当作单款任务）`);
+                    sendResponse({ ok: false, error: '执行身份未知，已拒绝' });
+                    return;
+                }
+                if ((exec.batchId || null) !== batchId || exec.rowNum !== rowNum) {
+                    console.warn(`⛔ 换色完成身份不匹配（收到 row${rowNum}/batch ${batchId || '(缺失)'}，当前 row${exec.rowNum}/batch ${exec.batchId || '(单款)'}），已拒绝且不覆盖已保存事件`);
+                    sendResponse({ ok: false, error: '执行身份不匹配，已拒绝' });
+                    return;
+                }
                 const event = { rowNum, timestamp: Date.now(), results: request.results, batchId };
                 chrome.storage.local.set({ [eventKey]: event }, () => {
                     console.log(`💾 换色完成事件已持久化: row${rowNum} (batch ${batchId || '-'})`);
                 });
                 notifyColorTaskComplete(rowNum, batchId);
-            };
-            finish();
+                sendResponse({ ok: true });
+            }).catch(() => sendResponse({ ok: false, error: '身份校验异常' }));
+            return true;
         }
         sendResponse({ ok: true });
         return true;
@@ -2565,8 +2607,13 @@ async function findDoubaoTab() {
 async function openDoubaoAndStartTask(task) {
     console.log('🎨 启动豆包AI换色任务:', task);
     pendingColorTask = task;
-    // 当前批量任务标识：仅用于校验完成消息身份；不从 pendingColorTask 反推（它会被清空）
-    activeBatchId = (task && typeof task.batchId === 'string' && task.batchId) ? task.batchId : null;
+    // 派发【前】写入持久化执行身份（含行号与来源）；批量与单款都写，语义明确区分
+    await saveActiveColorExec({
+        batchId: (task && typeof task.batchId === 'string' && task.batchId) ? task.batchId : null,
+        rowNum: task && task.rowNum,
+        source: (task && task.batchId) ? 'batch' : 'single',
+        startedAt: Date.now()
+    });
     await savePendingColorTask(task);
 
     let tab = await findDoubaoTab();

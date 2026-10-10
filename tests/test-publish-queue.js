@@ -1080,7 +1080,8 @@ async function driveFills(env, maxFills) {
 
         const r = await env.sendExternal({ action: 'startColorChange', task: { imagePath: 'x.jpg', prompt: 'p', rowNum: 412, batchId: 'cb_CHAIN' } });
         await tick(2600);
-        ok(env.run('activeBatchId') === 'cb_CHAIN', `任务已启动并记录 activeBatchId（实际 ${env.run('activeBatchId')}）`);
+        ok(env.run('(activeColorExec && activeColorExec.batchId)') === 'cb_CHAIN' || env.store['polo_active_color_exec'].batchId === 'cb_CHAIN',
+            `任务已启动并持久化执行身份（实际 ${JSON.stringify(env.store['polo_active_color_exec'])}）`);
         ok(env.store['polo_pending_color_task'] === undefined, '待启动记录(storage)已被清空 —— 模拟真实运行时状态');
 
         // content 完成：自带 batchId
@@ -1110,10 +1111,64 @@ async function driveFills(env, maxFills) {
         env2.tabs.push({ id: 8888, url: 'https://www.doubao.com/chat/yyy' });
         await env2.sendExternal({ action: 'startColorChange', task: { imagePath: 'y.jpg', prompt: 'p', rowNum: 900 } });
         await tick(1300);
-        ok(env2.run('activeBatchId') === null, '单款任务不设批量标识');
+        ok(env2.run('(activeColorExec && activeColorExec.batchId) || null') === null, '单款任务不设批量标识');
         const c4 = await env2.sendInternal({ action: 'colorTaskComplete', rowNum: 900, results: {} }, { tab: { id: 8888 } });
         await tick(150);
         ok(c4 && c4.ok, '单款任务完成仍可处理（语义与批量分开）');
+    }
+
+    // ---------- 换色执行身份：MV3 冷启动后仍有效 ----------
+    console.log('\n【37】冷启动后身份校验：旧/缺标识不得覆盖已保存的正确完成事件');
+    {
+        const EXEC = { batchId: 'CURRENT', rowNum: 412, source: 'batch', startedAt: Date.now() };
+        const EVT = { rowNum: 412, timestamp: Date.now() - 1000, results: {}, batchId: 'CURRENT' };
+        // 模拟：上一轮已派发（写入持久化身份），worker 被回收后重新拉起
+        const env = createEnv({
+            physAvailGiB: 10, commitFreeMiB: 8192,
+            initialStore: { 'polo_active_color_exec': EXEC, 'color_task_complete_event': EVT }
+        });
+        await tick(200);
+        await env.run('getActiveColorExec()');   // 冷启动恢复路径（含惰性加载）
+        ok(env.store['polo_active_color_exec'].batchId === 'CURRENT', '冷启动时执行身份记录存在');
+        ok(env.run('activeColorExec && activeColorExec.batchId') === 'CURRENT', '冷启动后身份已恢复');
+
+        // 旧标识迟到 → 拒绝且不覆盖
+        const o = await env.sendInternal({ action: 'colorTaskComplete', rowNum: 412, results: {}, batchId: 'OLD' }, { tab: { id: 1 } });
+        await tick(150);
+        ok(o && o.ok === false, `旧标识被拒绝（实际 ${JSON.stringify(o)}）`);
+        ok(env.store['color_task_complete_event'].batchId === 'CURRENT', '已保存的正确事件未被覆盖');
+
+        // 缺标识 → 拒绝且不覆盖
+        const n = await env.sendInternal({ action: 'colorTaskComplete', rowNum: 412, results: {} }, { tab: { id: 1 } });
+        await tick(150);
+        ok(n && n.ok === false, '缺标识被拒绝');
+        ok(env.store['color_task_complete_event'].batchId === 'CURRENT', '缺标识不覆盖已保存事件');
+
+        // 行号不符 → 拒绝
+        const r = await env.sendInternal({ action: 'colorTaskComplete', rowNum: 999, results: {}, batchId: 'CURRENT' }, { tab: { id: 1 } });
+        await tick(150);
+        ok(r && r.ok === false, '行号不符被拒绝');
+
+        // 正确标识 → 接受并更新事件
+        const g = await env.sendInternal({ action: 'colorTaskComplete', rowNum: 412, results: { success: true }, batchId: 'CURRENT' }, { tab: { id: 1 } });
+        await tick(150);
+        ok(g && g.ok === true, '正确标识被接受');
+        ok(env.store['color_task_complete_event'].timestamp > EVT.timestamp, '完成事件被正确更新');
+
+        // 无身份记录 → 拒绝（不静默当成单款任务）
+        const env2 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        const noExec = await env2.sendInternal({ action: 'colorTaskComplete', rowNum: 500, results: {} }, { tab: { id: 1 } });
+        await tick(150);
+        ok(noExec && noExec.ok === false, '无执行身份记录时拒绝（不静默当单款）');
+        ok(env2.store['color_task_complete_event'] === undefined, '不写入完成事件');
+
+        // 单款任务也写身份记录
+        const env3 = createEnv({ physAvailGiB: 10, commitFreeMiB: 8192 });
+        env3.tabs.push({ id: 6666, url: 'https://www.doubao.com/chat/zzz' });
+        await env3.sendExternal({ action: 'startColorChange', task: { imagePath: 'z.jpg', prompt: 'p', rowNum: 600 } });
+        await tick(2600);
+        const singleExec = env3.store['polo_active_color_exec'];
+        ok(singleExec && singleExec.source === 'single' && singleExec.rowNum === 600, `单款也有执行记录（实际 ${JSON.stringify(singleExec)}）`);
     }
 
     // ---------- 汇总 ----------
