@@ -1033,6 +1033,15 @@ let pendingColorTask = null;
 const ACTIVE_COLOR_EXEC_KEY = 'polo_active_color_exec';
 let activeColorExec = null;
 
+// 执行绑定的文件标识：下载/缓存/通知一律用它，异步回调不得再读可变的 CURRENT_FILENAME
+function boundColorFileInfo() {
+    const exec = activeColorExec;
+    if (exec && typeof exec.fileFolder === 'string') {
+        return { fileKey: exec.fileKey || '', fileFolder: exec.fileFolder || DEFAULT_FILE_FOLDER };
+    }
+    return { fileKey: getFilePrefix(), fileFolder: CURRENT_FILENAME || DEFAULT_FILE_FOLDER };
+}
+
 async function saveActiveColorExec(exec) {
     activeColorExec = exec || null;
     return new Promise((resolve) => {
@@ -1246,8 +1255,19 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         if (pendingTask) {
             console.log('📤 发送待处理的换色任务（从storage恢复）');
             setTimeout(async () => {
-                sendStartColorTask(tabId, pendingTask);
-                await savePendingColorTask(null);
+                // 补发也必须核对接收结果：未确认接收就保留待派发记录（不能凭加载事件绕过）
+                const resp = await sendStartColorTask(tabId, pendingTask);
+                if (resp && resp.ok) {
+                    await savePendingColorTask(null);
+                    const exec = await getActiveColorExec();
+                    if (exec && (exec.batchId || null) === ((typeof pendingTask.batchId === 'string' && pendingTask.batchId) ? pendingTask.batchId : null)
+                        && exec.rowNum === pendingTask.rowNum) {
+                        await saveActiveColorExec(Object.assign({}, exec, { state: 'accepted', acceptedAt: Date.now(), tabId }));
+                    }
+                    console.log('✅ 补发已确认接收');
+                } else {
+                    console.warn('⚠️ 补发未被接收（保留待派发记录）:', (resp && resp.error) || '无响应');
+                }
             }, 2000);
         }
     }
@@ -1305,15 +1325,35 @@ async function handleSharedAction(request, sendResponse) {
         (async () => {
             let engine = null;
             let engineKnown = false;
+            const exec = await getActiveColorExec();
             try {
-                const tab = await findDoubaoTab();
-                if (tab) {
-                    engine = await chrome.tabs.sendMessage(tab.id, { action: 'getColorTaskStatus' });
-                    // 只有引擎明确回传布尔 isProcessing 才算"状态已知"；缺字段一律按未知处理
+                // 绑定执行页：优先用执行身份记录的 tabId，避免多张豆包页时查到空闲页
+                let tabId = exec && exec.tabId ? exec.tabId : null;
+                if (tabId) {
+                    try { await chrome.tabs.get(tabId); } catch (_) { tabId = null; }
+                }
+                if (!tabId) {
+                    const tab = await findDoubaoTab();
+                    tabId = tab ? tab.id : null;
+                }
+                if (tabId) {
+                    engine = await chrome.tabs.sendMessage(tabId, { action: 'getColorTaskStatus' });
                     engineKnown = !!(engine && engine.ok === true && typeof engine.isProcessing === 'boolean');
+                    // 引擎回传的任务与执行身份核对；不符则按未知处理（不能拿别的任务的状态当依据）
+                    if (engineKnown && exec) {
+                        const et = engine.task || null;
+                        const etRow = et && et.rowNum;
+                        const etBatch = (et && typeof et.batchId === 'string' && et.batchId) ? et.batchId : null;
+                        if (etRow !== undefined && etRow !== null && etRow !== exec.rowNum) {
+                            console.warn(`⚠️ 引擎任务与执行身份不符（engine row${etRow} / exec row${exec.rowNum}），按未知处理`);
+                            engineKnown = false;
+                        } else if (etBatch !== (exec.batchId || null) && etBatch !== null) {
+                            console.warn(`⚠️ 引擎任务标识与执行身份不符（engine ${etBatch} / exec ${exec.batchId || '(单款)'}），按未知处理`);
+                            engineKnown = false;
+                        }
+                    }
                 }
             } catch (e) { engine = { ok: false, error: e.message }; engineKnown = false; }
-            const exec = await getActiveColorExec();
             sendResponse({
                 ok: true,
                 exec,
@@ -1628,8 +1668,11 @@ async function handleSharedAction(request, sendResponse) {
         }
         // 先真正完成暂停（等锁释放）再切换当前文件，避免暂停与切换竞态
         pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').then(() => {
+            const prevName = CURRENT_FILENAME;
             CURRENT_FILENAME = nextName;
             console.log(`📄 当前文件名切换为: ${CURRENT_FILENAME || '(默认)'}`);
+            // 通知助手页暂停换色批次（保留在途结果，不取消、不关页）
+            notifyAssistant('colorFileSwitched', { from: prevName, to: CURRENT_FILENAME });
             chrome.storage.local.set({ current_filename: CURRENT_FILENAME }, () => {
                 sendResponse({ ok: true, filename: CURRENT_FILENAME });
             });
@@ -2228,8 +2271,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             return true;
         }
         pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').then(() => {
+            const prevName = CURRENT_FILENAME;
             CURRENT_FILENAME = nextName;
             console.log(`📄 当前文件名切换为: ${CURRENT_FILENAME || '(默认)'}`);
+            notifyAssistant('colorFileSwitched', { from: prevName, to: CURRENT_FILENAME });
             chrome.storage.local.set({ current_filename: CURRENT_FILENAME }, () => {
                 sendResponse({ ok: true, filename: CURRENT_FILENAME });
             });
@@ -2639,7 +2684,11 @@ async function openDoubaoAndStartTask(task) {
         batchId: (task && typeof task.batchId === 'string' && task.batchId) ? task.batchId : null,
         rowNum: task && task.rowNum,
         source: (task && task.batchId) ? 'batch' : 'single',
+        // 文件绑定：执行期内固定，贯穿下载/缓存/通知；异步回调不再读可变的 CURRENT_FILENAME
+        fileKey: (task && typeof task.fileKey === 'string') ? task.fileKey : getFilePrefix(),
+        fileFolder: (task && typeof task.fileFolder === 'string' && task.fileFolder) ? task.fileFolder : (CURRENT_FILENAME || DEFAULT_FILE_FOLDER),
         state: 'pending',   // pending=待派发 / accepted=豆包已确认接收
+        tabId: null,        // 接收后写入实际执行页，供状态查询绑定
         startedAt: Date.now()
     };
     await saveActiveColorExec(nextExec);
@@ -2664,7 +2713,7 @@ async function openDoubaoAndStartTask(task) {
             console.warn('⚠️ 派发通信失败，保留待派发状态:', (resp && resp.error) || '无响应');
             return { ok: false, pending: true, error: (resp && resp.error) || '通信失败', tabId: doubaoTabId };
         }
-        await saveActiveColorExec(Object.assign({}, nextExec, { state: 'accepted', acceptedAt: Date.now() }));
+        await saveActiveColorExec(Object.assign({}, nextExec, { state: 'accepted', acceptedAt: Date.now(), tabId: tab.id }));
         await savePendingColorTask(null);
         return { ok: true, tabId: doubaoTabId, accepted: true };
     }
@@ -2783,7 +2832,9 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                 console.warn('⛔ 非法下载文件名:', filename);
                 return resolve({ ok: false, error: '非法文件名' });
             }
-            const fileFolder = CURRENT_FILENAME || DEFAULT_FILE_FOLDER; // 与 buildColorImagePath 读盘侧保持一致
+            // 文件绑定：一律使用执行创建时绑定的文件，异步下载/回调期间切文件也不串目录
+            const bound = boundColorFileInfo();
+            const fileFolder = bound.fileFolder || DEFAULT_FILE_FOLDER; // 与 buildColorImagePath 读盘侧保持一致
             const relativePath = 'Polo发品_颜色图/' + fileFolder + '/row' + rowNum + '/' + filename;
 
             const colorMatch = filename.match(/_(white|black|gray|navy)\./);
@@ -2807,7 +2858,7 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                             // 同时存 IndexedDB
                             if (dataUrl) {
                                 const color = colorMatch[1];
-                                const idbKey = colorImageIDBKey(CURRENT_FILENAME, rowNum, color);
+                                const idbKey = colorImageIDBKey(bound.fileKey !== undefined ? bound.fileKey : CURRENT_FILENAME, rowNum, color);
                                 saveColorImageToIDB(idbKey, dataUrl).then(() => {
                                     console.log(`💾 颜色图已存 IndexedDB(预取): ${idbKey}`);
                                 });

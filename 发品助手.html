@@ -3682,9 +3682,9 @@ function handlePsEditComplete(request) {
 }
 
 function handleColorTaskComplete(request) {
-    const { rowNum, batchId } = request;
-    console.log('🎨 收到换色完成消息:', rowNum, batchId || '');
-    advanceBatchColorForRow(rowNum, 'message', batchId);
+    const { rowNum, batchId, results } = request;
+    console.log('🎨 收到换色完成消息:', rowNum, batchId || '', results ? '含结果' : '无结果');
+    advanceBatchColorForRow(rowNum, 'message', batchId, results);
 }
 
 // 统一推进入口：消息触发和轮询兜底都走这里，靠 lastAdvancedRow 去重防双触发
@@ -3698,11 +3698,87 @@ function computeColorResumeRows() {
     return [...(batchColorState.failedRows || []), ...rest];
 }
 
+// 当前 Excel 文件标识（与扩展 getFilePrefix 同规则）：换色待办按文件隔离
+function currentFileKey() {
+    return loadedFileName ? String(loadedFileName).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_') + '__' : '';
+}
+
+// ===== 换色任务状态持久化：刷新/重连后恢复队列与在途身份，不自动重复派发 =====
+const COLOR_BATCH_STATE_KEY = 'polo_color_batch_state';
+
+function saveColorBatchState() {
+    if (!batchColorState) { localStorage.removeItem(COLOR_BATCH_STATE_KEY); return; }
+    const snap = {
+        fileKey: currentFileKey(),
+        batchId: batchColorState.batchId || null,
+        label: batchColorState.label || '批量换色',
+        rows: batchColorState.queue.map(p => p.row),
+        currentIndex: batchColorState.currentIndex,
+        successCount: batchColorState.successCount,
+        failCount: batchColorState.failCount,
+        failedRows: batchColorState.failedRows || [],
+        skippedRows: batchColorState.skippedRows || [],
+        inFlightRow: batchColorState.inFlightRow,
+        running: batchColorState.running,
+        startTime: batchColorState.startTime
+    };
+    localStorage.setItem(COLOR_BATCH_STATE_KEY, JSON.stringify(snap));
+}
+
+function loadColorBatchState() {
+    try {
+        const raw = localStorage.getItem(COLOR_BATCH_STATE_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+}
+
+// 刷新后恢复：只恢复状态与在途身份，绝不自动派发
+function restoreColorBatchState() {
+    if (batchColorState) return false;
+    const snap = loadColorBatchState();
+    if (!snap || !Array.isArray(snap.rows) || snap.rows.length === 0) return false;
+    // 不同文件的待办不得互相接管
+    if (snap.fileKey !== currentFileKey()) {
+        console.warn(`⚠️ 持久化换色任务属于其它文件（${snap.fileKey || '(无文件名)'}），当前为 ${currentFileKey() || '(无文件名)'}，保留但不恢复`);
+        return false;
+    }
+    const byRow = new Map((products || []).map(p => [p.row, p]));
+    const queue = snap.rows.map(r => byRow.get(r)).filter(Boolean);
+    if (queue.length === 0) return false;
+    batchColorState = {
+        running: false,               // 恢复后保持暂停；需用户明确继续
+        stopRequested: false,
+        queue: queue.map((p, i) => ({ ...p, _idx: i })),
+        currentIndex: Math.min(snap.currentIndex || 0, queue.length),
+        successCount: snap.successCount || 0,
+        failCount: snap.failCount || 0,
+        startTime: snap.startTime || Date.now(),
+        startRow: queue[0].row,
+        lastAdvancedRow: null,
+        lastProcessedTimestamp: 0,
+        pollTimer: null,
+        label: snap.label || '批量换色',
+        failedRows: snap.failedRows || [],
+        skippedRows: snap.skippedRows || [],
+        lastMemMB: 0,
+        batchId: snap.batchId || null,
+        inFlightRow: snap.inFlightRow || null,
+        inFlightSince: 0,
+        timedOutRows: getColorTimeoutRows(),
+        pausedReason: snap.inFlightRow ? '刷新后恢复：等待在途款结束' : '刷新后恢复'
+    };
+    showBatchColorProgress();
+    if (batchColorState.inFlightRow) startBatchColorPolling();   // 在途款仍要能补收完成
+    updateBatchColorProgress();
+    updateBatchColorStatus(`♻️ 已恢复上次换色任务（${queue.length} 款，第 ${batchColorState.currentIndex + 1} 款起）${batchColorState.inFlightRow ? '；row' + batchColorState.inFlightRow + ' 仍在执行，完成后会自动计入' : ''}`);
+    return true;
+}
+
 function refreshColorResumeRowsFromState() {
     setColorResumeRows(computeColorResumeRows());
 }
 
-function advanceBatchColorForRow(rowNum, source, msgBatchId) {
+function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
     if (!batchColorState) return;
     // ① 任务标识校验：批量任务必须有标识，且必须匹配。
     //    缺标识的消息一律拒绝（旧任务同行的迟到消息不得冒充新任务完成）；
@@ -3735,7 +3811,22 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId) {
     batchColorState.inFlightRow = null;
     batchColorState.inFlightSince = 0;
 
-    loadColorImagesFromExtension(rowNum);
+    // ④ 结果判定：执行结束 ≠ 成功。四色目标必须逐项确认，部分完成按失败处理并保留可处理行
+    const REQUIRED_COLORS = ['white', 'black', 'gray', 'navy'];
+    const verdict = judgeColorTaskResult(results, rowNum);
+    if (!verdict.ok) {
+        console.warn(`⚠️ row${rowNum} 换色未完整成功：${verdict.reason}`);
+        batchColorState.failCount++;
+        if (!Array.isArray(batchColorState.failedRows)) batchColorState.failedRows = [];
+        if (batchColorState.failedRows.indexOf(rowNum) < 0) batchColorState.failedRows.push(rowNum);
+        batchColorState.currentIndex++;
+        saveColorBatchState();
+        refreshColorResumeRowsFromState();
+        updateBatchColorProgress();
+        showToast(`❌ row${rowNum} 换色失败（${verdict.reason}），已放入「继续」列表`);
+        console.log(`🎨 失败入账: row${rowNum} (${source})`);
+        return;
+    }
 
     if (batchColorState.currentTimeoutId) {
         clearTimeout(batchColorState.currentTimeoutId);
@@ -3743,8 +3834,9 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId) {
     }
     batchColorState.successCount++;
     batchColorState.currentIndex++;
+    saveColorBatchState();
 
-    // ④ 暂停中：只记录真实完成、刷新剩余列表，**不自动派发下一款**
+    // ⑤ 暂停中：只记录真实完成、刷新剩余列表，**不自动派发下一款**
     if (!batchColorState.running || batchColorState.stopRequested) {
         refreshColorResumeRowsFromState();
         updateBatchColorProgress();
@@ -3760,6 +3852,38 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId) {
     setTimeout(() => {
         processNextBatchColor();
     }, 500);
+}
+
+// 结果判定：只有四色全部下载成功才算成功；否则给出缺失/失败原因
+function judgeColorTaskResult(results, rowNum) {
+    const REQUIRED = ['white', 'black', 'gray', 'navy'];
+    if (!results) return { ok: false, reason: '无执行结果（未收到结果字段）' };
+    if (results.error) return { ok: false, reason: `执行报错：${results.error}` };
+    const downloads = Array.isArray(results.downloads) ? results.downloads : null;
+    if (!downloads) return { ok: false, reason: '缺少下载明细' };
+    const got = {};
+    for (const d of downloads) {
+        const m = String(d && d.filename || '').match(/_(white|black|gray|navy)\./);
+        if (m && d.ok) got[m[1]] = true;
+    }
+    const missing = REQUIRED.filter(c => !got[c]);
+    if (missing.length > 0) {
+        const okCount = REQUIRED.length - missing.length;
+        return { ok: false, reason: `仅成功 ${okCount}/4 色，缺失：${missing.join('/')}` };
+    }
+    return { ok: true };
+}
+
+// 扩展通知：Excel 文件已切换 → 暂停换色批次（保留在途结果，不取消、不关页）
+function handleColorFileSwitched(req) {
+    const to = (req && req.to) || '';
+    if (!batchColorState) return;
+    if (!batchColorState.running && !batchColorState.inFlightRow) return;
+    batchColorState.running = false;
+    batchColorState.pausedReason = `Excel 已切换到「${to || '默认'}」，换色任务已暂停（原文件待办保留，不会由新文件接管）`;
+    saveColorBatchState();
+    updateBatchColorStatus(`⏸ ${batchColorState.pausedReason}${batchColorState.inFlightRow ? `；row${batchColorState.inFlightRow} 仍在执行，完成后会自动计入` : ''}`);
+    showToast(`⏸ 文件已切换，换色任务已暂停（在途款仍会计入原文件）`);
 }
 
 const AUDIT_DATA = {
@@ -4286,6 +4410,7 @@ function beginColorBatch(queueList, label) {
         pollTimer: null,
         label: label || '批量换色',
         failedRows: [],
+        skippedRows: [],
         lastMemMB: 0,
         // 任务标识：完成消息据此拒绝旧任务/重复消息
         batchId: 'cb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
@@ -4293,9 +4418,13 @@ function beginColorBatch(queueList, label) {
         // 暂停只阻止派发，不丢在途行的真实完成。
         inFlightRow: null,
         inFlightSince: 0,
+        pendingAckRow: null,    // 已委派但未确认接收的行（阻挡后续派发）
         timedOutRows: [],       // 已判超时、等待人工确认的行（迟到完成只提示，不重复入账）
         pausedReason: ''
     };
+    // 新任务开始：使旧的执行状态查询失效（门槛必须绑当前执行）
+    lastExecStatus = null;
+    saveColorBatchState();
 
     // 新任务启动即清空「继续」待办（旧待办已被本次任务取代）
     setColorResumeRows([]);
@@ -4370,17 +4499,18 @@ function buildRowPreviewLines(queue, max = 15) {
 const COLOR_RESUME_KEY = 'polo_color_resume_rows';
 
 function getColorResumeRows() {
-    const raw = localStorage.getItem(COLOR_RESUME_KEY) || '';
+    const raw = localStorage.getItem(COLOR_RESUME_KEY + '::' + currentFileKey()) || '';
     return raw.split(/\s+/).filter(Boolean).map(Number).filter(n => Number.isInteger(n) && n > 0);
 }
 
 function setColorResumeRows(rows) {
     const list = Array.isArray(rows) ? rows.filter(r => Number.isInteger(r) && r > 0) : [];
     const uniq = [...new Set(list)]; // 按传入顺序去重
+    const key = COLOR_RESUME_KEY + '::' + currentFileKey();
     if (uniq.length === 0) {
-        localStorage.removeItem(COLOR_RESUME_KEY);
+        localStorage.removeItem(key);
     } else {
-        localStorage.setItem(COLOR_RESUME_KEY, uniq.join(' '));
+        localStorage.setItem(key, uniq.join(' '));
     }
     syncColorResumeButton();
 }
@@ -4389,14 +4519,15 @@ function setColorResumeRows(rows) {
 const COLOR_TIMEOUT_KEY = 'polo_color_timeout_rows';
 
 function getColorTimeoutRows() {
-    const raw = localStorage.getItem(COLOR_TIMEOUT_KEY) || '';
+    const raw = localStorage.getItem(COLOR_TIMEOUT_KEY + '::' + currentFileKey()) || '';
     return raw.split(/\s+/).filter(Boolean).map(Number).filter(n => Number.isInteger(n) && n > 0);
 }
 
 function setColorTimeoutRows(rows) {
     const uniq = [...new Set((Array.isArray(rows) ? rows : []).filter(r => Number.isInteger(r) && r > 0))];
-    if (uniq.length === 0) localStorage.removeItem(COLOR_TIMEOUT_KEY);
-    else localStorage.setItem(COLOR_TIMEOUT_KEY, uniq.join(' '));
+    const key = COLOR_TIMEOUT_KEY + '::' + currentFileKey();
+    if (uniq.length === 0) localStorage.removeItem(key);
+    else localStorage.setItem(key, uniq.join(' '));
     if (batchColorState) batchColorState.timedOutRows = uniq;
     syncBatchColorTimeoutActions();
 }
@@ -4489,7 +4620,13 @@ function resolveTimeoutRow(action) {
         setColorResumeRows(resumeRows.filter(r => r !== row));   // 已生成 → 从剩余列表移除，不再重发
         if (batchColorState) {
             batchColorState.successCount++;
+            // 该行此前按超时计过失败：转成功时把失败数减回来，避免同一款同时计成功和失败
+            if (batchColorState.failedRows && batchColorState.failedRows.indexOf(row) >= 0
+                && batchColorState.failCount > 0) {
+                batchColorState.failCount--;
+            }
             batchColorState.failedRows = (batchColorState.failedRows || []).filter(r => r !== row);
+            saveColorBatchState();
             updateBatchColorProgress();
         }
         showToast(`✅ row${row} 已按「已生成」处理（计入成功，不再重发）`);
@@ -4717,7 +4854,7 @@ function startBatchColorPolling() {
                 if (batchColorState.inFlightRow === evt.rowNum) {
                     console.log(`🎨 轮询兜底捕获完成事件: row${evt.rowNum}`);
                     batchColorState.lastProcessedTimestamp = evt.timestamp;
-                    advanceBatchColorForRow(evt.rowNum, 'poll', evt.batchId);
+                    advanceBatchColorForRow(evt.rowNum, 'poll', evt.batchId, evt.results);
                 }
             });
             // 运行期间持续资源检查（与发下一款前的判断完全一致）
@@ -4807,6 +4944,11 @@ function processNextBatchColor() {
 
 function sendNextBatchColor() {
     if (!batchColorState || !batchColorState.running) return;
+    // 上一款委派未确认接收：不推进、不当作已派发，等确认或用户明确处理
+    if (batchColorState.pendingAckRow) {
+        showToast(`⚠️ row${batchColorState.pendingAckRow} 委派未确认接收，已暂停派发下一款`);
+        return;
+    }
     if (batchColorState.currentIndex >= batchColorState.queue.length) {
         finishBatchColor(true);
         return;
@@ -4821,31 +4963,40 @@ function sendNextBatchColor() {
     updateBatchColorProgress();
 
     const imagePath = getMainImagePath(product.row);
+    // 新执行开始：使旧的执行状态查询失效（门槛必须绑当前执行）
+    lastExecStatus = null;
     chrome.runtime.sendMessage(EXTENSION_ID, {
         action: 'startColorChange',
-        task: { imagePath, prompt: COLOR_PROMPT, rowNum: product.row, batchId: batchColorState.batchId }
+        task: {
+            imagePath, prompt: COLOR_PROMPT, rowNum: product.row,
+            batchId: batchColorState.batchId,
+            fileKey: currentFileKey(),
+            fileFolder: loadedFileName || '默认'   // 执行期内绑定，异步回调不再读当前文件
+        }
     }, (response) => {
         if (chrome.runtime.lastError || !response || !response.ok) {
             const busy = !!(response && response.busy);
-            console.warn(`row${product.row} 启动失败:`, chrome.runtime.lastError?.message || response?.error);
-            batchColorState.failCount++;
-            batchColorState.failedRows.push(product.row);
+            const pending = !!(response && response.pending);
+            console.warn(`row${product.row} 启动未确认:`, chrome.runtime.lastError?.message || response?.error);
+            // 未确认接收：不推进、不当作已派发；该行保留，阻挡后续款
             batchColorState.inFlightRow = null;
             batchColorState.inFlightSince = 0;
-            batchColorState.currentIndex++;
+            batchColorState.running = false;
+            batchColorState.pendingAckRow = product.row;
+            batchColorState.pausedReason = busy
+                ? `row${product.row} 未被接收（豆包仍在执行上一个任务）`
+                : `row${product.row} 委派未确认接收（${pending ? '通信失败/待页面就绪' : '启动失败'}）`;
+            saveColorBatchState();
             refreshColorResumeRowsFromState();
-            if (busy) {
-                // 豆包真实拒绝（忙）：不得当成"已接收"，也不得继续派发下一款
-                batchColorState.running = false;
-                batchColorState.pausedReason = `row${product.row} 未被接收（豆包仍在执行上一个任务）`;
-                const msg = `⏸ row${product.row} 未被豆包接收（豆包仍在执行上一个任务）。已暂停后续派发，请先「🔍 查询执行状态」再处理`;
-                updateBatchColorStatus(msg);
-                showToast(msg);
-                return;
-            }
-            setTimeout(processNextBatchColor, 500);
+            const msg = busy
+                ? `⏸ row${product.row} 未被豆包接收（仍在执行上一个任务）。已暂停派发，请先「🔍 查询执行状态」再处理`
+                : `⏸ row${product.row} 委派未确认接收（${pending ? '通信失败/待页面就绪' : '启动失败'}）。已暂停派发并保留该行，请先「🔍 查询执行状态」再处理`;
+            updateBatchColorStatus(msg);
+            showToast(msg);
             return;
         }
+        batchColorState.pendingAckRow = null;
+        saveColorBatchState();
         showToast(`🚀 已发送 row${product.row} 到豆包生成颜色图...`);
         setupBatchColorTimeout(product);
     });

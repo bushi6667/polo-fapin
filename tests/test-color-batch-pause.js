@@ -34,8 +34,23 @@ const FN_NAMES = [
     'setColorResumeRows', 'getColorResumeRows', 'finishBatchColor', 'resumeColorBatch',
     'setupBatchColorTimeout', 'startBatchColorPolling',
     'getColorTimeoutRows', 'setColorTimeoutRows', 'syncBatchColorTimeoutActions',
-    'checkColorExecStatus', 'resolveTimeoutRow'
+    'checkColorExecStatus', 'resolveTimeoutRow',
+    'judgeColorTaskResult', 'currentFileKey', 'saveColorBatchState', 'loadColorBatchState',
+    'restoreColorBatchState', 'handleColorFileSwitched'
 ];
+
+// 四色齐全的成功结果（生产判定要求 white/black/gray/navy 全部 ok）
+const OK_RESULTS = () => ({
+    success: true,
+    downloads: ['white', 'black', 'gray', 'navy'].map(c => ({ ok: true, filename: `row1_${c}.png` }))
+});
+const PARTIAL_RESULTS = (missing) => ({
+    success: false,
+    downloads: ['white', 'black', 'gray', 'navy']
+        .filter(c => missing.indexOf(c) < 0)
+        .map(c => ({ ok: true, filename: `row1_${c}.png` }))
+});
+const FAILED_RESULTS = () => ({ success: false, error: '上传失败', downloads: [] });
 // 抽取顶层 const（例如 COLOR_TIMEOUT_KEY），保证测试用的是生产常量
 function extractConst(name) {
     const m = new RegExp('^\\s*const\\s+' + name + '\\s*=[^\\n]*$', 'm').exec(HTML);
@@ -51,8 +66,11 @@ function extractLet(name) {
 }
 
 const SRC = [extractConst('COLOR_RESUME_KEY'), extractConst('COLOR_TIMEOUT_KEY'),
-    extractConst('EXEC_STATUS_MAX_AGE_MS'), extractLet('lastExecStatus')]
+    extractConst('COLOR_BATCH_STATE_KEY'), extractConst('EXEC_STATUS_MAX_AGE_MS'),
+    extractLet('lastExecStatus')]
     .concat(FN_NAMES.map(extractFn)).join('\n\n');
+
+const COLOR_BATCH_STATE_KEY = 'polo_color_batch_state';
 
 // ---------- 环境 ----------
 function createEnv(opts = {}) {
@@ -114,6 +132,7 @@ function createEnv(opts = {}) {
         loadColorImagesFromExtension: () => {},
         syncColorResumeButton: () => {},
         restoreBatchColorUI: () => {},
+        showBatchColorProgress: () => {},
         stopBatchColorPolling: () => {},
         updateBatchColorStatus: (m) => log.push('STATUS ' + m),
         updateBatchColorFill: () => {},
@@ -126,6 +145,12 @@ function createEnv(opts = {}) {
         colorPollTimer: null,
         psPollTimer: null,
         products: [],
+        loadedFileName: 'A文件.xlsx',
+        // 测试注入的"外部执行结果"（模拟 content 回报）：默认四色齐全成功
+        __results: JSON.parse(JSON.stringify(opts.results || {
+            success: true,
+            downloads: ['white', 'black', 'gray', 'navy'].map(c => ({ ok: true, filename: `row1_${c}.png` }))
+        })),
         extensionInstalled: true,
         batchColorState: null
     };
@@ -191,7 +216,7 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         ok(resumeAtPause.join(',') === '415', `暂停时「继续」列表不含在途款（实际 ${resumeAtPause.join(',')}）`);
 
         const before = env.dispatched;
-        env.run(`advanceBatchColorForRow(412, 'message', 'cb_TEST')`);
+        env.run(`advanceBatchColorForRow(412, 'message', 'cb_TEST', __results)`);
         ok(st.successCount === 1, `在途款完成计入成功数（实际 ${st.successCount}）`);
         ok(st.currentIndex === 1, `当前索引推进（实际 ${st.currentIndex}）`);
         ok(st.inFlightRow === null, '在途行已清空');
@@ -209,7 +234,7 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         env.setState(st);
         env.run('setColorResumeRows([501, 502])');
         const before = env.dispatched;
-        env.run(`advanceBatchColorForRow(501, 'message', 'cb_TEST')`);
+        env.run(`advanceBatchColorForRow(501, 'message', 'cb_TEST', __results)`);
         ok(st.successCount === 1, `计入成功（实际 ${st.successCount}）`);
         ok(env.dispatched === before, '未自动派发下一款');
         const resume = env.run('getColorResumeRows()');
@@ -237,9 +262,9 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         const env = createEnv();
         const st = mkState([701, 702], { running: false, inFlightRow: 701 });
         env.setState(st);
-        env.run(`advanceBatchColorForRow(701, 'message', 'cb_TEST')`);
-        env.run(`advanceBatchColorForRow(701, 'poll', 'cb_TEST')`);
-        env.run(`advanceBatchColorForRow(701, 'message', 'cb_TEST')`);
+        env.run(`advanceBatchColorForRow(701, 'message', 'cb_TEST', __results)`);
+        env.run(`advanceBatchColorForRow(701, 'poll', 'cb_TEST', __results)`);
+        env.run(`advanceBatchColorForRow(701, 'message', 'cb_TEST', __results)`);
         ok(st.successCount === 1, `成功数只加一次（实际 ${st.successCount}）`);
         ok(st.currentIndex === 1, `索引只推进一次（实际 ${st.currentIndex}）`);
         env.clearTimers();
@@ -251,12 +276,12 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         const env = createEnv();
         const st = mkState([801, 802], { running: false, inFlightRow: 801 });
         env.setState(st);
-        env.run(`advanceBatchColorForRow(801, 'message', 'cb_OLD_TASK')`);   // 旧任务标识
+        env.run(`advanceBatchColorForRow(801, 'message', 'cb_OLD_TASK', __results)`);   // 旧任务标识
         ok(st.successCount === 0, `旧任务标识被拒绝（成功数 ${st.successCount}）`);
-        env.run(`advanceBatchColorForRow(999, 'message', 'cb_TEST')`);       // 非在途行
+        env.run(`advanceBatchColorForRow(999, 'message', 'cb_TEST', __results)`);       // 非在途行
         ok(st.successCount === 0, `非在途行被拒绝（成功数 ${st.successCount}）`);
         ok(st.inFlightRow === 801, '在途行未被误清');
-        env.run(`advanceBatchColorForRow(801, 'poll', 'cb_TEST')`);          // 正确消息
+        env.run(`advanceBatchColorForRow(801, 'poll', 'cb_TEST', __results)`);          // 正确消息
         ok(st.successCount === 1, '正确消息仍可入账');
         env.clearTimers();
     }
@@ -267,7 +292,7 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         const env = createEnv();
         const st = mkState([901, 902, 903], { running: false, inFlightRow: 901 });
         env.setState(st);
-        env.run(`advanceBatchColorForRow(901, 'message', 'cb_TEST')`);
+        env.run(`advanceBatchColorForRow(901, 'message', 'cb_TEST', __results)`);
         await tick(700);   // 若错误地走了 500ms 派发，这里能观察到
         ok(env.dispatched === 0, `暂停中完成不派发（dispatch ${env.dispatched}）`);
 
@@ -275,7 +300,7 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         st.running = true;
         st.inFlightRow = 902;
         st.lastAdvancedRow = null;
-        env.run(`advanceBatchColorForRow(902, 'message', 'cb_TEST')`);
+        env.run(`advanceBatchColorForRow(902, 'message', 'cb_TEST', __results)`);
         await tick(700);
         ok(env.dispatched === 1, `运行中完成正常派发下一款（dispatch ${env.dispatched}）`);
         env.clearTimers();
@@ -290,7 +315,7 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         env.run(`finishBatchColor(false, '资源不足')`);
         const atPause = env.run('getColorResumeRows()');
         ok(atPause.length === 0, `暂停时列表已排除在途款（实际 ${atPause.join(',')}）`);
-        env.run(`advanceBatchColorForRow(1001, 'message', 'cb_TEST')`);
+        env.run(`advanceBatchColorForRow(1001, 'message', 'cb_TEST', __results)`);
         const after = env.run('getColorResumeRows()');
         ok(st.successCount === 1 && after.length === 0, `完成后无残留待办（成功 ${st.successCount}，待办 ${after.join(',')}）`);
         env.clearTimers();
@@ -306,10 +331,10 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         ok(st.successCount === 0, `缺标识消息被拒绝（成功数 ${st.successCount}）`);
         env.run(`advanceBatchColorForRow(1101, 'message', undefined)`);
         ok(st.successCount === 0, 'undefined 标识被拒绝');
-        env.run(`advanceBatchColorForRow(1101, 'message', 'OLD')`);
+        env.run(`advanceBatchColorForRow(1101, 'message', 'OLD', __results)`);
         ok(st.successCount === 0, '旧任务同一行号的迟到消息被拒绝');
         ok(st.inFlightRow === 1101, '在途行未被误清');
-        env.run(`advanceBatchColorForRow(1101, 'message', 'NEW')`);
+        env.run(`advanceBatchColorForRow(1101, 'message', 'NEW', __results)`);
         ok(st.successCount === 1, '正确标识才入账');
         env.clearTimers();
     }
@@ -317,7 +342,12 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
     // ---------- 9. 暂停后仅存储事件、无直接通知 → 轮询补收 ----------
     console.log('\n【9】暂停后只有持久化完成事件（无直接通知）→ 轮询能补收，且不派发');
     {
-        const env = createEnv({ pollEvent: { rowNum: 1201, timestamp: Date.now() + 10000, batchId: 'cb_TEST' } });
+        const env = createEnv({
+            pollEvent: {
+                rowNum: 1201, timestamp: Date.now() + 10000, batchId: 'cb_TEST',
+                results: { success: true, downloads: ['white', 'black', 'gray', 'navy'].map(c => ({ ok: true, filename: `row1201_${c}.png` })) }
+            }
+        });
         const st = mkState([1201, 1202], { running: false, inFlightRow: 1201 });
         env.setState(st);
         env.run('startBatchColorPolling()');
@@ -533,7 +563,7 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         env.run(`setupBatchColorTimeout({ row: 2901 })`);
         await tick(200);
         const before = st.successCount;
-        env.run(`advanceBatchColorForRow(2901, 'message', 'cb_TEST')`);
+        env.run(`advanceBatchColorForRow(2901, 'message', 'cb_TEST', __results)`);
         ok(st.successCount === before, '超时行迟到完成不重复入账');
         ok(env.toasts.some(t => /迟到完成/.test(t)), '给出迟到完成提示');
         env.clearTimers();
@@ -545,11 +575,86 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
         const env = createEnv();
         const st = mkState([1501, 1502, 1503], { running: true, inFlightRow: 1501 });
         env.setState(st);
-        env.run(`advanceBatchColorForRow(1501, 'message', 'cb_TEST')`);
+        env.run(`advanceBatchColorForRow(1501, 'message', 'cb_TEST', __results)`);
         await tick(700);
         ok(st.successCount === 1, `运行中入账（成功数 ${st.successCount}）`);
         ok(env.dispatched === 1, `运行中正常派发下一款（dispatch ${env.dispatched}）`);
         env.clearTimers();
+    }
+
+    // ---------- 19. 执行结束 ≠ 成功：失败/部分结果不得记成成功 ----------
+    console.log('\n【19】结果判定：失败/部分完成不得记成成功，且保留可处理行');
+    {
+        // 上传失败（error，无下载）
+        const env = createEnv({ timeoutMs: 60, results: { success: false, error: '上传失败', downloads: [] } });
+        const st = mkState([4001, 4002], { running: false, inFlightRow: 4001 });
+        env.setState(st);
+        env.run(`advanceBatchColorForRow(4001, 'message', 'cb_TEST', __results)`);
+        ok(st.successCount === 0, `上传失败不记成功（成功数 ${st.successCount}）`);
+        ok(st.failCount === 1, `上传失败记失败（失败数 ${st.failCount}）`);
+        ok(env.run('getColorResumeRows()').indexOf(4001) >= 0, '失败行保留在「继续」列表');
+        ok(st.inFlightRow === null, '在途行已清空');
+        env.clearTimers();
+
+        // 部分成功（缺 navy）
+        const env2 = createEnv({
+            timeoutMs: 60,
+            results: { success: false, downloads: ['white', 'black', 'gray'].map(c => ({ ok: true, filename: `row1_${c}.png` })) }
+        });
+        const st2 = mkState([4101, 4102], { running: false, inFlightRow: 4101 });
+        env2.setState(st2);
+        env2.run(`advanceBatchColorForRow(4101, 'message', 'cb_TEST', __results)`);
+        ok(st2.successCount === 0 && st2.failCount === 1, `部分完成按失败处理（成功 ${st2.successCount} / 失败 ${st2.failCount}）`);
+        ok(env2.toasts.some(t => /缺失：navy/.test(t)), `明确缺失颜色（${env2.toasts.join(' | ')}）`);
+        env2.clearTimers();
+
+        // 无结果字段 → 不判成功
+        const env3 = createEnv({ timeoutMs: 60 });
+        const st3 = mkState([4201, 4202], { running: false, inFlightRow: 4201 });
+        env3.setState(st3);
+        env3.run(`advanceBatchColorForRow(4201, 'message', 'cb_TEST', undefined)`);
+        ok(st3.successCount === 0, '无结果不判成功');
+        env3.clearTimers();
+
+        // 纯函数判定表
+        const env4 = createEnv();
+        ok(env4.run(`judgeColorTaskResult(${JSON.stringify(FAILED_RESULTS())}, 1).ok`) === false, '判定：error → 失败');
+        ok(env4.run(`judgeColorTaskResult(${JSON.stringify(PARTIAL_RESULTS(['navy']))}, 1).reason`).includes('缺失：navy'), '判定：部分 → 报缺失颜色');
+        ok(env4.run(`judgeColorTaskResult(${JSON.stringify(OK_RESULTS())}, 1).ok`) === true, '判定：四色齐全 → 成功');
+        ok(env4.run(`judgeColorTaskResult(undefined, 1).ok`) === false, '判定：无结果 → 失败');
+    }
+
+    // ---------- 20. 刷新后恢复：不自动派发，在途行可继续接收 ----------
+    console.log('\n【20】刷新后恢复换色任务：保持暂停、不自动派发、在途行仍在等');
+    {
+        const env = createEnv({ timeoutMs: 60 });
+        env.setState(null);
+        env.run('loadedFileName = "A文件.xlsx"');
+        env.run(`localStorage.setItem(COLOR_BATCH_STATE_KEY || 'polo_color_batch_state', JSON.stringify({
+            fileKey: currentFileKey(), batchId: 'cb_RESTORE', label: '批量换色',
+            rows: [4301, 4302, 4303], currentIndex: 1, successCount: 1, failCount: 0,
+            failedRows: [], skippedRows: [], inFlightRow: 4302, running: true, startTime: Date.now()
+        }))`);
+        env.run('products = [{row:4301},{row:4302},{row:4303}]');
+        const restored = env.run('restoreColorBatchState()');
+        ok(restored === true, '刷新后恢复成功');
+        const st = env.run('batchColorState');
+        ok(st && st.running === false, '恢复后保持暂停（不自动派发）');
+        ok(st && st.inFlightRow === 4302, `在途行恢复（实际 ${st && st.inFlightRow}）`);
+        ok(st && st.currentIndex === 1 && st.successCount === 1, '进度与成功数恢复');
+        ok(env.dispatched === 0, '恢复不触发派发');
+
+        // 不同文件不得接管
+        const env2 = createEnv({ timeoutMs: 60 });
+        env2.setState(null);
+        env2.run('loadedFileName = "B文件.xlsx"');
+        env2.run(`localStorage.setItem('polo_color_batch_state', JSON.stringify({
+            fileKey: 'A_xlsx__', batchId: 'cb_A', label: '批量换色', rows: [1], currentIndex: 0,
+            successCount: 0, failCount: 0, failedRows: [], skippedRows: [], inFlightRow: null, running: true, startTime: Date.now()
+        }))`);
+        env2.run('products = [{row:1}]');
+        ok(env2.run('restoreColorBatchState()') === false, '不同文件的待办不被接管');
+        env2.clearTimers();
     }
 
     console.log('\n' + '='.repeat(50));
