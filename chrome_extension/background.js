@@ -2447,8 +2447,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     console.log(`💾 换色完成事件已持久化: row${rowNum} (batch ${batchId || '-'})`);
                 });
                 notifyColorTaskComplete(rowNum, batchId, payload);
-                // 执行结束：释放与套图共用的豆包输入通道互斥
-                saveActiveColorExec(Object.assign({}, exec, { state: 'done', finishedAt: Date.now() }));
+                // 注：执行结束状态已在上方写为 'finished'（重复完成守卫依赖它）。
+                // 不要再用其它状态覆盖，否则重复完成消息会被再次接受（曾因此破坏守卫）。
                 sendResponse({ ok: true });
             }).catch(() => sendResponse({ ok: false, error: '身份校验异常' }));
             return true;
