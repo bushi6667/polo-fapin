@@ -22,9 +22,9 @@ function ok(cond, name, extra) {
     else { fail++; failures.push(name); console.log(`  ❌ ${name}${extra ? ' :: ' + extra : ''}`); }
 }
 
-/* ---------- 生产函数抽取（列 0 的 } 收尾） ---------- */
+/* ---------- 生产函数抽取（列 0 的 } 收尾；兼容 CRLF） ---------- */
 function extractFn(name) {
-    const lines = HTML.split('\n');
+    const lines = HTML.split('\n').map(l => l.replace(/\r$/, ''));
     const re = new RegExp('^function\\s+' + name + '\\s*\\(');
     const are = new RegExp('^async\\s+function\\s+' + name + '\\s*\\(');
     let s = -1;
@@ -34,12 +34,12 @@ function extractFn(name) {
     throw new Error('函数未闭合: ' + name);
 }
 function extractConst(name) {
-    const m = new RegExp('^\\s*const\\s+' + name + '\\s*=[^\\n]*$', 'm').exec(HTML);
+    const m = new RegExp('^\\s*const\\s+' + name + '\\s*=[^\\r\\n]*$', 'm').exec(HTML.replace(/\r/g, ''));
     if (!m) throw new Error('未找到常量: ' + name);
     return m[0].trim();
 }
 function extractLet(name) {
-    const m = new RegExp('^\\s*let\\s+' + name + '\\s*=[^\\n]*$', 'm').exec(HTML);
+    const m = new RegExp('^\\s*let\\s+' + name + '\\s*=[^\\r\\n]*$', 'm').exec(HTML.replace(/\r/g, ''));
     if (!m) throw new Error('未找到变量: ' + name);
     return m[0].trim();
 }
