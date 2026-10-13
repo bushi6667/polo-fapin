@@ -1488,6 +1488,87 @@ async function handleSharedAction(request, sendResponse, sender) {
         SuiteTaskStore.recoverOnStartup().then(ids => sendResponse({ ok: true, interrupted: ids })).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
+    /* 套图执行编排：把已创建任务真正送入豆包执行（一次快速五图，不拆分）
+       步骤：互斥检查 → 取/建豆包页 → 探测就绪 → 记基线 → 上传素材 →
+             输入合并提示词 → 明确发送一次 → 等待本次新结果 → 交页面识别/后处理/保存 */
+    if (request.action === 'suiteRun') {
+        (async () => {
+            const taskId = request.taskId;
+            const report = (stage, extra) => chrome.runtime.sendMessage(EXTENSION_ID,
+                Object.assign({ action: 'suiteProgress', report: Object.assign({ taskId, stage }, extra || {}) }, {})).catch(() => {});
+            try {
+                const t = await SuiteTaskStore.get(taskId);
+                if (!t) { sendResponse({ ok: false, error: '未知任务：' + taskId }); return; }
+                if (SuiteTaskStore.isTerminal(t.stage)) { sendResponse({ ok: false, error: `任务已终态：${t.stage}` }); return; }
+
+                // 双向互斥①：换色正在执行 → 抢占失败，明确失败而不是排队等待
+                const cexec = await getActiveColorExec();
+                if (cexec && cexec.state === 'accepted') {
+                    await SuiteTaskStore.fail(taskId, '阶段 channel：换色任务正在执行，套图无法占用豆包输入通道');
+                    sendResponse({ ok: false, error: '换色任务正在执行，套图无法占用豆包输入通道' });
+                    return;
+                }
+                // 取得套图执行锁（换色启动前会检查它）
+                await saveActiveColorExec(null).catch(() => {});
+                globalThis.__suiteExecLock = { taskId, at: Date.now() };
+
+                let tab = await findDoubaoTab();
+                if (!tab) {
+                    tab = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
+                    await new Promise(r => setTimeout(r, 4000));
+                }
+                const tabId = tab.id;
+                const toTab = (action, payload) => chrome.tabs.sendMessage(tabId, Object.assign({ action }, payload || {}));
+
+                // ① 探测就绪 / 登录
+                const pr = await toTab('suite-probe');
+                if (!pr || !pr.success) throw new Error('豆包页面未就绪：' + ((pr && pr.error) || '无响应'));
+                if (pr.loggedOut) throw new Error('豆包登录失效，请先登录后再发起套图');
+                if (!pr.hasInput) throw new Error('豆包输入框未出现，页面结构可能已变化');
+
+                // ② 基线（发送前已有图片）
+                const bl = await toTab('suite-baseline', { binding: { taskId, fileKey: t.fileKey, rowNum: t.rowNum } });
+                if (!bl || !bl.success) throw new Error('记录图片基线失败');
+                await SuiteTaskStore.advance(taskId, 'sent', { diag: [`基线 ${bl.baselineUrls.length} 张`] }).catch(() => {});
+
+                // ③ 上传素材（执行器内部实际等待上传完成）
+                const assets = (t.assets && t.assets.length) ? t.assets : ((t.configSnapshot && t.configSnapshot.assets) || []);
+                if (!assets.length) throw new Error('任务快照中没有素材');
+                for (const a of assets) { if (!a || !a.url) throw new Error('素材项缺少 url：' + JSON.stringify(a)); }
+                const up = await toTab('suite-upload', { assets });
+                if (!up || !up.success) throw new Error('上传失败：' + ((up && up.error) || '未知'));
+
+                // ④ 输入合并提示词（原生桥；换行 Shift+Enter，输入阶段不提交）
+                const promptText = t.prompt;
+                if (!promptText || !promptText.trim()) throw new Error('任务缺少合并提示词正文');
+                const ty = await toTab('suite-type', { text: promptText });
+                if (!ty || !ty.success) throw new Error('提示词输入失败：' + ((ty && ty.error) || '未知'));
+
+                // ⑤ 明确发送一次（执行器内部防止重复发送）
+                const sd = await toTab('suite-send');
+                if (!sd || !sd.success) throw new Error('发送失败：' + ((sd && sd.error) || '未知'));
+                await SuiteTaskStore.advance(taskId, 'sent', { diag: [`已发送，基线 ${(sd.baselineUrls || []).length} 张，证据 ${sd.evidence || '-'}`] }).catch(() => {});
+
+                // ⑥ 等待并采集本次新结果
+                const wt = await toTab('suite-wait', { baselineUrls: sd.baselineUrls || bl.baselineUrls, expectCount: t.expectCount || 5, timeoutMs: 600000 });
+                if (!wt || !wt.success) throw new Error('等待结果失败：' + ((wt && wt.error) || '未知'));
+                const r = wt.result || {};
+                if (!r.images || r.images.length < (t.expectCount || 5)) {
+                    await SuiteTaskStore.fail(taskId, `结果不足：期望 ${t.expectCount || 5} 张，实际 ${(r.images || []).length} 张（原始 ${r.rawCount || 0}，同图归并 ${r.mergedGroups || 0} 组）`);
+                    sendResponse({ ok: false, error: `结果不足：${(r.images || []).length}/${t.expectCount || 5}` });
+                    return;
+                }
+                await SuiteTaskStore.advance(taskId, 'acquired', { images: r.images, diag: [`获取 ${r.images.length} 张（原始 ${r.rawCount}，归并 ${r.mergedGroups} 组，基线 ${r.baselineCount}）`] }).catch(() => {});
+                sendResponse({ ok: true, taskId, stage: 'acquired', images: r.images, baselineUrls: sd.baselineUrls || bl.baselineUrls });
+            } catch (e) {
+                await SuiteTaskStore.fail(taskId, '执行阶段：' + (e && e.message)).catch(() => {});
+                sendResponse({ ok: false, error: e && e.message });
+            } finally {
+                globalThis.__suiteExecLock = null;
+            }
+        })();
+        return true;
+    }
     // 兼容尚未刷新的助手页：内存保护已按用户要求移除，不发起监测请求。
     if (request.action === 'getMemoryGate') {        sendResponse({ ok: true, allowed: true, disabled: true, reasons: [], reasonText: '' });
         return true;
@@ -2211,7 +2292,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover'];
+    const sharedActions = ['saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRun'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;

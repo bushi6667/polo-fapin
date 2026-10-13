@@ -4186,13 +4186,83 @@ async function startSuiteGeneration() {
                 mode: 'quick-five', expectCount: task.expectCount, targetKeys: task.outputKeys.map(o => o.key),
                 prompt: task.prompt,
                 configSnapshot: { model: task.model, ratio: task.ratio, outputKeys: task.outputKeys, steps: steps.length },
-                assets: Object.values(assets).map(a => ({ color: a.color, filename: a.url, fileKey: a.fileKey, row: a.row, bytes: a.bytes, width: a.width, height: a.height }))
+                assets: Object.values(assets).map(a => ({ color: a.color, url: a.url, filename: a.url, fileKey: a.fileKey, row: a.row, bytes: a.bytes, width: a.width, height: a.height }))
             }
         });
         if (!created.ok) throw new Error(created.error);
 
-        updateSuiteStatus(`⏳ 任务 ${created.task.taskId} 已接收（阶段 received），等待豆包执行…`);
-        showToast('✅ 套图任务已创建（1 次请求 / 期望 5 张）');
+        updateSuiteStatus(`⏳ 任务 ${created.task.taskId} 已接收（received），开始执行…`);
+        renderSuiteImages(product);
+
+        // ⑤ 真正送入豆包执行（一次快速五图；失败会带回具体阶段）
+        const ran = await suiteSend('suiteRun', { taskId: created.task.taskId }, 3600000);
+        if (!ran.ok) {
+            updateSuiteStatus(`❌ 执行失败：${ran.error}`);
+            showToast(`❌ 套图执行失败：${ran.error}`);
+            return created.task;
+        }
+
+        // ⑥ 结果识别 → 编号映射（内容指纹在浏览器侧计算）
+        const fpOf = async (it) => {
+            try {
+                const resp = await fetch(it.url, { cache: 'no-store' });
+                const blob = await resp.blob();
+                const bmp = await createImageBitmap(blob);
+                const c = document.createElement('canvas');
+                c.width = 16; c.height = 16;
+                const ctx2 = c.getContext('2d');
+                ctx2.drawImage(bmp, 0, 0, 16, 16);
+                if (typeof bmp.close === 'function') bmp.close();
+                return c.toDataURL('image/png');
+            } catch (_) { return null; }
+        };
+        const rec = await SuiteCore.recognize(ran.images, created.task.targetKeys, { expectCount: 5, fingerprint: fpOf });
+        if (!rec.ok) {
+            updateSuiteStatus(`❌ 结果校验未通过：${rec.error}（原始 ${rec.diag.rawCount} 张，去重后 ${rec.diag.afterDedupe} 张）`);
+            showToast(`❌ 结果校验未通过：${rec.error}`);
+            await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, final: true, finalStage: 'failed', error: `结果识别：${rec.error}`, diag: rec.diag } });
+            return created.task;
+        }
+
+        // ⑦ 写盘 + 重新读取校验（真实目录句柄；五张全成功才 saved）
+        const outHandle = await loadSuiteDirHandle('suiteOut');
+        if (!outHandle) {
+            updateSuiteStatus('❌ 套图输出目录未授权，已获取的 5 张结果已保留；请到「路径配置」授权后重试保存');
+            await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, stage: 'acquired', diag: ['写盘前：输出目录未授权'] } });
+            return created.task;
+        }
+        const perm = await outHandle.queryPermission({ mode: 'readwrite' });
+        if (perm !== 'granted') {
+            updateSuiteStatus(`❌ 输出目录权限不足（${perm}），结果已保留，请重新授权后重试保存`);
+            return created.task;
+        }
+        const items = [];
+        for (const r of rec.results) {
+            const resp = await fetch(r.url, { cache: 'no-store' });
+            items.push({ key: r.key, blob: await resp.blob() });
+        }
+        const saved = await SuiteCore.saveAll(outHandle, items, {
+            fileKey, rowNum: product.row,
+            decodeSize: async (f) => { const b = await createImageBitmap(f); const s = { width: b.width, height: b.height }; if (b.close) b.close(); return s; }
+        });
+        if (!saved.ok) {
+            updateSuiteStatus(`⚠️ 生成成功、保存失败：已保存 ${saved.savedCount}/5，失败编号 ${saved.failedKeys.join('/')}（结果已保留，可「仅重试保存」）`);
+            showToast(`⚠️ 保存失败 ${saved.failedKeys.join('/')}，结果已保留`);
+            await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, final: true, finalStage: 'failed', error: `写盘失败：${saved.failedKeys.join('/')}`, results: saved.results } });
+            return created.task;
+        }
+        await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, stage: 'saved', results: saved.results } });
+        await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, final: true, finalStage: 'completed', results: saved.results } });
+
+        // ⑧ 结果索引持久化（fileKey+rowNum+编号；切换产品/刷新后据此恢复）
+        const store = SuiteCore.ResultStore();
+        for (const it of items) {
+            const rec2 = saved.results.find(x => x.key === it.key);
+            await store.put({ fileKey, rowNum: product.row, key: it.key, taskId: created.task.taskId, blob: it.blob, meta: { filename: rec2 && rec2.filename, bytes: rec2 && rec2.bytes, width: rec2 && rec2.width, height: rec2 && rec2.height, stage: 'completed' } });
+        }
+        updateSuiteStatus(`✅ 套图完成：5 张已保存并校验（任务 ${created.task.taskId}）`);
+        showToast('✅ 套图完成（5 张已保存并校验）');
+        await renderSuiteImages(product);
         return created.task;
     } catch (e) {
         updateSuiteStatus(`❌ ${e.message}`);

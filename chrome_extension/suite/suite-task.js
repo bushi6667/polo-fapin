@@ -100,8 +100,10 @@ const SuiteTaskStore = (() => {
             stageAt: { received: Date.now() },
             // 配置快照 + 素材对应关系：运行中用户改配置/切产品不影响本任务
             configSnapshot: configSnapshot ? JSON.parse(JSON.stringify(configSnapshot)) : null,
-            assets: Array.isArray(assets) ? assets.map(a => ({ color: a.color, filename: a.filename, fileKey: a.fileKey, row: a.row, bytes: a.bytes, width: a.width, height: a.height })) : [],
+            assets: Array.isArray(assets) ? assets.map(a => ({ color: a.color, filename: a.filename, url: a.url, fileKey: a.fileKey, row: a.row, bytes: a.bytes, width: a.width, height: a.height })) : [],
             promptLength: prompt ? String(prompt).length : 0,
+            prompt: prompt ? String(prompt) : '',   // 合并提示词正文（执行器据此输入，不再依赖页面内存）
+            images: [],         // 已获取的本次新结果（发送前为空）
             results: [],        // [{ key, saved: bool, path, bytes, error }]
             error: '',          // 失败/中断原因（含具体阶段）
             diag: []            // 诊断信息（失败时保留，便于定位）
