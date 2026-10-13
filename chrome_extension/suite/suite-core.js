@@ -213,10 +213,118 @@ const SuiteCore = (() => {
         return { open, put, get, list, remove, idOf };
     }
 
+    /* ---- 编号可靠性：候选顺序 vs 已确认 ----
+       事实依据（参考扩展 pages/doubao/pipeline.js:1236-1240）：
+         const outputKeys = step.outputKeys.map(...);
+         for (let i = 0; i < expectCount; i++) { const output = outputKeys[i]; ... }
+       即 imgs[i] ↔ outputKeys[i] 纯按下标对应；validateStepResults(983) 只校验数量，
+       从不校验"某张图属于某编号"。所以顺序只是【约定】，不构成内容识别证据。 */
+    function buildNumberingCandidates(images, outputKeys) {
+        return (outputKeys || []).map((k, i) => ({
+            key: String((k && k.key) || k).trim(),
+            index: i,
+            url: images[i] || null,
+            source: 'appearance-order'      // 明确标注证据来源：仅出现顺序
+        }));
+    }
+
+    // 确认后才允许按编号执行专属后处理 / 覆盖旧套图 / 标记完成
+    function applyNumberingAssignment(candidates, assignment) {
+        const byKey = {};
+        for (const c of candidates) byKey[c.key] = c;
+        const out = [];
+        const used = new Set();
+        for (const key of Object.keys(assignment)) {
+            const idx = assignment[key];
+            if (!Number.isInteger(idx) || idx < 0 || idx >= candidates.length) {
+                throw new Error(`编号 ${key} 指定的候选序号 ${idx} 超出范围`);
+            }
+            if (used.has(idx)) throw new Error(`候选序号 ${idx} 被重复分配给多个编号`);
+            used.add(idx);
+            const c = byKey[key];
+            if (!c) throw new Error(`未知编号 ${key}`);
+            out.push({ key, index: idx, url: c.url, source: 'user-confirmed' });
+        }
+        if (out.length !== candidates.length) throw new Error('确认结果必须覆盖全部编号');
+        return out;
+    }
+
+    /* ---------------- 磁盘核验（区别于缓存预览） ---------------- */
+
+    /* 逐编号核验真实磁盘文件。状态语义：
+         verified      磁盘文件已核验（可读、非空、图片、可解码、尺寸达标）
+         cache-only    有缓存预览但磁盘未核验（缺文件定位信息 / 未提供目录句柄）
+         no-permission 目录未授权或权限失效 → 无法核验（≠ 文件缺失）
+         missing       目录可访问但文件确实不存在（FileNotFound）
+         corrupt       文件存在但为空 / 非图片 / 不可解码 / 尺寸无效
+         replaced      文件存在但内容指纹与保存时不一致（同名被替换）
+         error         其它读取错误（保留具体信息） */
+    async function verifySavedFiles(records, deps = {}) {
+        const out = [];
+        for (const rec of (records || [])) {
+            const key = String(rec.key);
+            const meta = rec.meta || {};
+            const base = { key, filename: meta.filename || '', status: 'error', detail: '' };
+            if (!meta.filename) {
+                out.push(Object.assign(base, { status: 'cache-only', detail: '历史索引缺少文件定位信息，无法核验磁盘' }));
+                continue;
+            }
+            const dir = deps.dirHandle;
+            if (!dir) {
+                out.push(Object.assign(base, { status: 'no-permission', detail: '输出目录未授权，无法核验（不等于文件缺失）' }));
+                continue;
+            }
+            let perm = 'granted';
+            try {
+                if (typeof dir.queryPermission === 'function') perm = await dir.queryPermission({ mode: 'readwrite' });
+            } catch (_) { perm = 'denied'; }
+            if (perm !== 'granted') {
+                out.push(Object.assign(base, { status: 'no-permission', detail: `目录权限为 ${perm}，无法核验（不等于文件缺失）` }));
+                continue;
+            }
+            try {
+                const fh = await dir.getFileHandle(meta.filename);
+                const f = await fh.getFile();
+                if (!f || f.size === 0) { out.push(Object.assign(base, { status: 'corrupt', detail: '文件为空' })); continue; }
+                if (!/^image\//i.test(f.type || '')) { out.push(Object.assign(base, { status: 'corrupt', detail: `类型不是图片（${f.type || '未知'}）` })); continue; }
+                if (typeof deps.decodeSize === 'function') {
+                    const s = await deps.decodeSize(f);
+                    if (!s || !(s.width >= 64 && s.height >= 64)) {
+                        out.push(Object.assign(base, { status: 'corrupt', detail: `解码尺寸无效（${s ? s.width + '×' + s.height : '无法解码'}）` }));
+                        continue;
+                    }
+                }
+                if (meta.bytes && f.size !== meta.bytes) {
+                    out.push(Object.assign(base, { status: 'replaced', detail: `大小与保存时不一致（${f.size} ≠ ${meta.bytes}）` }));
+                    continue;
+                }
+                if (meta.contentHash && typeof deps.hash === 'function') {
+                    const h = await deps.hash(f);
+                    if (h && h !== meta.contentHash) {
+                        out.push(Object.assign(base, { status: 'replaced', detail: '内容指纹与保存时不一致（同名文件被替换）' }));
+                        continue;
+                    }
+                }
+                out.push(Object.assign(base, { status: 'verified', detail: `已核验 ${f.size} 字节` }));
+            } catch (e) {
+                const name = (e && e.name) || '';
+                const msg = (e && e.message) || String(e);
+                if (name === 'NotFoundError' || /not found/i.test(msg)) {
+                    out.push(Object.assign(base, { status: 'missing', detail: '磁盘上未找到该文件' }));
+                } else {
+                    out.push(Object.assign(base, { status: 'error', detail: '读取错误：' + msg }));
+                }
+            }
+        }
+        const allOk = out.length > 0 && out.every(r => r.status === 'verified');
+        return { ok: allOk, items: out, unverified: out.filter(r => r.status !== 'verified').map(r => r.key) };
+    }
+
     return {
         REQUIRED_COLORS, DEFAULT_EXPECT,
         normalizeUrls, dedupeByContent, mapToOutputs, recognize,
         writeAndVerify, buildFilename, saveAll,
+        buildNumberingCandidates, applyNumberingAssignment, verifySavedFiles,
         ResultStore
     };
 })();

@@ -3982,6 +3982,7 @@ const SUITE_OUTPUTS = [['111', '卖点图'], ['222', '袖口图'], ['333', '面�
 
 // 防重复点击：同一时间只允许一个套图任务在预检/创建中
 let suiteTaskRunning = false;
+let suitePendingNumbering = null;   // 待确认的五图编号候选（确认前不执行编号专属后处理/保存）
 
 const SuiteQuickFive = (() => {
     function normalizePrompt(resolved) {
@@ -4207,11 +4208,11 @@ async function startSuiteGeneration() {
         });
         if (!created.ok) throw new Error(created.error);
 
-        updateSuiteStatus(`⏳ 任务 ${created.task.taskId} 已接收（received），开始执行…`);
+        updateSuiteStatus(`⏳ 任务 ${taskId} 已接收（received），开始执行…`);
         renderSuiteImages(product);
 
         // ⑤ 真正送入豆包执行（一次快速五图；失败会带回具体阶段）
-        const ran = await suiteSend('suiteRun', { taskId: created.task.taskId }, 3600000);
+        const ran = await suiteSend('suiteRun', { taskId: taskId }, 3600000);
         if (!ran.ok) {
             updateSuiteStatus(`❌ 执行失败：${ran.error}`);
             showToast(`❌ 套图执行失败：${ran.error}`);
@@ -4232,15 +4233,76 @@ async function startSuiteGeneration() {
                 return c.toDataURL('image/png');
             } catch (_) { return null; }
         };
-        const rec = await SuiteCore.recognize(ran.images, created.task.targetKeys, { expectCount: 5, fingerprint: fpOf });
+        const rec = await SuiteCore.recognize(ran.images, assigned.map(a => a.key), { expectCount: 5, fingerprint: fpOf });
         if (!rec.ok) {
             updateSuiteStatus(`❌ 结果校验未通过：${rec.error}（原始 ${rec.diag.rawCount} 张，去重后 ${rec.diag.afterDedupe} 张）`);
             showToast(`❌ 结果校验未通过：${rec.error}`);
-            await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, final: true, finalStage: 'failed', error: `结果识别：${rec.error}`, diag: rec.diag } });
+            await suiteSend('suiteProgress', { report: { taskId: taskId, final: true, finalStage: 'failed', error: `结果识别：${rec.error}`, diag: rec.diag } });
             return created.task;
         }
 
-        // ⑦ 后处理（按编号顺序；未配置='none' 直接用原图）—— 必须在写盘前完成
+        // ⑥b 编号：仅按出现顺序得到【候选】，不作为已确认编号（参考 pipeline.js:1236-1240 亦为下标对应）
+        const cands = SuiteCore.buildNumberingCandidates(ran.images, assigned.map(a => a.key));
+        suitePendingNumbering = { taskId: taskId, fileKey, rowNum: product.row, steps, candidates: cands, signal: created.task };
+        updateSuiteStatus(`⏳ 已获取 ${cands.length} 张原始结果：编号为【候选顺序】（按出现顺序），尚未确认。请在下方核对后点「确认编号」`);
+        showToast('⏳ 5 张已获取，编号待确认（未确认前不执行编号专属后处理/保存）');
+        await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: ['编号来源=appearance-order（候选，未确认）'] } });
+        renderSuitePendingNumbering();
+        return created.task;
+    } catch (e) {
+        updateSuiteStatus(`❌ ${e.message}`);
+        showToast(`❌ ${e.message}`);
+        return null;
+    } finally {
+        suiteTaskRunning = false;
+        if (btn) { btn.disabled = false; btn.textContent = '🖼️ 生成套图'; }
+    }
+}
+
+// 编号候选展示：让用户核对/调整五编号对应关系（不重新生图）
+function renderSuitePendingNumbering() {
+    const grid = document.getElementById('suiteImagesGrid');
+    const area = document.getElementById('suiteImagesArea');
+    if (!grid || !area || !suitePendingNumbering) return;
+    area.style.display = 'block';
+    const { candidates } = suitePendingNumbering;
+    const opts = candidates.map((c, i) => `<option value="${i}">候选 ${i + 1}</option>`).join('');
+    grid.innerHTML = candidates.map((c, i) => `
+        <div class="color-img-item" style="text-align:center;">
+            <div class="img-label" style="justify-content:center;"><span>${c.key}</span></div>
+            <img src="${c.url || ''}" style="width:100%;border-radius:8px;" onclick="openImageModal(this.src)">
+            <div style="font-size:10px;color:#ffb020;margin-top:4px;">候选顺序 ${i + 1}（未确认）</div>
+            <select id="suiteMap_${c.key}" style="margin-top:4px;width:100%;font-size:11px;background:rgba(0,0,0,0.3);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:6px;">${opts}</select>
+        </div>`).join('') + `
+        <div style="grid-column:1/-1;display:flex;gap:8px;justify-content:center;margin-top:8px;">
+            <button class="batch-color-btn" style="padding:6px 16px;" onclick="confirmSuiteNumbering()">✅ 确认编号并继续（后处理→保存→完成）</button>
+        </div>`;
+    // 默认预选为当前候选顺序（用户可逐个改）
+    candidates.forEach((c, i) => { const el = document.getElementById('suiteMap_' + c.key); if (el) el.value = String(i); });
+}
+
+// 确认编号 → 继续后处理/保存/索引（不重新发豆包请求）
+async function confirmSuiteNumbering() {
+    if (!suitePendingNumbering) { showToast('ℹ️ 没有待确认的编号'); return; }
+    const { candidates, taskId, fileKey, rowNum, steps } = suitePendingNumbering;
+    const assignment = {};
+    for (const c of candidates) {
+        const el = document.getElementById('suiteMap_' + c.key);
+        assignment[c.key] = el ? Number(el.value) : c.index;
+    }
+    let assigned;
+    try { assigned = SuiteCore.applyNumberingAssignment(candidates, assignment); }
+    catch (e) { showToast('❌ 编号分配无效：' + e.message); return; }
+    await finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned });
+}
+
+async function finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned }) {
+    const product = (products || []).find(p => p.row === rowNum) || { row: rowNum };
+    const btn = document.getElementById('suiteGenBtn');
+    suiteTaskRunning = true;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 处理中...'; }
+    try {
+        // ⑦ 后处理（按【已确认】编号；未配置='none' 直接用原图）—— 必须在写盘前完成
         const ctxPost = {
             // 资源只用【真实授权句柄】：优先「后处理脚本目录」等已授权目录
             getHandle: async (decl) => {
@@ -4270,15 +4332,15 @@ async function startSuiteGeneration() {
             }
         };
         const blobsByKey = {};
-        for (let i = 0; i < rec.results.length; i++) {
-            const resp = await fetch(rec.results[i].url, { cache: 'no-store' });
-            blobsByKey[rec.results[i].key] = await resp.blob();
+        for (let i = 0; i < assigned.length; i++) {
+            const resp = await fetch(assigned[i].url, { cache: 'no-store' });
+            blobsByKey[assigned[i].key] = await resp.blob();
         }
-        const post = await SuitePostprocess.runAll(steps, created.task.targetKeys, blobsByKey, ctxPost);
+        const post = await SuitePostprocess.runAll(steps, assigned.map(a => a.key), blobsByKey, ctxPost);
         if (!post.ok) {
             updateSuiteStatus(`❌ 后处理失败：编号 ${post.failedKeys.join('/')} — ${post.results.filter(r => !r.ok).map(r => r.error).join('；')}（原始图已保留，可「仅重试处理」）`);
             showToast(`❌ 后处理失败：${post.failedKeys.join('/')}`);
-            await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, stage: 'acquired', diag: [`后处理失败：${post.failedKeys.join('/')}`] } });
+            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: [`后处理失败：${post.failedKeys.join('/')}`] } });
             return created.task;
         }
         const items = post.results.map(r => ({ key: r.key, blob: r.output }));
@@ -4287,7 +4349,7 @@ async function startSuiteGeneration() {
         const outHandle = await loadSuiteDirHandle('suiteOut');
         if (!outHandle) {
             updateSuiteStatus('❌ 套图输出目录未授权，已获取并处理完成的 5 张结果已保留；请到「路径配置」授权后重试保存');
-            await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, stage: 'acquired', diag: ['写盘前：输出目录未授权'] } });
+            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: ['写盘前：输出目录未授权'] } });
             return created.task;
         }
         const perm = await outHandle.queryPermission({ mode: 'readwrite' });
@@ -4302,7 +4364,7 @@ async function startSuiteGeneration() {
         if (!saved.ok) {
             updateSuiteStatus(`⚠️ 生成成功、保存失败：已保存 ${saved.savedCount}/5，失败编号 ${saved.failedKeys.join('/')}（结果已保留，可「仅重试保存」）`);
             showToast(`⚠️ 保存失败 ${saved.failedKeys.join('/')}，结果已保留`);
-            await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, stage: 'acquired', results: saved.results, diag: [`写盘失败：${saved.failedKeys.join('/')}`] } });
+            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', results: saved.results, diag: [`写盘失败：${saved.failedKeys.join('/')}`] } });
             return created.task;
         }
 
@@ -4312,20 +4374,20 @@ async function startSuiteGeneration() {
             for (const it of items) {
                 const rec2 = saved.results.find(x => x.key === it.key);
                 await store.put({
-                    fileKey, rowNum: product.row, key: it.key, taskId: created.task.taskId, blob: it.blob,
+                    fileKey, rowNum: product.row, key: it.key, taskId: taskId, blob: it.blob,
                     meta: { filename: rec2 && rec2.filename, bytes: rec2 && rec2.bytes, width: rec2 && rec2.width, height: rec2 && rec2.height, verified: true, postprocess: (post.results.find(p => p.key === it.key) || {}).applied || 'none' }
                 });
             }
         } catch (e) {
             updateSuiteStatus(`⚠️ 文件已保存但索引写入失败：${e.message}（文件在磁盘上可用；请刷新后重试恢复）`);
             showToast('⚠️ 索引写入失败，未标记完成');
-            await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, stage: 'saved', results: saved.results, diag: ['索引写入失败：' + e.message] } });
+            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'saved', results: saved.results, diag: ['索引写入失败：' + e.message] } });
             return created.task;
         }
-        await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, stage: 'saved', results: saved.results } });
-        await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, final: true, finalStage: 'completed', results: saved.results } });
+        await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'saved', results: saved.results } });
+        await suiteSend('suiteProgress', { report: { taskId: taskId, final: true, finalStage: 'completed', results: saved.results } });
 
-        updateSuiteStatus(`✅ 套图完成：5 张已后处理、保存、回读校验并写入索引（任务 ${created.task.taskId}）`);
+        updateSuiteStatus(`✅ 套图完成：5 张已后处理、保存、回读校验并写入索引（任务 ${taskId}）`);
         showToast('✅ 套图完成（5 张已保存并校验）');
         await renderSuiteImages(product);
         return created.task;
@@ -4450,8 +4512,8 @@ async function startSuiteRegenerate(key) {
         });
         if (!created.ok) throw new Error(created.error);
 
-        updateSuiteStatus(`⏳ 编号 ${key} 重生成中（任务 ${created.task.taskId}）…`);
-        const ran = await suiteSend('suiteRun', { taskId: created.task.taskId }, 3600000);
+        updateSuiteStatus(`⏳ 编号 ${key} 重生成中（任务 ${taskId}）…`);
+        const ran = await suiteSend('suiteRun', { taskId: taskId }, 3600000);
         if (!ran.ok) throw new Error(ran.error);
 
         // 单图校验：只认 1 张（不套用五图映射）
@@ -4508,11 +4570,11 @@ async function startSuiteRegenerate(key) {
         // 只更新该编号（其他四张不动），且先写索引再标记完成
         const store = SuiteCore.ResultStore();
         await store.put({
-            fileKey, rowNum: cur.row, key, taskId: created.task.taskId, blob: post.output,
+            fileKey, rowNum: cur.row, key, taskId: taskId, blob: post.output,
             meta: Object.assign({}, (saveOne.results[0] || {}), { verified: true, postprocess: post.applied || 'none', regeneratedAt: Date.now() })
         });
-        await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, stage: 'saved', results: saveOne.results } });
-        await suiteSend('suiteProgress', { report: { taskId: created.task.taskId, final: true, finalStage: 'completed', results: saveOne.results } });
+        await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'saved', results: saveOne.results } });
+        await suiteSend('suiteProgress', { report: { taskId: taskId, final: true, finalStage: 'completed', results: saveOne.results } });
 
         updateSuiteStatus(`✅ 编号 ${key} 已重生成并替换（其余 4 张未改动）`);
         showToast(`✅ 编号 ${key} 重生成完成`);
