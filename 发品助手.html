@@ -947,9 +947,12 @@ body::after {
 }
 
 /* 一键换色进度条 */
-.batch-color-progress {
-    margin: 12px 16px;
-    padding: 12px 16px;
+.detail-column { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; overflow: hidden; }
+.detail-column > .detail-panel { flex: 1; }
+.task-progress {
+    margin: 0;
+    padding: 14px 16px;
+    flex-shrink: 0;
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 12px;
@@ -957,35 +960,41 @@ body::after {
     -webkit-backdrop-filter: blur(20px);
     animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.batch-color-progress .progress-header {
+.task-progress .progress-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 8px;
     font-size: 12px;
     color: rgba(255, 255, 255, 0.85);
+    gap: 12px;
 }
-.batch-color-progress .progress-bar {
+.task-progress .progress-header > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
+.task-progress .progress-header > button { flex-shrink: 0; }
+.task-progress .stop-btn:disabled { opacity: 0.5; cursor: default; }
+.task-progress .progress-bar {
     width: 100%;
-    height: 6px;
+    height: 8px;
     background: rgba(255, 255, 255, 0.1);
     border-radius: 3px;
     overflow: hidden;
 }
-.batch-color-progress .progress-fill {
+.task-progress .progress-fill {
     height: 100%;
     background: linear-gradient(90deg, #f093fb 0%, #f5576c 100%);
     border-radius: 3px;
     transition: width 0.3s ease;
 }
-.batch-color-progress .progress-text {
+.task-progress .progress-text {
     font-size: 11px;
     color: rgba(255, 255, 255, 0.55);
     margin-top: 6px;
     display: flex;
     justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
 }
-.batch-color-progress .stop-btn {
+.task-progress .stop-btn {
     padding: 4px 10px;
     border-radius: 6px;
     background: rgba(245, 87, 108, 0.2);
@@ -995,7 +1004,7 @@ body::after {
     cursor: pointer;
     transition: all 0.2s;
 }
-.batch-color-progress .stop-btn:hover {
+.task-progress .stop-btn:hover {
     background: rgba(245, 87, 108, 0.35);
 }
 @keyframes slideDown {
@@ -1666,13 +1675,6 @@ body::after {
     🔌 扩展设置
 </button>
 
-<!-- 内存水位阈值：紧贴扩展设置下方，页面级常驻（不随详情面板重渲染） -->
-<div id="memPauseBox" style="position:fixed;top:52px;right:18px;z-index:9999;display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:10px;background:rgba(0,0,0,0.5);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.85);font-size:11px;white-space:nowrap;" title="整机可用内存低于此值时，自动暂停换色 / 上品队列">
-    <span>可用内存低于</span>
-    <input id="memPauseInput" type="number" min="200" step="100" value="1500" style="width:56px;padding:2px 4px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#fff;font-size:11px;text-align:center;">
-    <span>MB 暂停</span>
-</div>
-
 <div class="page-header">
     <h1>产品发品助手</h1>
     <p class="sub-title">上传Excel · 选择产品 · 一键发品</p>
@@ -1734,40 +1736,41 @@ body::after {
                     </div>
                     <button class="batch-publish-btn" id="batchPublishBtn" disabled onclick="batchPublish()">批量发品</button>
                 </div>
-                <div class="batch-color-progress" id="batchPublishProgress" style="display: none;">
-                    <div class="progress-header">
-                        <span id="batchPublishStatus">准备中...</span>
-                        <span style="display:flex;align-items:center;gap:6px;">
-                            <span style="font-size:11px;opacity:0.55;">每批</span>
-                            <input id="pubBatchSize" type="number" min="1" max="60" step="1" value="50" title="每批预填款数（1-60）" style="width:48px;padding:2px 4px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#fff;font-size:11px;text-align:center;">
-                            <button class="stop-btn" id="pubToggleBtn" onclick="togglePublishRun()">⏹ 停止</button>
-                        </span>
-                    </div>
-                    <div class="progress-bar" id="pubBarRow">
-                        <div class="progress-fill" id="batchPublishFill" style="width: 0%;"></div>
-                    </div>
-                    <div class="progress-text" id="pubTextRow">
-                        <span id="batchPublishCounter">0/0</span>
-                        <span id="batchPublishCurrent">-</span>
-                    </div>
-                    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:8px;">
-                        <span id="batchPublishBatch" style="font-size:11px;opacity:0.7;">本批已开 0/50 · 本批已填 0</span>
-                        <span id="batchPublishPending" style="font-size:11px;opacity:0.7;">待保存 0</span>
-                        <span id="batchPublishPages" style="font-size:11px;opacity:0.7;">页面 0/60</span>
-                        <button class="stop-btn" id="pubRetryBtn" onclick="retryPublishRow()" style="display:none;">↻ 重试当前行</button>
-                        <button class="stop-btn" id="pubSkipBtn" onclick="skipPublishRow()" style="display:none;">⏭ 跳过当前行</button>
-                        <button class="stop-btn" onclick="exportDiagLog()" title="导出最近 500 条结构化诊断日志">⬇ 导出日志</button>
-                    </div>
-                    <div id="batchPublishPause" style="display:none;margin-top:6px;font-size:11px;color:#ffb020;line-height:1.5;"></div>
-                </div>
                 <div class="product-cards" id="productCards"></div>
             </div>
         </div>
 
-        <div class="detail-panel empty" id="detailPanel">
+        <div class="detail-column">
+            <div class="task-progress" id="batchColorProgress" style="display:none;">
+                <div class="progress-header">
+                    <span id="batchColorStatus"></span>
+                    <button class="stop-btn" id="batchColorToggleBtn" onclick="toggleBatchColorRun()">⏸ 暂停</button>
+                </div>
+                <div class="progress-bar"><div class="progress-fill" id="batchColorFill" style="width:0%;"></div></div>
+                <div class="progress-text"><span id="batchColorCounter">0/0</span><span id="batchColorCurrent"></span></div>
+                <div id="colorTimeoutHint" style="display:none;margin-top:6px;color:#ffb020;font-size:11px;"></div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+                </div>
+            </div>
+            <div class="task-progress" id="batchPublishProgress" style="display:none;">
+                <div class="progress-header">
+                    <span id="batchPublishStatus"></span>
+                    <button class="stop-btn" id="pubToggleBtn" onclick="togglePublishRun()">⏸ 暂停</button>
+                </div>
+                <div class="progress-bar" id="pubBarRow"><div class="progress-fill" id="batchPublishFill" style="width:0%;"></div></div>
+                <div class="progress-text" id="pubTextRow"><span id="batchPublishCounter">0/0</span><span id="batchPublishCurrent"></span></div>
+                <div class="progress-text"><span id="batchPublishBatch"></span><span id="batchPublishPending"></span></div>
+                <div id="batchPublishPause" style="display:none;margin-top:6px;font-size:11px;color:#ffb020;"></div>
+                <div style="display:flex;gap:8px;margin-top:6px;">
+                    <button class="stop-btn" id="pubRetryBtn" onclick="retryPublishRow()" style="display:none;">重试当前行</button>
+                    <button class="stop-btn" id="pubSkipBtn" onclick="skipPublishRow()" style="display:none;">跳过当前行</button>
+                </div>
+            </div>
+            <div class="detail-panel empty" id="detailPanel">
             <div style="text-align: center;">
                 <div style="font-size: 80px; margin-bottom: 20px; opacity: 0.3;">📦</div>
                 <div style="font-size: 16px; color: var(--text-secondary);">请上传Excel并选择产品</div>
+            </div>
             </div>
         </div>
     </div>
@@ -2231,14 +2234,23 @@ function handleFile(file) {
             const sheet = workbook.Sheets[sheetName];
             const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1 });
             const fileName = file.name.replace(/\.[^/.]+$/, '');
-            if (chrome && chrome.runtime) {
+            const fileChanged = fileName !== loadedFileName;
+            if (fileChanged) {
+                handleColorFileSwitched({ to: fileName });
+                if (batchColorState && !batchColorState.inFlightRow && !batchColorState.pendingAckRow) {
+                    stopBatchColorPolling();
+                    saveColorBatchState();
+                    batchColorState = null;
+                }
+                selectedRows.clear();
+                uploadedRows = {}; legacyRows = {};
+                currentProduct = null;
+                const detail = document.getElementById('detailPanel');
+                if (detail) { detail.innerHTML = ''; detail.classList.add('empty'); }
+            }
+            if (typeof chrome !== 'undefined' && chrome.runtime) {
                 try {
-                    chrome.runtime.sendMessage(EXTENSION_ID, { action: 'setCurrentFilename', filename: fileName }, () => {
-                        // 只有文件名变了才清空，同一个文件重新上传保留颜色图和已上传状态
-                        if (fileName !== loadedFileName) {
-                            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'clearAllOnNewFile' }, () => {});
-                        }
-                    });
+                    chrome.runtime.sendMessage(EXTENSION_ID, { action: 'setCurrentFilename', filename: fileName }, () => { void chrome.runtime.lastError; });
                 } catch (e) {}
             }
             loadedFileName = fileName;
@@ -2263,7 +2275,7 @@ const HEADER_KEYWORDS_BY_CATEGORY = {
         sleeve: ['袖长'],
         material: ['材质'],
         technics: ['工艺'],
-        printing: ['印花方法'],
+        printing: ['印花方法', '印花方式'],
         pattern: ['图案类型'],
         shirt_type: ['衬衫类型'],
         features: ['产品特性'],
@@ -2295,7 +2307,7 @@ const HEADER_KEYWORDS_BY_CATEGORY = {
         province: ['省份'],
         style: ['样式'],
         logo_position: ['徽标位置'],
-        printing: ['印花方法'],
+        printing: ['印花方法', '印花方式'],
         fabric_type: ['面料类型'],
         length: ['长度'],
         sleeve: ['袖子款式'],
@@ -2314,7 +2326,7 @@ const HEADER_KEYWORDS_BY_CATEGORY = {
         price: ['价格'],
         material: ['材质'],
         fabric_weight: ['面料克重'],
-        printing: ['印花方法'],
+        printing: ['印花方法', '印花方式'],
         technics: ['工艺'],
         length: ['长度'],
         pattern: ['图案类型'],
@@ -2346,7 +2358,7 @@ const HEADER_KEYWORDS_BY_CATEGORY = {
         fabric_type: ['面料类型'],
         pattern: ['图案类型'],
         style: ['款式'],
-        printing: ['印花方法'],
+        printing: ['印花方法', '印花方式'],
         origin: ['原产地'],
         province: ['省份'],
         logo_position: ['徽标位置'],
@@ -2374,7 +2386,7 @@ const HEADER_KEYWORDS_BY_CATEGORY = {
         fabric_type: ['面料类型'],
         pattern: ['图案类型'],
         style: ['款式'],
-        printing: ['印花方法'],
+        printing: ['印花方法', '印花方式'],
         origin: ['原产地'],
         province: ['省份'],
         logo_position: ['徽标位置'],
@@ -2656,7 +2668,7 @@ function loadFromLocalStorage() {
             if (savedIdx !== null && products[parseInt(savedIdx)]) selectProduct(parseInt(savedIdx));
             return true;
         }
-    } catch (e) {}
+    } catch (e) { console.warn('恢复本地产品缓存失败:', e); }
     return false;
 }
 
@@ -2779,7 +2791,7 @@ function toggleSelectAll() {
     });
 }
 
-// 批量发品：收集勾选产品 → saveBatchProducts 存扩展 → openBatchPublish 逐行打开发品页
+// 批量发品：产品快照与队列在一次请求中创建；固定每批 50 款
 function batchPublish() {
     const selectedProducts = getSelectedProducts();
     if (selectedProducts.length === 0) return;
@@ -2823,25 +2835,15 @@ function batchPublish() {
 
     try {
         chrome.runtime.sendMessage(EXTENSION_ID, {
-            action: 'saveBatchProducts',
-            products: batchData,
-            imageDir: baseDir ? baseDir + '/extracted_images' : '',
-            colorImgDir: colorImgDir
+            action: 'openBatchPublish',
+            rows: selectedProducts.map(p => p.row), products: batchData,
+            fileKey: currentFileKey(),
+            imageDir: baseDir ? baseDir + '/extracted_images' : '', colorImgDir
         }, (resp) => {
-            if (resp && resp.ok) {
-                const rows = selectedProducts.map(p => p.row);
-                chrome.runtime.sendMessage(EXTENSION_ID, {
-                    action: 'openBatchPublish',
-                    rows: rows
-                }, (resp) => {
-                    if (chrome.runtime.lastError || !resp) { showToast('❌ 无法启动发品任务'); return; }
-                    if (!resp.ok) { showToast('❌ ' + (resp.error || '无法启动发品任务')); refreshPublishState(); return; }
-                    showToast(`🚀 发品任务已启动：共 ${rows.length} 款，每批 ${resp.batchSize || 50} 款`);
-                    refreshPublishState();
-                });
-            } else {
-                showToast('❌ 保存产品数据失败');
-            }
+            if (chrome.runtime.lastError || !resp) { showToast('❌ 无法启动发品任务'); return; }
+            if (!resp.ok) { showToast('❌ ' + (resp.error || '无法启动发品任务')); refreshPublishState(); return; }
+            showToast(`🚀 发品任务已启动：共 ${selectedProducts.length} 款，每批 50 款`);
+            refreshPublishState();
         });
     } catch (e) {
         showToast('❌ 批量发品失败: ' + e.message);
@@ -2855,8 +2857,11 @@ function renderProductList() {
     const productCount = document.getElementById('productCount');
     productList.style.display = 'flex';
     productCount.textContent = products.length + '款';
+    const renderFileKey = currentFileKey();
+    const renderProducts = products;
 
     function doRender(uploaded, legacy) {
+        if (renderFileKey !== currentFileKey() || renderProducts !== products) return;
         uploaded = uploaded || {};
         legacy = legacy || {};
         uploadedRows = uploaded;   // 仅「已核实保存」记录（跳过依据）
@@ -2897,7 +2902,7 @@ function renderProductList() {
 
     if (chrome && chrome.runtime) {
         try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getUploadedRows' }, (response) => {
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getUploadedRows', fileKey: renderFileKey }, (response) => {
                 if (chrome.runtime.lastError) doRender();
                 else doRender(response?.rows, response?.legacy);
             });
@@ -2907,9 +2912,12 @@ function renderProductList() {
 
 function checkColorGeneratedStatus() {
     if (!extensionInstalled || products.length === 0) return;
+    const queriedFile = currentFileKey();
+    const queriedProducts = products;
     products.forEach((p, idx) => {
         try {
             chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImagesInfo', rowNum: p.row }, (resp) => {
+                if (queriedFile !== currentFileKey() || products !== queriedProducts) return;
                 if (resp && resp.ok && resp.images && resp.images.length >= 4) {
                     const card = document.querySelector(`.product-card[data-idx="${idx}"]`);
                     if (card && !card.querySelector('.color-generated-badge')) {
@@ -2933,7 +2941,10 @@ function checkColorGeneratedStatus() {
 function syncProductToExtension(product) {
     if (!chrome || !chrome.runtime || !product) return;
     try {
-        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'saveProductData', data: product }, () => {});
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'saveProductData', data: product }, response => {
+            const error = chrome.runtime.lastError;
+            if (error || !response?.ok) console.warn('产品资料同步失败：', error?.message || response?.error || '扩展未回复');
+        });
     } catch (e) {}
 }
 
@@ -3054,33 +3065,14 @@ function renderDetail() {
             </button>
         </div>
         
-        <div class="batch-color-progress" id="batchColorProgress" style="display: none;">
-            <div class="progress-header">
-                <span id="batchColorStatus">准备中...</span>
-                <button class="stop-btn" id="batchColorToggleBtn" onclick="toggleBatchColorRun()">⏹ 停止</button>
-            </div>
-            <div class="progress-bar">
-                <div class="progress-fill" id="batchColorFill" style="width: 0%;"></div>
-            </div>
-            <div class="progress-text">
-                <span id="batchColorCounter">0/0</span>
-                <span id="batchColorCurrent">-</span>
-            </div>
-            <div id="colorTimeoutHint" style="display:none;margin-top:6px;font-size:11px;color:#ffb020;line-height:1.5;"></div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
-                <button class="stop-btn" id="colorCheckExecBtn" style="display:none;" onclick="checkColorExecStatus()">🔍 查询执行状态</button>
-                <button class="stop-btn" id="colorTimeoutDoneBtn" style="display:none;" onclick="resolveTimeoutRow('done')">✅ 已生成</button>
-                <button class="stop-btn" id="colorTimeoutRetryBtn" style="display:none;" onclick="resolveTimeoutRow('retry')">↻ 重试</button>
-                <button class="stop-btn" id="colorTimeoutSkipBtn" style="display:none;" onclick="resolveTimeoutRow('skip')">⏭ 跳过</button>
-            </div>
-        </div>
         
         <div class="tabs">
             <div class="glider" id="tabGlider"></div>
             <div class="tab${currentActiveTab === 'basic' ? ' active' : ''}" data-tab="basic"><span class="tab-text">基础信息</span></div>
             <div class="tab${currentActiveTab === 'highlights' ? ' active' : ''}" data-tab="highlights"><span class="tab-text">卖点</span></div>
             <div class="tab${currentActiveTab === 'faq' ? ' active' : ''}" data-tab="faq"><span class="tab-text">FAQ</span></div>
-            <div class="tab${currentActiveTab === 'audit' ? ' active' : ''}" data-tab="audit"><span class="tab-text">审核</span></div>
+            <div class="tab${currentActiveTab === 'audit' ? ' active' : ''}" data-tab="audit"><span class="tab-text">路径配置</span></div>
+            <div class="tab${currentActiveTab === 'steps' ? ' active' : ''}" data-tab="steps"><span class="tab-text">自定义步骤</span></div>
         </div>
         
         <div class="tab-body">
@@ -3098,11 +3090,11 @@ function renderDetail() {
                             <button class="batch-color-btn" onclick="startBatchColorChange()" id="batchColorBtn" style="justify-content: center;">
                                 🚀 一键换色
                             </button>
+                            <button class="batch-color-btn" onclick="startSuiteGeneration()" id="suiteGenBtn" style="justify-content: center; background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);">
+                                🖼️ 生成套图
+                            </button>
                             <button class="batch-color-btn" onclick="startColorChangeForRows()" id="colorRowsBtn" style="justify-content: center;">
                                 🔁 指定重生成
-                            </button>
-                            <button class="color-change-btn" onclick="startColorChange(${p.row})" id="colorChangeBtn" style="justify-content: center;">
-                                🎨 AI换色
                             </button>
                             <button class="ps-edit-btn" onclick="openPhotopea(${p.row})" style="justify-content: center;">
                                 🖌️ PS编辑
@@ -3124,6 +3116,18 @@ function renderDetail() {
                         <div class="color-img-item missing" data-color="gray"><span class="color-name">灰色</span></div>
                         <div class="color-img-item missing" data-color="navy"><span class="color-name">军蓝色</span></div>
                     </div>
+                </div>
+                <div id="suiteImagesArea" style="margin: 14px 0 10px; display: none;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                        <div class="img-label" style="justify-content: flex-start; margin-bottom: 0;">
+                            <span>套图（5 张）</span>
+                            <span id="suiteStatusText" style="margin-left:8px; font-size:11px; color: rgba(255,255,255,0.55);"></span>
+                        </div>
+                        <button class="batch-color-btn" onclick="startSuiteRegenerate()" id="suiteRegenBtn" style="padding:4px 12px; font-size:12px;">
+                            🔁 套图指定重生成
+                        </button>
+                    </div>
+                    <div id="suiteImagesGrid" class="color-images-grid"></div>
                 </div>
                 <button class="copy-all-btn" onclick="copyData()">📋 复制产品数据</button>
                 
@@ -3188,26 +3192,27 @@ function renderDetail() {
             
             <div class="tab-content${currentActiveTab === 'audit' ? ' active' : ''}" id="tab-audit">
                 <div style="padding: 20px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                        <h3 style="font-size: 16px; font-weight: bold; color: var(--text-primary);">🔍 产品数据审核</h3>
-                        <button style="padding: 8px 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; box-shadow: 0 2px 8px rgba(102,126,234,0.3);" onclick="runAudit()">
-                            🚀 执行审核
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                        <h3 style="font-size: 16px; font-weight: bold; color: var(--text-primary);">📁 路径配置</h3>
+                        <button style="padding: 8px 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer;" onclick="checkPathPermissions()">
+                            🔐 检查目录权限
                         </button>
                     </div>
-                    <div style="background: rgba(255,255,255,0.04); border-radius: 12px; padding: 16px; border: 1px solid rgba(255,255,255,0.08);">
-                        <div style="font-size: 13px; color: rgba(255,255,255,0.6); line-height: 1.8;">
-                            <p>📌 <strong style="color: rgba(255,255,255,0.8);">审核范围：</strong>标题、卖点、FAQ、材质、面料类型、产品特性、工艺、设计</p>
-                            <p>🔴 <strong style="color: #ef4444;">一级风险：</strong>注册商标材质词（如Coolmax®、Lycra®）、知名品牌名（如Nike、Adidas）、品牌暗示性描述</p>
-                            <p>🟡 <strong style="color: #eab308;">二级风险：</strong>不在材质大全中的词汇、灰色地带词汇（需人工确认）</p>
-                            <p>🟢 <strong style="color: #22c55e;">安全通过：</strong>未发现品牌词风险和未知材质</p>
+                    <div id="pathConfigList" style="display:flex; flex-direction:column; gap:10px;"></div>
+                    <div id="pathConfigStatus" style="margin-top:12px; font-size:12px; line-height:1.8; color: rgba(255,255,255,0.6);"></div>
+                </div>
+            </div>
+            <div class="tab-content${currentActiveTab === 'steps' ? ' active' : ''}" id="tab-steps">
+                <div style="padding: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                        <h3 style="font-size: 16px; font-weight: bold; color: var(--text-primary);">🧩 自定义步骤（套图 5 张）</h3>
+                        <div style="display:flex; gap:8px;">
+                            <button style="padding: 8px 16px; background: rgba(255,255,255,0.08); color: white; border: 1px solid rgba(255,255,255,0.16); border-radius: 20px; font-size: 13px; cursor: pointer;" onclick="resetSuiteSteps()">↺ 恢复默认</button>
+                            <button style="padding: 8px 16px; background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; border: none; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer;" onclick="saveSuiteSteps()">💾 保存配置</button>
                         </div>
                     </div>
-                    <div id="auditContent" style="margin-top: 20px; min-height: 200px;">
-                        <div style="text-align: center; padding: 40px 20px;">
-                            <div style="font-size: 48px; margin-bottom: 12px;">📋</div>
-                            <div style="font-size: 14px; color: rgba(255,255,255,0.5);">点击上方"执行审核"按钮开始检查产品数据</div>
-                        </div>
-                    </div>
+                    <div id="stepConfigList" style="display:flex; flex-direction:column; gap:12px;"></div>
+                    <div id="stepConfigStatus" style="margin-top:12px; font-size:12px; line-height:1.8; color: rgba(255,255,255,0.6);"></div>
                 </div>
             </div>
         </div>`;
@@ -3338,7 +3343,6 @@ function checkExtension() {
             }
             extensionInstalled = true;
             updateExtensionStatus();
-            syncMemPauseMBToExtension();
             checkExtensionReloaded();
             // 每次（重新）连上扩展都重新拉一次发品任务状态，避免刷新/断线后面板状态丢失
             refreshPublishState();
@@ -3346,6 +3350,9 @@ function checkExtension() {
                 if (!extensionPort) {
                     extensionPort = chrome.runtime.connect(EXTENSION_ID, { name: 'assistant-channel' });
                     extensionPort.onMessage.addListener((msg) => {
+                        if (msg.action === 'publishSaved') handlePublishSaved(msg);
+                        if (msg.action === 'colorTaskAccepted') handleColorTaskAccepted(msg);
+                        if (msg.action === 'colorTaskStopped') handleColorTaskStopped(msg);
                         if (msg.action === 'colorTaskComplete') {
                             handleColorTaskComplete(msg);
                         }
@@ -3413,6 +3420,9 @@ function setupPsEditMessageListener() {
     try {
         if (chrome.runtime && chrome.runtime.onMessageExternal) {
             chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => {
+                if (request.action === 'publishSaved') {
+                    handlePublishSaved(request); sendResponse({ ok: true }); return true;
+                }
                 if (request.action === 'psEditComplete') {
                     handlePsEditComplete(request);
                     sendResponse({ ok: true });
@@ -3442,6 +3452,9 @@ function setupPsEditMessageListener() {
         }
         if (chrome.runtime && chrome.runtime.onMessage) {
             chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+                if (request.action === 'publishSaved') handlePublishSaved(request);
+                if (request.action === 'colorTaskAccepted') handleColorTaskAccepted(request);
+                if (request.action === 'colorTaskStopped') handleColorTaskStopped(request);
                 if (request.action === 'colorTaskComplete') {
                     handleColorTaskComplete(request);
                     sendResponse({ ok: true });
@@ -3461,17 +3474,17 @@ function setupPsEditMessageListener() {
     }
 }
 
-// ===== 上品队列：进度面板 + 内存暂停/恢复（队列驱动在扩展侧）=====
+// ===== 发品进度条：预填进度与暂停/继续（队列驱动在扩展侧）=====
 const publishProgressEl = () => document.getElementById('batchPublishProgress');
+
+function handlePublishSaved(msg) {
+    if (msg && msg.fileKey === currentFileKey()) renderProductList();
+    refreshPublishState();
+}
 const publishStatusEl = () => document.getElementById('batchPublishStatus');
 const publishFillEl = () => document.getElementById('batchPublishFill');
 const publishCounterEl = () => document.getElementById('batchPublishCounter');
 const publishCurrentEl = () => document.getElementById('batchPublishCurrent');
-
-function showPublishProgress(show) {
-    const el = publishProgressEl();
-    if (el) el.style.display = show ? 'block' : 'none';
-}
 
 // ===== 发品任务面板：状态驱动（批次 / 计数 / 待保存 / 暂停原因 / 停止继续 / 重试跳过）=====
 let lastPublishState = null;
@@ -3514,8 +3527,8 @@ function renderPublishState(s) {
     const done = s.state === 'done';
 
     const idle = (s.state === 'idle');
-    // idle 也展示面板（只留设置区），否则开始前无法设置每批款数
-    showPublishProgress(true);
+    // 两类任务使用同款大进度条，未开始时隐藏；不随详情重绘而销毁。
+    showPublishProgress(!idle);
     const barRow = document.getElementById('pubBarRow');
     const textRow = document.getElementById('pubTextRow');
     if (barRow) barRow.style.display = idle ? 'none' : 'block';
@@ -3523,17 +3536,17 @@ function renderPublishState(s) {
 
     const st = publishStatusEl();
     if (st) {
-        if (idle) st.textContent = `⚙ 未开始 · 每批 ${s.settingsBatchSize || s.batchSize || 50} 款`;
-        else if (done) st.textContent = `✅ 全部预填完成（${filled}/${total} 款，待保存）`;
-        else if (paused) st.textContent = `⏸ 已暂停 · ${PUBLISH_REASON_TEXT[s.pauseReason] || s.pauseReason || ''}`;
-        else st.textContent = `🚀 正在预填 ${filled}/${total}`;
+        if (idle) st.textContent = "";
+        else if (done) st.textContent = `✅ 发品预填完成（${filled}/${total} 款，待检查保存）`;
+        else if (paused) st.textContent = `⏸ 发品已暂停 · ${PUBLISH_REASON_TEXT[s.pauseReason] || s.pauseReason || ''}`;
+        else st.textContent = `🚀 发品预填中 ${filled}/${total}`;
     }
     const fill = publishFillEl();
     if (fill) fill.style.width = (total > 0 ? Math.round((filled / total) * 100) : 0) + '%';
     const c = publishCounterEl();
     if (c) c.textContent = `${filled}/${total}`;
     const cur = publishCurrentEl();
-    if (cur) cur.textContent = s.currentRow ? `正在填 row${s.currentRow}` : (done ? '已完成' : `剩 ${remain} 款`);
+    if (cur) cur.textContent = s.currentRow ? (s.rowRetryable ? `row${s.currentRow} 待处理` : `row${s.currentRow}${paused ? ' 尚未结束' : ' 正在填写'}`) : (done ? '预填完成' : `剩 ${remain} 款`);
 
     const b = publishBatchEl();
     if (b) b.textContent = `本批已开 ${s.batchOpened || 0}/${s.batchSize || 0} · 本批已填 ${s.batchFilled || 0}`;
@@ -3558,14 +3571,14 @@ function renderPublishState(s) {
     const btn = publishToggleEl();
     if (btn) {
         btn.style.display = idle ? 'none' : 'inline-block';
-        if (running) { btn.textContent = '⏹ 停止'; btn.disabled = false; btn.title = '停止后不再开新页'; }
+        if (running) { btn.textContent = '⏸ 暂停'; btn.disabled = false; btn.title = '暂停后不再开新页，当前页仍保留'; }
         else if (done) { btn.textContent = '已完成'; btn.disabled = true; btn.title = ''; }
         else if (needExplicit) {
             btn.textContent = '▶ 继续下一批'; btn.disabled = true;
             btn.title = '当前行页面已失效，请先「↻ 重试当前行」或「⏭ 跳过当前行」';
         } else {
             btn.textContent = '▶ 继续下一批'; btn.disabled = false;
-            btn.title = '继续下一批（会重新读取每批款数设置）';
+            btn.title = '继续下一批（50 款）';
         }
     }
     // 仅"当前行卡住"时提供重试 / 明确跳过
@@ -3576,8 +3589,8 @@ function renderPublishState(s) {
     const inp = publishBatchInput();
     if (inp) {
         if (document.activeElement !== inp) inp.value = String(s.batchSize || s.settingsBatchSize || 50);
-        inp.disabled = (s.editableBatchSize === false);
-        inp.title = inp.disabled ? '运行中不可修改；停止后可改「下一批」款数' : '每批预填款数（1-60）';
+        inp.disabled = true;
+        inp.title = '每批固定 50 款';
     }
 }
 
@@ -3640,22 +3653,10 @@ function exportDiagLog() {
     } catch (e) { showToast('❌ ' + e.message); }
 }
 
-// 批次大小输入：改完写入扩展设置（1-60，由后台收敛）
+// 每批固定 50 款，不再提供批次大小设置。
 function initPublishBatchInput() {
     const inp = publishBatchInput();
-    if (!inp || inp.dataset.bound === '1') return;
-    inp.dataset.bound = '1';
-    inp.addEventListener('change', () => {
-        const v = parseInt(inp.value, 10);
-        try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'setPublishSettings', patch: { batchSize: v } }, (r) => {
-                if (chrome.runtime.lastError || !r || !r.ok) { showToast('❌ 批次大小设置失败'); return; }
-                const s = r.settings || {};
-                inp.value = String(s.batchSize || 50);
-                showToast(`✅ 每批预填 ${s.batchSize} 款`);
-            });
-        } catch (e) { showToast('❌ ' + e.message); }
-    });
+    if (inp) { inp.value = '50'; inp.disabled = true; }
 }
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => { initPublishBatchInput(); refreshPublishState(); });
@@ -3693,21 +3694,37 @@ function handlePsEditComplete(request) {
     });
 }
 
+function handleColorTaskAccepted(msg) {
+    const state = batchColorState;
+    if (!state || !msg || msg.batchId !== state.batchId || msg.rowNum !== state.inFlightRow
+        || (state.executionId && msg.executionId !== state.executionId)) return;
+    state.pendingAckRow = null;
+    saveColorBatchState();
+}
+
+function handleColorTaskStopped(msg) {
+    const state = batchColorState;
+    if (!state || !msg || msg.batchId !== state.batchId || msg.executionId !== state.executionId) return;
+    finishBatchColor(false);
+}
+
 function handleColorTaskComplete(request) {
     const { rowNum, batchId, results } = request;
+    if (batchColorState && batchColorState.executionId && request.executionId !== batchColorState.executionId) return;
     console.log('🎨 收到换色完成消息:', rowNum, batchId || '', results ? '含结果' : '无结果');
+    handleColorTaskAccepted(request);
     advanceBatchColorForRow(rowNum, 'message', batchId, results);
 }
 
 // 统一推进入口：消息触发和轮询兜底都走这里，靠 lastAdvancedRow 去重防双触发
-// 「继续」待办 = 失败行 + 尚未派发的行（**不含**仍在生成中的在途行）
+// 「继续」待办包含暂停款；正在执行时暂不重复派发该行。
 function computeColorResumeRows() {
     if (!batchColorState) return [];
     const inFlight = batchColorState.inFlightRow;
     const rest = batchColorState.queue.slice(batchColorState.currentIndex)
         .filter(p => p.row !== inFlight)
         .map(p => p.row);
-    return [...(batchColorState.failedRows || []), ...rest];
+    return [...new Set([...(batchColorState.failedRows || []), ...rest])];
 }
 
 // 当前 Excel 文件标识（与扩展 getFilePrefix 同规则）：换色待办按文件隔离
@@ -3717,7 +3734,7 @@ function currentFileKey() {
 
 // 换色待办所属文件：有任务时用【任务绑定的文件】，不被当前文件接管
 function colorBatchFileKey() {
-    if (batchColorState && typeof batchColorState.fileKey === 'string' && batchColorState.fileKey) {
+    if (batchColorState && typeof batchColorState.fileKey === 'string') {
         return batchColorState.fileKey;
     }
     return currentFileKey();
@@ -3730,8 +3747,10 @@ function saveColorBatchState() {
     if (!batchColorState) { localStorage.removeItem(COLOR_BATCH_STATE_KEY); return; }
     const snap = {
         // 绑定任务创建时的文件：切文件后原任务仍归原文件，不被新文件接管
-        fileKey: (typeof batchColorState.fileKey === 'string' && batchColorState.fileKey) ? batchColorState.fileKey : currentFileKey(),
+        fileKey: (typeof batchColorState.fileKey === 'string') ? batchColorState.fileKey : currentFileKey(),
         batchId: batchColorState.batchId || null,
+        executionId: batchColorState.executionId || null,
+        fileFolder: batchColorState.fileFolder || loadedFileName || '默认',
         label: batchColorState.label || '批量换色',
         rows: batchColorState.queue.map(p => p.row),
         currentIndex: batchColorState.currentIndex,
@@ -3799,56 +3818,33 @@ function restoreColorBatchState() {
         skippedRows: snap.skippedRows || [],
         lastMemMB: 0,
         batchId: snap.batchId || null,
-        fileKey: snap.fileKey || currentFileKey() || '',
-        inFlightRow: snap.inFlightRow || null,
-        inFlightSince: snap.inFlightSince || 0,
-        pendingAckRow: snap.pendingAckRow || null,
-        timedOutRows: getColorTimeoutRows(),
-        pausedReason: snap.pausedReason || (snap.inFlightRow ? '刷新后恢复：等待在途款结束' : '刷新后恢复')
+        executionId: snap.executionId || null,
+        fileFolder: snap.fileFolder || loadedFileName || '默认',
+        fileKey: typeof snap.fileKey === 'string' ? snap.fileKey : currentFileKey(),
+        inFlightRow: null,
+        inFlightSince: 0,
+        pendingAckRow: null,
+        timedOutRows: [],
+        pausedReason: /内存|提交额度|监测不可用|Failed to fetch/i.test(snap.pausedReason || '')
+            ? '上次任务已暂停，等待你继续'
+            : (snap.pausedReason || (snap.inFlightRow ? '刷新后恢复：等待在途款结束' : '刷新后恢复'))
     };
-    showBatchColorProgress();
-    if (batchColorState.inFlightRow) {
-        startBatchColorPolling();   // 在途款仍要能补收完成
-        // 恢复原期限的剩余时间，重新武装超时兜底（否则通知永久缺失会再次无限等待）
-        const elapsed = batchColorState.inFlightSince ? (Date.now() - batchColorState.inFlightSince) : 0;
-        const remain = Math.max(5000, (typeof BATCH_COLOR_COMPLETE_TIMEOUT === 'number' ? BATCH_COLOR_COMPLETE_TIMEOUT : 600000) - elapsed);
-        const row = batchColorState.inFlightRow;
-        if (batchColorState.currentTimeoutId) clearTimeout(batchColorState.currentTimeoutId);
-        batchColorState.currentTimeoutId = setTimeout(() => {
-            if (!batchColorState || batchColorState.inFlightRow !== row) return;
-            const product = { row };
-            setupBatchColorTimeoutReentry(product);
-        }, remain);
-        const timeoutEl = document.getElementById('colorTimeoutHint');
-        if (timeoutEl) { timeoutEl.style.display = 'block'; }
+    if (snap.inFlightRow || snap.pendingAckRow) {
+        const idx = queue.findIndex(p => p.row === (snap.inFlightRow || snap.pendingAckRow));
+        if (idx >= 0) batchColorState.currentIndex = idx;
     }
+    batchColorState.executionId = null;
+    batchColorState.pausedReason = '';
+    setColorTimeoutRows([]);
+    refreshColorResumeRowsFromState();
+    saveColorBatchState();
+    showBatchColorProgress();
     updateBatchColorProgress();
-    updateBatchColorStatus(`♻️ 已恢复上次换色任务（${queue.length} 款，第 ${batchColorState.currentIndex + 1} 款起）${batchColorState.inFlightRow ? '；row' + batchColorState.inFlightRow + ' 仍在执行，完成后会自动计入' : (batchColorState.pendingAckRow ? `；row${batchColorState.pendingAckRow} 未确认接收` : '')}`);
+    restoreBatchColorUI();
+    updateBatchColorStatus('换色已暂停');
     return true;
 }
 
-// 恢复后重新武装超时：复用生产超时逻辑（不改判定口径）
-function setupBatchColorTimeoutReentry(product) {
-    const row = product.row;
-    if (!batchColorState || batchColorState.inFlightRow !== row) return;
-    batchColorState.failCount++;
-    if (!Array.isArray(batchColorState.failedRows)) batchColorState.failedRows = [];
-    if (batchColorState.failedRows.indexOf(row) < 0) batchColorState.failedRows.push(row);
-    batchColorState.inFlightRow = null;
-    batchColorState.inFlightSince = 0;
-    batchColorState.currentIndex++;
-    batchColorState.running = false;
-    batchColorState.pausedReason = `row${row} 换色超时（待确认）`;
-    const prev = getColorTimeoutRows();
-    if (prev.indexOf(row) < 0) setColorTimeoutRows([...prev, row]);
-    saveColorBatchState();
-    refreshColorResumeRowsFromState();
-    updateBatchColorProgress();
-    const msg = `⏱ row${row} 换色超时：豆包是否已结束【未确认】。已暂停后续派发；请先点「🔍 查询执行状态」，再用「✅ 已生成 / ↻ 重试 / ⏭ 跳过」明确处理`;
-    updateBatchColorStatus(msg);
-    showToast(msg);
-    syncBatchColorTimeoutActions();
-}
 
 function refreshColorResumeRowsFromState() {
     setColorResumeRows(computeColorResumeRows());
@@ -3873,7 +3869,7 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
         showToast(`ℹ️ row${rowNum} 迟到完成（此前已判超时），请确认该款是否已生成`);
         return;
     }
-    // ② 只接受"当前在途行"的完成 —— 暂停后仍在生成的那一款也能正常入账
+    // ② 只接受当前执行行的完成；暂停清除此标识，旧完成不能入账。
     if (batchColorState.inFlightRow !== rowNum) {
         console.warn(`🎨 row${rowNum} 不是当前在途行(在途=${batchColorState.inFlightRow})，已忽略 (${source})`);
         return;
@@ -3885,6 +3881,7 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
     }
     batchColorState.lastAdvancedRow = rowNum;
     batchColorState.inFlightRow = null;
+    batchColorState.pendingAckRow = null;
     batchColorState.inFlightSince = 0;
 
     // ④ 结果判定：执行结束 ≠ 成功。四色目标必须逐项确认，部分完成按失败处理并保留可处理行
@@ -3896,10 +3893,11 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
             clearTimeout(batchColorState.currentTimeoutId);
             batchColorState.currentTimeoutId = null;
         }
-        batchColorState.failCount++;
         if (!Array.isArray(batchColorState.failedRows)) batchColorState.failedRows = [];
-        if (batchColorState.failedRows.indexOf(rowNum) < 0) batchColorState.failedRows.push(rowNum);
-        batchColorState.currentIndex++;
+        if (batchColorState.failedRows.indexOf(rowNum) < 0) {
+            batchColorState.failedRows.push(rowNum);
+            batchColorState.failCount++;
+        }
         // 失败/部分完成是明确终态：暂停并保留可处理行（不做"运行中却不推进"的悬空状态）
         batchColorState.running = false;
         batchColorState.stopRequested = false;
@@ -3907,7 +3905,7 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
         saveColorBatchState();
         refreshColorResumeRowsFromState();
         updateBatchColorProgress();
-        updateBatchColorStatus(`❌ row${rowNum} 换色失败：${verdict.reason}。该行已放入「继续」列表，可重试或跳过`);
+        updateBatchColorStatus('换色已暂停');
         showToast(`❌ row${rowNum} 换色失败（${verdict.reason}），已暂停并放入「继续」列表`);
         console.log(`🎨 失败入账: row${rowNum} (${source})`);
         return;
@@ -3917,6 +3915,10 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
         clearTimeout(batchColorState.currentTimeoutId);
         batchColorState.currentTimeoutId = null;
     }
+    if ((batchColorState.failedRows || []).includes(rowNum)) {
+        batchColorState.failedRows = batchColorState.failedRows.filter(row => row !== rowNum);
+        batchColorState.failCount = Math.max(0, batchColorState.failCount - 1);
+    }
     batchColorState.successCount++;
     batchColorState.currentIndex++;
     saveColorBatchState();
@@ -3925,6 +3927,11 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
     if (!batchColorState.running || batchColorState.stopRequested) {
         refreshColorResumeRowsFromState();
         updateBatchColorProgress();
+        restoreBatchColorUI();
+        if (batchColorState.currentIndex >= batchColorState.queue.length && !(batchColorState.failedRows || []).length) {
+            finishBatchColor(true);
+            return;
+        }
         showToast(`✅ row${rowNum} 换色完成（任务暂停中，未自动派发下一款）`);
         console.log(`🎨 暂停中记录完成: row${rowNum} (${source})`);
         return;
@@ -3948,8 +3955,8 @@ function judgeColorTaskResult(results, rowNum) {
     if (!downloads) return { ok: false, reason: '缺少下载明细' };
     const got = {};
     for (const d of downloads) {
-        const m = String(d && d.filename || '').match(/_(white|black|gray|navy)\./);
-        if (m && d.ok) got[m[1]] = true;
+        const m = String(d && d.filename || '').match(/^row(\d+)_(white|black|gray|navy)\.(?:png|jpe?g)$/i);
+        if (m && Number(m[1]) === Number(rowNum) && d.ok) got[m[2].toLowerCase()] = true;
     }
     const missing = REQUIRED.filter(c => !got[c]);
     if (missing.length > 0) {
@@ -3959,17 +3966,306 @@ function judgeColorTaskResult(results, rowNum) {
     return { ok: true };
 }
 
-// 扩展通知：Excel 文件已切换 → 暂停换色批次（保留在途结果，不取消、不关页）
+// 切换文件暂停原任务，保留当前款，避免新文件接管。
 function handleColorFileSwitched(req) {
     const to = (req && req.to) || '';
     if (!batchColorState) return;
+    const toKey = to ? String(to).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_') + '__' : '';
+    if (toKey === batchColorState.fileKey) return;
     if (!batchColorState.running && !batchColorState.inFlightRow) return;
-    batchColorState.running = false;
-    batchColorState.pausedReason = `Excel 已切换到「${to || '默认'}」，换色任务已暂停（原文件待办保留，不会由新文件接管）`;
-    saveColorBatchState();
-    updateBatchColorStatus(`⏸ ${batchColorState.pausedReason}${batchColorState.inFlightRow ? `；row${batchColorState.inFlightRow} 仍在执行，完成后会自动计入` : ''}`);
-    showToast(`⏸ 文件已切换，换色任务已暂停（在途款仍会计入原文件）`);
+    finishBatchColor(false);
 }
+
+// ===== 套图（快速五图）：移植参考扩展 pages/doubao/quick-five.js 的组装规则 =====
+// 核心：把 5 个单图步骤合成【一次】请求（一次发送 → 一步生成 5 张），不逐张发送。
+const SUITE_OUTPUTS = [['111', '卖点图'], ['222', '袖口图'], ['333', '面料图'], ['444', '白底图'], ['666', '领口图']];
+
+const SuiteQuickFive = (() => {
+    function normalizePrompt(resolved) {
+        return String(resolved || '')
+            .replace(/\[(?:MODAL_INSTRUCTION|EXECUTE_ONLY)\]/g, '')
+            .replace(/(?:只|仅)(?:能|允许)?生成[一1]张(?:纯)?(?:图片|图像|图)[。.!！]?/g, '本段只描述这一张图片。')
+            .replace(/(?:只|仅)(?:能|允许)?输出[一1]张(?:图片|图像|图)[。.!！]?/g, '本段只描述这一张图片。')
+            .replace(/\b(?:generate|output)\s+only\s+(?:one|1)\s+(?:image|picture)\b[.!]?/gi, 'This section describes one of the five images.')
+            .replace(/生成一张纯图片[。.!！]?/g, '这张图片为纯图片。')
+            .trim();
+    }
+
+    async function build(steps, resolvePrompt) {
+        const prompts = [];
+        const outputKeys = [];
+        const filenames = new Set();
+        let model = null, ratio = null;
+        for (const [key, name] of SUITE_OUTPUTS) {
+            const matches = (steps || []).filter(step => (step.outputKeys || []).some(o =>
+                (typeof o === 'string' ? o : o.key).trim() === key));
+            if (matches.length !== 1) throw new Error(`快速生成缺少或重复配置：${key} ${name}`);
+            const step = matches[0];
+            const output = step.outputKeys.find(o => (typeof o === 'string' ? o : o.key).trim() === key);
+            outputKeys.push(typeof output === 'string' ? { key, postprocess: null } : { ...output, key });
+            if (!step.prompt || !step.prompt.trim()) throw new Error(`${name}提示词为空`);
+            const stepModel = step.model || '5.0';
+            const stepRatio = step.ratio || '1:1';
+            if (model && (model !== stepModel || ratio !== stepRatio)) {
+                throw new Error('五张快速生成要求五个步骤的模型与比例一致');
+            }
+            model = stepModel; ratio = stepRatio;
+            for (const upload of step.uploads || []) {
+                if (upload.type === 'none') continue;
+                if (upload.type !== 'current_file') throw new Error(`${name}包含外部或随机参考图，快速生成仅支持当前套装参考图`);
+                for (const f of upload.filenames) filenames.add(String(f).trim());
+            }
+            const resolved = await resolvePrompt(step);
+            prompts.push(`${prompts.length + 1}、步骤${prompts.length + 1}\n${normalizePrompt(resolved)}`);
+        }
+        if (!filenames.size) throw new Error('快速生成未配置当前套装参考图');
+        return {
+            name: '五张快速生成', expectCount: 5, model, ratio,
+            uploads: [{ type: 'current_file', filenames: [...filenames] }],
+            outputKeys, promptResolved: true, combinedFive: true,
+            prompt: '五张图合并生成：\n请根据提示词来生成五张图片\n\n' + prompts.join('\n\n')
+        };
+    }
+
+    function validateImages(images) {
+        if (!Array.isArray(images) || images.length !== 5 || new Set(images).size !== 5
+            || images.some(u => typeof u !== 'string' || !u.trim())) {
+            throw new Error(`快速生成必须返回五张不同图片，实际 ${images ? images.length : 0} 张`);
+        }
+        return true;
+    }
+
+    return { build, validateImages, normalizePrompt };
+})();
+
+function getSuiteSteps() {
+    try {
+        const raw = localStorage.getItem('polo_suite_steps_v1');
+        return raw ? JSON.parse(raw) : null;
+    } catch (_) { return null; }
+}
+
+// 变量映射：把产品属性按步骤 mappings 渲染进提示词（支持 {{变量}} 占位）
+function renderSuitePrompt(step, product) {
+    let prompt = String(step.prompt || '');
+    const map = Object.assign({ row: product.row }, product);
+    for (const m of (step.mappings || [])) {
+        const name = m && (m.variable || m.name);
+        const field = m && (m.field || m.key);
+        if (!name) continue;
+        const value = field ? (map[field] === undefined || map[field] === null ? '' : String(map[field])) : '';
+        prompt = prompt.split(new RegExp('\\{\\{\\s*' + name + '\\s*\\}\\}', 'g')).join(value);
+    }
+    return prompt;
+}
+
+function updateSuiteStatus(text) {
+    const el = document.getElementById('suiteStatusText');
+    if (el) el.textContent = text || '';
+    const area = document.getElementById('suiteImagesArea');
+    if (area) area.style.display = 'block';
+}
+
+// 点击「生成套图」：一次快速五图请求（不逐张发送）
+async function startSuiteGeneration() {
+    if (!products || products.length === 0) { showToast('⚠️ 请先上传 Excel'); return; }
+    const product = (typeof currentRowIndex === 'number' && products[currentRowIndex]) ? products[currentRowIndex] : products[0];
+    if (!product) { showToast('⚠️ 请先选择产品'); return; }
+    const btn = document.getElementById('suiteGenBtn');
+    try {
+        if (btn) { btn.disabled = true; btn.textContent = '⏳ 组装中...'; }
+        const steps = getSuiteSteps();
+        if (!Array.isArray(steps) || steps.length === 0) throw new Error('未配置自定义步骤（请到「自定义步骤」页保存配置）');
+        const task = await SuiteQuickFive.build(steps, async (step) => renderSuitePrompt(step, product));
+        // 绑定身份：源表文件标识 + 产品行号 + 输出编号（避免跨表/跨产品混图）
+        task.fileKey = currentFileKey();
+        task.rowNum = product.row;
+        task.productId = product.row;
+        updateSuiteStatus(`⏳ 已发起 1 次请求，期望 5 张…`);
+        showToast('🚀 已发起一次快速五图生成请求（合并 5 张）');
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'startSuiteGeneration', task }, (resp) => {
+            if (chrome.runtime.lastError || !resp || !resp.ok) {
+                const err = (chrome.runtime.lastError && chrome.runtime.lastError.message) || (resp && resp.error) || '未知错误';
+                updateSuiteStatus(`❌ 套图请求未被接收：${err}`);
+                showToast(`❌ 套图请求未被接收：${err}`);
+            } else {
+                updateSuiteStatus(`⏳ 套图生成中（1 次请求 / 期望 5 张，任务 ${resp.taskId || '-'}）`);
+            }
+            if (btn) { btn.disabled = false; btn.textContent = '🖼️ 生成套图'; }
+        });
+    } catch (e) {
+        updateSuiteStatus(`❌ ${e.message}`);
+        showToast(`❌ ${e.message}`);
+        if (btn) { btn.disabled = false; btn.textContent = '🖼️ 生成套图'; }
+    }
+}
+
+function startSuiteRegenerate() {
+    showToast('ℹ️ 套图指定重生成：请先从预览中选择要替换的编号');
+}
+
+function renderSuiteSteps() {
+    const box = document.getElementById('stepConfigList');
+    if (!box) return;
+    const steps = getSuiteSteps();
+    if (!Array.isArray(steps) || steps.length === 0) {
+        box.innerHTML = '<div style="font-size:13px;color:rgba(255,255,255,0.5);">尚未配置。点击「↺ 恢复默认」生成 5 步默认配置后编辑保存。</div>';
+        return;
+    }
+    box.innerHTML = steps.map((s, i) => {
+        const key = (s.outputKeys && s.outputKeys[0]) ? (s.outputKeys[0].key || s.outputKeys[0]) : '';
+        return `
+        <div style="background: rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:12px;">
+            <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
+                <span style="font-size:12px;color:rgba(255,255,255,0.6);">步骤 ${i + 1}</span>
+                <input value="${escapeHtml(s.name || '')}" data-i="${i}" data-k="name" class="suite-input" placeholder="名称" style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">
+                <input value="${escapeHtml(key)}" data-i="${i}" data-k="outputKey" placeholder="编号" style="width:70px;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">
+                <input value="${escapeHtml(s.model || '5.0')}" data-i="${i}" data-k="model" placeholder="模型" style="width:64px;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">
+                <input value="${escapeHtml(s.ratio || '1:1')}" data-i="${i}" data-k="ratio" placeholder="比例" style="width:64px;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">
+            </div>
+            <textarea data-i="${i}" data-k="prompt" rows="3" class="suite-input" placeholder="提示词（可用 {{字段}} 变量）" style="width:100%;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">${escapeHtml(s.prompt || '')}</textarea>
+        </div>`;
+    }).join('');
+}
+
+function resetSuiteSteps() {
+    const def = SUITE_OUTPUTS.map(([key, name]) => ({
+        name, expectCount: 1, outputKeys: [{ key, postprocess: null }],
+        prompt: `【${name}】基于当前套装参考图生成这一张图片（${key}）。`,
+        model: '5.0', ratio: '1:1',
+        uploads: [{ type: 'current_file', filenames: ['main.jpg', 'white.png', 'black.png', 'gray.png', 'navy.png'] }],
+        mappings: []
+    }));
+    localStorage.setItem('polo_suite_steps_v1', JSON.stringify(def));
+    renderSuiteSteps();
+    showToast('↺ 已生成 5 步默认配置（请按需修改后保存）');
+}
+
+function saveSuiteSteps() {
+    const box = document.getElementById('stepConfigList');
+    if (!box) return;
+    const steps = getSuiteSteps() || SUITE_OUTPUTS.map(([key, name]) => ({ name, outputKeys: [{ key }], prompt: '', model: '5.0', ratio: '1:1', uploads: [], mappings: [] }));
+    box.querySelectorAll('.suite-input').forEach(el => {
+        const i = Number(el.dataset.i); const k = el.dataset.k;
+        if (!steps[i]) return;
+        if (k === 'outputKey') steps[i].outputKeys = [{ key: String(el.value).trim(), postprocess: null }];
+        else steps[i][k] = el.value;
+    });
+    localStorage.setItem('polo_suite_steps_v1', JSON.stringify(steps));
+    const st = document.getElementById('stepConfigStatus');
+    if (st) st.textContent = '✅ 已保存（5 步配置将在点击「生成套图」时合并为一次五图请求）';
+    showToast('💾 自定义步骤已保存');
+}
+
+// ===== 路径配置 =====
+const SUITE_DIRS = [
+    { id: 'suiteOut', label: '套图输出目录', required: true, desc: '生成成功的 5 张套图落盘位置' },
+    { id: 'modelRef', label: '模特参考图目录', required: false, desc: '提供模特/姿势参考图' },
+    { id: 'assets', label: '素材目录', required: false, desc: '额外素材（面料、细节等）' },
+    { id: 'scripts', label: '后处理脚本目录', required: false, desc: '自定义 JS 后处理脚本及资源' }
+];
+
+function getSuiteDirHandles() {
+    try { return JSON.parse(localStorage.getItem('polo_suite_dirs_v1') || '{}'); } catch (_) { return {}; }
+}
+
+function renderPathConfig() {
+    const box = document.getElementById('pathConfigList');
+    if (!box) return;
+    const handles = getSuiteDirHandles();
+    box.innerHTML = SUITE_DIRS.map(d => `
+        <div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px;">
+            <div style="flex:1;">
+                <div style="font-size:13px;color:rgba(255,255,255,0.85);">${d.label}${d.required ? ' <span style="color:#ef4444;font-size:11px;">必需</span>' : ''}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:2px;">${d.desc}</div>
+                <div id="dir-${d.id}" style="font-size:11px;color:rgba(255,255,255,0.55);margin-top:4px;">${handles[d.id] ? handles[d.id].name : '未授权'}</div>
+            </div>
+            <button class="batch-color-btn" style="padding:6px 14px;font-size:12px;" onclick="pickSuiteDir('${d.id}')">📂 选择目录</button>
+        </div>`).join('');
+    checkPathPermissions();
+}
+
+// 真实目录授权：只存路径字符串不算获得读写能力，必须持有并复查 FileSystemDirectoryHandle
+async function pickSuiteDir(dirId) {
+    try {
+        if (!window.showDirectoryPicker) { showToast('⚠️ 当前浏览器不支持目录授权（需 Chrome）'); return; }
+        const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        await persistSuiteDirHandle(dirId, handle);
+        showToast(`✅ 已授权：${handle.name}`);
+        renderPathConfig();
+    } catch (e) {
+        if (e && e.name === 'AbortError') return;
+        showToast('❌ 目录授权失败：' + (e && e.message));
+    }
+}
+
+const SUITE_DIR_DB = 'polo_suite_dir_handles';
+
+function openSuiteDirDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(SUITE_DIR_DB, 1);
+        req.onupgradeneeded = () => { req.result.createObjectStore('handles'); };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+async function persistSuiteDirHandle(dirId, handle) {
+    const db = await openSuiteDirDB();
+    await new Promise((resolve, reject) => {
+        const tx = db.transaction('handles', 'readwrite');
+        tx.objectStore('handles').put(handle, dirId);
+        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    const meta = getSuiteDirHandles();
+    meta[dirId] = { name: handle.name, at: Date.now() };
+    localStorage.setItem('polo_suite_dirs_v1', JSON.stringify(meta));
+}
+
+async function loadSuiteDirHandle(dirId) {
+    try {
+        const db = await openSuiteDirDB();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction('handles', 'readonly');
+            const r = tx.objectStore('handles').get(dirId);
+            r.onsuccess = () => resolve(r.result || null);
+            r.onerror = () => reject(r.error);
+        });
+    } catch (_) { return null; }
+}
+
+async function checkPathPermissions() {
+    const meta = getSuiteDirHandles();
+    const problems = [];
+    for (const d of SUITE_DIRS) {
+        const el = document.getElementById('dir-' + d.id);
+        const rec = meta[d.id];
+        if (!rec) { if (el) el.textContent = '未授权'; if (d.required) problems.push(`${d.label}：未授权`); continue; }
+        const handle = await loadSuiteDirHandle(d.id);
+        if (!handle) { if (el) el.textContent = `${rec.name}｜授权丢失，需重新选择`; problems.push(`${d.label}：授权丢失`); continue; }
+        const perm = await handle.queryPermission({ mode: 'readwrite' });
+        if (perm !== 'granted') {
+            if (el) el.textContent = `${rec.name}｜权限 ${perm}，需重新授权`;
+            problems.push(`${d.label}：权限不足（${perm}）`);
+        } else if (el) el.textContent = `${rec.name}｜✅ 读写已授权`;
+    }
+    const st = document.getElementById('pathConfigStatus');
+    if (st) st.textContent = problems.length ? `⚠️ 存在问题：${problems.join('；')}` : '✅ 所有必需目录已授权，可直接生成';
+    return problems;
+}
+
+function escapeHtml(s) {
+    return String(s === undefined || s === null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// 切到「路径配置 / 自定义步骤」时渲染面板
+document.addEventListener('click', (e) => {
+    const tab = e.target && e.target.closest && e.target.closest('.tab');
+    if (!tab) return;
+    if (tab.dataset.tab === 'audit') renderPathConfig();
+    if (tab.dataset.tab === 'steps') renderSuiteSteps();
+});
 
 const AUDIT_DATA = {
     blacklist: [],
@@ -4481,6 +4777,9 @@ function startBatchColorChange() {
 
 // 批量换色统一启动入口：一键换色与「指定重生成」共用
 function beginColorBatch(queueList, label) {
+    if (batchColorState && (batchColorState.inFlightRow || batchColorState.pendingAckRow)) {
+        showToast('当前款尚未结束，未覆盖原换色任务'); return;
+    }
     batchColorState = {
         running: true,
         stopRequested: false,
@@ -4499,17 +4798,16 @@ function beginColorBatch(queueList, label) {
         lastMemMB: 0,
         // 任务标识：完成消息据此拒绝旧任务/重复消息
         batchId: 'cb_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
-        // 在途行：已派发、仍在豆包生成中的行。与「是否允许派发后续款」解耦——
-        // 暂停只阻止派发，不丢在途行的真实完成。
+        // 当前执行行；暂停清除执行等待并保留该行，继续时重新执行。
+        // 暂停保留当前行，继续时生成新的执行身份并重做当前行。
         inFlightRow: null,
         inFlightSince: 0,
         pendingAckRow: null,    // 已委派但未确认接收的行（阻挡后续派发）
         fileKey: currentFileKey(),   // 任务创建时绑定文件：切文件后不被接管
+        fileFolder: loadedFileName || '默认',
         timedOutRows: [],       // 已判超时、等待人工确认的行（迟到完成只提示，不重复入账）
         pausedReason: ''
     };
-    // 新任务开始：使旧的执行状态查询失效（门槛必须绑当前执行）
-    lastExecStatus = null;
     saveColorBatchState();
 
     // 新任务启动即清空「继续」待办（旧待办已被本次任务取代）
@@ -4518,56 +4816,6 @@ function beginColorBatch(queueList, label) {
     showBatchColorProgress();
     startBatchColorPolling();
     processNextBatchColor();
-}
-
-// ===== 内存水位保护：整机可用内存低于阈值时自动暂停 =====
-const MEM_PAUSE_KEY = 'polo_mem_pause_mb';
-const MEM_PAUSE_DEFAULT = 1500;
-
-function getMemPauseMB() {
-    const v = parseInt(localStorage.getItem(MEM_PAUSE_KEY), 10);
-    return Number.isInteger(v) && v >= 200 ? v : MEM_PAUSE_DEFAULT;
-}
-
-function setMemPauseMB(v) {
-    const n = parseInt(v, 10);
-    if (!Number.isInteger(n) || n < 200) return;
-    localStorage.setItem(MEM_PAUSE_KEY, String(n));
-    syncMemPauseMBToExtension(n);
-}
-
-// 同步阈值到扩展（上品队列的闸门读的是扩展 chrome.storage.local，与页面 localStorage 是两套）
-function syncMemPauseMBToExtension(v) {
-    const n = Number.isInteger(v) ? v : getMemPauseMB();
-    try {
-        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'setMemPauseMB', value: n }, () => {
-            void chrome.runtime.lastError;
-        });
-    } catch (_) {}
-}
-
-// 查询整机可用内存（走扩展 system.memory）；失败/超时返回 null，调用方放行不阻塞
-// 资源保护失效只提示一次（否则静默失效：用户会以为保护在用）
-let memQueryWarned = false;
-// 注：原先只查物理内存的 querySystemMemoryMB() 已移除，
-// 统一改走 queryMemoryGate()（与发品侧共用同一套判断：物理内存 + 系统提交额度 + 监测失败）
-
-// 阈值框绑定：元素在静态 HTML 里（#memPauseBox），页面级只绑一次，不随详情面板重渲染
-function initMemPauseBox() {
-    const memInput = document.getElementById('memPauseInput');
-    if (!memInput || memInput.dataset.bound === '1') return;
-    memInput.dataset.bound = '1';
-    memInput.value = String(getMemPauseMB());
-    memInput.addEventListener('change', () => {
-        setMemPauseMB(memInput.value);
-        memInput.value = String(getMemPauseMB());
-        showToast(`✅ 内存暂停阈值已设为 ${getMemPauseMB()} MB`);
-    });
-}
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initMemPauseBox);
-} else {
-    initMemPauseBox();
 }
 
 // 生成「行N · 序号X · 标题」预览行（确认框用）
@@ -4601,7 +4849,7 @@ function setColorResumeRows(rows) {
     syncColorResumeButton();
 }
 
-// ===== 待确认的超时行（跨刷新保留）：阻塞普通「继续」，直到明确处理 =====
+// 兼容旧版本超时缓存；继续时清除，不作为操作门槛。
 const COLOR_TIMEOUT_KEY = 'polo_color_timeout_rows';
 
 function getColorTimeoutRows() {
@@ -4619,121 +4867,14 @@ function setColorTimeoutRows(rows) {
 }
 
 function syncBatchColorTimeoutActions() {
-    const rows = getColorTimeoutRows();
-    const show = rows.length > 0;
-    for (const id of ['colorCheckExecBtn', 'colorTimeoutDoneBtn', 'colorTimeoutRetryBtn', 'colorTimeoutSkipBtn']) {
+    for (const id of ['colorCheckExecBtn', 'colorTimeoutDoneBtn', 'colorTimeoutRetryBtn', 'colorTimeoutSkipBtn', 'colorTimeoutHint']) {
         const el = document.getElementById(id);
-        if (el) el.style.display = show ? 'inline-block' : 'none';
-    }
-    const hint = document.getElementById('colorTimeoutHint');
-    if (hint) {
-        hint.style.display = show ? 'block' : 'none';
-        if (show) hint.textContent = `⏱ 待确认超时行：${rows.join(' ')} —— 先「🔍 查询执行状态」，再选择处理方式；未处理前不能「继续」`;
+        if (el) el.style.display = 'none';
     }
 }
 
-// 最近一次查询到的执行状态（只有 known=true 才算"已知"；未知一律不判空闲）
-let lastExecStatus = null;
-const EXEC_STATUS_MAX_AGE_MS = 60000;
 
-// 明确动作①：查询豆包执行状态（不做任何取消或关闭）
-function checkColorExecStatus() {
-    showToast('🔍 正在查询豆包执行状态...');
-    try {
-        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorExecStatus' }, (r) => {
-            if (chrome.runtime.lastError || !r || !r.ok) {
-                const reason = (chrome.runtime.lastError && chrome.runtime.lastError.message) || (r && r.error) || '查询失败';
-                lastExecStatus = { at: Date.now(), known: false, busy: null, reason };
-                const msg = `❓ 执行状态【未知】：${reason}。保持阻挡（未知不等同于空闲），请勿直接处理`;
-                updateBatchColorStatus(msg);
-                showToast(msg);
-                return;
-            }
-            // 只有引擎明确回传布尔 isProcessing 才算已知
-            const known = r.engineKnown === true && !!(r.engine && typeof r.engine.isProcessing === 'boolean');
-            const busy = known ? !!r.engine.isProcessing : null;
-            lastExecStatus = {
-                at: Date.now(), known, busy,
-                exec: r.exec || null,
-                reason: known ? '' : ((r.engine && r.engine.error) || '无引擎响应')
-            };
-            const who = r.exec ? `row${r.exec.rowNum}${r.exec.batchId ? '' : '（单款）'}（${r.exec.state || 'pending'}）` : '无执行记录';
-            let msg;
-            if (!known) msg = `❓ 执行状态【未知】（${lastExecStatus.reason}）：无法确认豆包是否仍在执行 → 保持阻挡，未知不判空闲`;
-            else if (busy) msg = `⏳ 豆包【仍在执行】；执行记录 ${who}。请勿重发该款，也不要派发下一款`;
-            else msg = `✅ 豆包【已空闲】；执行记录 ${who}。现在可以选择「✅ 已生成 / ↻ 重试 / ⏭ 跳过」`;
-            updateBatchColorStatus(msg);
-            showToast(msg);
-        });
-    } catch (e) {
-        lastExecStatus = { at: Date.now(), known: false, busy: null, reason: e.message };
-        showToast('❓ 查询异常：执行状态未知，处理按钮保持锁定');
-    }
-}
 
-// 明确动作②：处理待确认的超时行（done=已生成 / retry=重试 / skip=跳过）
-// 门槛：必须有"足够新且已知且不忙"的执行状态；未知/仍忙/未查询一律阻挡（可强制，但需明确确认）
-function resolveTimeoutRow(action) {
-    const timeoutRows = getColorTimeoutRows();
-    const row = timeoutRows[0];
-    if (row === undefined) { showToast('ℹ️ 没有待确认的超时行'); return; }
-
-    const st = lastExecStatus;
-    const fresh = !!st && (Date.now() - st.at) <= EXEC_STATUS_MAX_AGE_MS;
-    const gateOk = !!(fresh && st.known === true && st.busy === false);
-    if (!gateOk) {
-        const why = !st ? '尚未查询执行状态'
-            : !fresh ? '执行状态已过期（超过 60 秒）'
-            : st.known !== true ? `执行状态未知（${st.reason || '无引擎响应'}）`
-            : '豆包仍在执行中';
-        const label = action === 'done' ? '已生成' : (action === 'retry' ? '重试' : '跳过');
-        const force = confirm(
-            `⚠️ ${why}，无法确认豆包是否已结束。\n\n` +
-            `强行按「${label}」处理 row${row} 可能导致：\n` +
-            `· 该款仍在生成时被重复派发（重复生成 / 覆盖）\n` +
-            `· 或已生成的图未被计入\n\n` +
-            `确定要强行处理 row${row} 吗？`
-        );
-        if (!force) { showToast('已取消：请先点「🔍 查询执行状态」确认状态后再处理'); return; }
-    }
-
-    const rest = timeoutRows.slice(1);
-    // 持久化剩余列表必须同步更新：刷新后 batchColorState 可能为空，不能只改内存
-    const resumeRows = getColorResumeRows();
-
-    if (action === 'done') {
-        setColorTimeoutRows(rest);
-        setColorResumeRows(resumeRows.filter(r => r !== row));   // 已生成 → 从剩余列表移除，不再重发
-        if (batchColorState) {
-            batchColorState.successCount++;
-            // 该行此前按超时计过失败：转成功时把失败数减回来，避免同一款同时计成功和失败
-            if (batchColorState.failedRows && batchColorState.failedRows.indexOf(row) >= 0
-                && batchColorState.failCount > 0) {
-                batchColorState.failCount--;
-            }
-            batchColorState.failedRows = (batchColorState.failedRows || []).filter(r => r !== row);
-            saveColorBatchState();
-            updateBatchColorProgress();
-        }
-        showToast(`✅ row${row} 已按「已生成」处理（计入成功，不再重发）`);
-    } else if (action === 'retry') {
-        setColorTimeoutRows(rest);
-        // 重试 → 必须保留在剩余列表里
-        setColorResumeRows(resumeRows.indexOf(row) >= 0 ? resumeRows : [...resumeRows, row]);
-        showToast(`↻ row${row} 已标记为「重试」：点「继续」时会重新派发`);
-    } else if (action === 'skip') {
-        setColorTimeoutRows(rest);
-        setColorResumeRows(resumeRows.filter(r => r !== row));   // 跳过 → 从剩余列表移除
-        if (batchColorState) {
-            batchColorState.failedRows = (batchColorState.failedRows || []).filter(r => r !== row);
-        }
-        showToast(`⏭ row${row} 已标记为「跳过」`);
-    }
-    if (getColorTimeoutRows().length === 0 && batchColorState) {
-        batchColorState.pausedReason = '';
-        updateBatchColorStatus('✅ 超时行已全部处理完毕，可以点「继续」了');
-    }
-}
 
 // 「停止 / 继续」一体按钮：运行中显示"停止"，暂停且有剩余时显示"继续"
 function setBatchColorToggle(mode) {
@@ -4744,39 +4885,43 @@ function setBatchColorToggle(mode) {
         btn.textContent = n > 0 ? `▶ 继续（剩 ${n}）` : '▶ 继续';
         btn.disabled = n === 0;
     } else {
-        btn.textContent = '⏹ 停止';
+        btn.textContent = '⏸ 暂停';
         btn.disabled = false;
     }
 }
 
-// 面板 + 按钮统一刷新（运行中 / 待继续 / 空闲 三态）；注意：不覆盖状态文案
+// 重绘后从实际任务恢复文案、按钮和异常处理入口，不沿用模板默认状态。
 function restoreBatchColorUI() {
     const panel = batchColorProgressEl();
-    const running = !!(batchColorState && batchColorState.running);
     const left = getColorResumeRows().length;
-
-    if (running) {
-        if (panel) panel.style.display = 'block';
-        setBatchColorToggle('stop');
-        return;
-    }
-    if (left > 0) {
-        if (panel) panel.style.display = 'block';
-        setBatchColorToggle('resume');
+    const hasTask = !!batchColorState;
+    const pending = getColorTimeoutRows().length > 0;
+    if (panel) panel.style.display = hasTask || left > 0 || pending ? 'block' : 'none';
+    updateBatchColorProgress();
+    if (!hasTask && left > 0) updateBatchColorStatus(`换色已暂停 · 剩 ${left} 款，等待你继续`);
+    if (!hasTask && left > 0) {
         updateBatchColorFill(0);
-        const counter = batchColorCounterEl();
-        if (counter) counter.textContent = `剩 ${left}`;
-        const cur = batchColorCurrentEl();
-        if (cur) cur.textContent = '已暂停';
-        return;
+        const counter = batchColorCounterEl(); if (counter) counter.textContent = `剩 ${left} 款`;
+        const cur = batchColorCurrentEl(); if (cur) cur.textContent = '已暂停';
     }
-    if (panel) panel.style.display = 'none';
-    setBatchColorToggle('stop');
+    if (!hasTask && pending) updateBatchColorStatus('换色已暂停');
+    const running = !!(batchColorState && batchColorState.running);
+    setBatchColorToggle(running ? 'stop' : 'resume');
+    const toggle = document.getElementById('batchColorToggleBtn');
+    if (toggle) {
+        const blocked = !running && !!(batchColorState && colorBatchFileKey() !== currentFileKey());
+        toggle.disabled = blocked || (!running && left === 0 && !(batchColorState && (batchColorState.inFlightRow || batchColorState.pendingAckRow)));
+        if (!running && left === 0 && !(batchColorState && (batchColorState.inFlightRow || batchColorState.pendingAckRow))) toggle.textContent = blocked ? '继续' : '已完成';
+    }
+    const btn = document.getElementById('batchColorBtn');
+    if (btn) { btn.disabled = running || !!(batchColorState && batchColorState.inFlightRow); btn.textContent = running ? '⏳ 换色中...' : '🚀 一键换色'; }
+    const rowsBtn = document.getElementById('colorRowsBtn');
+    if (rowsBtn) rowsBtn.disabled = running || !!(batchColorState && batchColorState.inFlightRow);
+    syncBatchColorTimeoutActions();
 }
 
 // 兼容旧调用点：非运行态才刷新
 function syncColorResumeButton() {
-    if (batchColorState && batchColorState.running) return;
     restoreBatchColorUI();
 }
 
@@ -4791,20 +4936,11 @@ function toggleBatchColorRun() {
 
 // 从上次停止 / 失败处继续
 function resumeColorBatch() {
+    if (batchColorState && colorBatchFileKey() !== currentFileKey()) {
+        showToast('请先切回任务所属 Excel，再继续换色'); return;
+    }
     if (batchColorState && batchColorState.running) {
         showToast('⚠️ 换色任务正在进行中');
-        return;
-    }
-    // 在途行仍在豆包生成：不允许「继续」重复提交它，等它结束后再继续
-    if (batchColorState && batchColorState.inFlightRow) {
-        showToast(`⚠️ row${batchColorState.inFlightRow} 仍在豆包生成中，请等它结束后再「继续」`);
-        return;
-    }
-    // 有待确认的超时行：禁止普通「继续」，必须先做明确处理（查询执行状态 → 已生成/重试/跳过）
-    const pendingTimeout = getColorTimeoutRows();
-    if (pendingTimeout.length > 0) {
-        syncBatchColorTimeoutActions();
-        showToast(`⚠️ 有 ${pendingTimeout.length} 行超时待确认（${pendingTimeout.join(' ')}）：请先「🔍 查询执行状态」，再选择「✅ 已生成 / ↻ 重试 / ⏭ 跳过」`);
         return;
     }
     if (!extensionInstalled) {
@@ -4816,6 +4952,32 @@ function resumeColorBatch() {
         return;
     }
 
+    if (batchColorState) {
+        const state = batchColorState;
+        // 兼容旧缓存中的在途/超时记录：当前款重新执行，不等待旧引擎。
+        const pausedRow = state.inFlightRow || state.pendingAckRow || getColorTimeoutRows()[0] || (state.failedRows || [])[0];
+        const idx = state.queue.findIndex(p => p.row === pausedRow);
+        if (idx >= 0) state.currentIndex = idx;
+        state.inFlightRow = null; state.pendingAckRow = null; state.inFlightSince = 0;
+        state.executionId = null;
+        if (state.currentTimeoutId) clearTimeout(state.currentTimeoutId);
+        stopBatchColorPolling();
+        setColorTimeoutRows([]);
+        state.timedOutRows = [];
+        state.batchId = 'bc_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+        state.pausedReason = '';
+        state.stopRequested = false;
+        state.running = true;
+        // 先让旧执行失效，再重新派发；不弹额外确认框。
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'pauseColorDispatch' }, response => {
+            if (batchColorState !== state || state.stopRequested) return;
+            if (chrome.runtime.lastError || !response || !response.ok) { state.running = false; restoreBatchColorUI(); showToast('无法连接扩展，请重新加载扩展'); return; }
+            state.running = true;
+            saveColorBatchState(); showBatchColorProgress();
+            startBatchColorPolling(); sendNextBatchColor();
+        });
+        return;
+    }
     const rows = getColorResumeRows();
     if (rows.length === 0) {
         showToast('ℹ️ 没有可继续的任务');
@@ -4833,14 +4995,6 @@ function resumeColorBatch() {
         showToast(`⚠️ 剩余行号都不在当前 Excel：${missing.slice(0, 8).join(' ')}`);
         return;
     }
-
-    const missMsg = missing.length
-        ? `\n\n⚠️ 不在当前 Excel 中，将跳过 ${missing.length} 个：\n${missing.slice(0, 30).join(' ')}${missing.length > 30 ? ' ...' : ''}`
-        : '';
-    const ok = confirm(
-        `接着上次未完成的部分继续，共 ${queue.length} 款：\n\n${buildRowPreviewLines(queue).join('\n')}${missMsg}\n\n确定开始？`
-    );
-    if (!ok) return;
 
     beginColorBatch(queue, '继续');
 }
@@ -4922,7 +5076,7 @@ function startColorChangeForRows() {
     beginColorBatch(queue, '指定重生成');
 }
 
-// 轮询兜底：SW 休眠导致 port/tabs.sendMessage 失效时，从 storage 读取完成事件推进
+// 轮询兜底：网页通过消息查询扩展存储；不依赖网页中不存在的 chrome.storage API
 function startBatchColorPolling() {
     if (!batchColorState || batchColorState.pollTimer) return;
     // 有在途行时即使已暂停也继续轮询：直接通知可能因断连丢失，需靠持久化完成事件补收
@@ -4930,10 +5084,15 @@ function startBatchColorPolling() {
     batchColorState.pollTimer = setInterval(() => {
         if (!pollActive()) return;
         try {
-            chrome.storage.local.get(['color_task_complete_event'], (result) => {
-                if (chrome.runtime.lastError || !pollActive()) return;
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorTaskEvents' }, (response) => {
+                if (chrome.runtime.lastError || !response || !response.ok || !pollActive()) return;
+                const result = response.events || {};
+                if (result.color_task_stopped_event) handleColorTaskStopped(result.color_task_stopped_event);
+                if (!pollActive()) return;
+                if (result.color_task_accepted_event) handleColorTaskAccepted(result.color_task_accepted_event);
                 const evt = result['color_task_complete_event'];
                 if (!evt || !evt.rowNum || !evt.timestamp) return;
+                if (batchColorState.executionId && evt.executionId !== batchColorState.executionId) return;
                 // 只处理比上次处理过的新事件
                 if (evt.timestamp <= batchColorState.lastProcessedTimestamp) return;
                 // 只认当前在途行（暂停中同样成立）
@@ -4941,21 +5100,6 @@ function startBatchColorPolling() {
                     console.log(`🎨 轮询兜底捕获完成事件: row${evt.rowNum}`);
                     batchColorState.lastProcessedTimestamp = evt.timestamp;
                     advanceBatchColorForRow(evt.rowNum, 'poll', evt.batchId, evt.results);
-                }
-            });
-            // 运行期间持续资源检查（与发下一款前的判断完全一致）
-            queryMemoryGate().then((gate) => {
-                if (!batchColorState || !batchColorState.running) return;
-                if (gate && typeof gate.physAvailableMB === 'number') {
-                    batchColorState.lastMemMB = gate.physAvailableMB;
-                    updateBatchColorProgress();
-                }
-                if (!gate) {
-                    finishBatchColor(false, '资源监测不可用（扩展或本地内存服务未就绪），已暂停');
-                    return;
-                }
-                if (!gate.allowed) {
-                    finishBatchColor(false, gate.reasonText || '资源不足');
                 }
             });
         } catch (e) {
@@ -4971,35 +5115,6 @@ function stopBatchColorPolling() {
     }
 }
 
-// 资源闸门查询：与发品侧共用扩展的【同一套】判断
-// （物理可用 < 用户阈值 ｜ 提交剩余 < 4096MiB ｜ 提交已用 ≥ 90% ｜ 监测失败/超时/数据不可信）
-function queryMemoryGate(forceRefresh) {
-    return new Promise((resolve) => {
-        let done = false;
-        const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 4000);
-        try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getMemoryGate', forceRefresh: forceRefresh === true }, (resp) => {
-                if (done) return;
-                done = true;
-                clearTimeout(timer);
-                if (chrome.runtime.lastError || !resp || !resp.ok) {
-                    const why = chrome.runtime.lastError?.message || resp?.error || '未知';
-                    console.warn('[memGate] 查询失败:', why);
-                    if (!memQueryWarned) {
-                        memQueryWarned = true;
-                        showToast(`⚠️ 换色资源保护未生效：${why}。请检查扩展是否重载、本地内存服务是否已启动`);
-                    }
-                    resolve(null);
-                    return;
-                }
-                resolve(resp);
-            });
-        } catch (e) {
-            if (!done) { done = true; clearTimeout(timer); resolve(null); }
-        }
-    });
-}
-
 function processNextBatchColor() {
     if (!batchColorState || !batchColorState.running) return;
     if (batchColorState.stopRequested) {
@@ -5010,26 +5125,12 @@ function processNextBatchColor() {
         finishBatchColor(true);
         return;
     }
-
-    // 资源闸门：不足或监测不可用即暂停，剩余行进「继续」待办（不自动恢复）
-    queryMemoryGate(true).then((gate) => {
-        if (!batchColorState || !batchColorState.running) return;
-        if (gate && typeof gate.physAvailableMB === 'number') batchColorState.lastMemMB = gate.physAvailableMB;
-        if (!gate) {
-            finishBatchColor(false, '资源监测不可用（扩展或本地内存服务未就绪），已暂停');
-            return;
-        }
-        if (!gate.allowed) {
-            console.warn('⚠️ 换色资源闸门暂停:', gate.reasonText);
-            finishBatchColor(false, gate.reasonText || '资源不足');
-            return;
-        }
-        sendNextBatchColor();
-    });
+    sendNextBatchColor();
 }
 
 function sendNextBatchColor() {
     if (!batchColorState || !batchColorState.running) return;
+    if (batchColorState.inFlightRow) return;
     // 上一款委派未确认接收：不推进、不当作已派发，等确认或用户明确处理
     if (batchColorState.pendingAckRow) {
         showToast(`⚠️ row${batchColorState.pendingAckRow} 委派未确认接收，已暂停派发下一款`);
@@ -5048,51 +5149,38 @@ function sendNextBatchColor() {
     batchColorState.inFlightSince = Date.now();
     updateBatchColorProgress();
 
+    if (colorBatchFileKey() !== currentFileKey()) { finishBatchColor(false, '请切回任务所属 Excel 后继续'); return; }
     const imagePath = getMainImagePath(product.row);
-    // 新执行开始：使旧的执行状态查询失效（门槛必须绑当前执行）
-    lastExecStatus = null;
+    batchColorState.executionId = 'ce_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    const dispatchState = batchColorState, dispatchId = batchColorState.executionId;
+    saveColorBatchState();
     chrome.runtime.sendMessage(EXTENSION_ID, {
         action: 'startColorChange',
         task: {
             imagePath, prompt: COLOR_PROMPT, rowNum: product.row,
             batchId: batchColorState.batchId,
-            fileKey: currentFileKey(),
-            fileFolder: loadedFileName || '默认'   // 执行期内绑定，异步回调不再读当前文件
+            executionId: dispatchId,
+            fileKey: colorBatchFileKey(),
+            fileFolder: batchColorState.fileFolder || loadedFileName || '默认'   // 执行期内绑定，异步回调不再读当前文件
         }
     }, (response) => {
+        if (batchColorState !== dispatchState || batchColorState.executionId !== dispatchId) return;
         if (chrome.runtime.lastError || !response || !response.ok) {
-            const busy = !!(response && response.busy);
-            const pending = !!(response && response.pending);
-            console.warn(`row${product.row} 启动未确认:`, chrome.runtime.lastError?.message || response?.error);
-            // 未确认接收：不推进、不当作已派发；该行保留，阻挡后续款
-            batchColorState.inFlightRow = null;
-            batchColorState.inFlightSince = 0;
-            batchColorState.running = false;
-            batchColorState.pendingAckRow = product.row;
-            batchColorState.pausedReason = busy
-                ? `row${product.row} 未被接收（豆包仍在执行上一个任务）`
-                : `row${product.row} 委派未确认接收（${pending ? '通信失败/待页面就绪' : '启动失败'}）`;
-            saveColorBatchState();
-            refreshColorResumeRowsFromState();
-            const msg = busy
-                ? `⏸ row${product.row} 未被豆包接收（仍在执行上一个任务）。已暂停派发，请先「🔍 查询执行状态」再处理`
-                : `⏸ row${product.row} 委派未确认接收（${pending ? '通信失败/待页面就绪' : '启动失败'}）。已暂停派发并保留该行，请先「🔍 查询执行状态」再处理`;
-            updateBatchColorStatus(msg);
-            showToast(msg);
+            if (response && response.pending) {
+                batchColorState.pendingAckRow = product.row;
+                saveColorBatchState(); startBatchColorPolling(); setupBatchColorTimeout(product); return;
+            }
+            finishBatchColor(false);
+            showToast('换色启动失败，已暂停，点击继续重试');
             return;
         }
-        // 新页路径：后台只记为 pending，页面不得当作已接收去启动执行超时
+        // 待接收仍是当前在途行：接收事件与完成事件都能落地，超时有明确恢复路径。
         if (response.pending || response.unconfirmed) {
-            batchColorState.inFlightRow = null;
-            batchColorState.inFlightSince = 0;
             batchColorState.pendingAckRow = product.row;
-            batchColorState.running = false;
-            batchColorState.pausedReason = `row${product.row} 已提交但未确认接收（等待豆包页面就绪）`;
             saveColorBatchState();
-            refreshColorResumeRowsFromState();
-            const msg = `⏸ row${product.row} 已提交但未确认接收（等待豆包页面就绪）。已暂停派发并保留该行，请先「🔍 查询执行状态」再处理`;
-            updateBatchColorStatus(msg);
-            showToast(msg);
+            startBatchColorPolling();
+            setupBatchColorTimeout(product);
+            updateBatchColorStatus(`等待 row${product.row} 被豆包接收`);
             return;
         }
         batchColorState.pendingAckRow = null;
@@ -5103,31 +5191,13 @@ function sendNextBatchColor() {
 }
 
 function setupBatchColorTimeout(product) {
-    if (batchColorState.currentTimeoutId) {
-        clearTimeout(batchColorState.currentTimeoutId);
-    }
-    batchColorState.currentTimeoutId = setTimeout(() => {
-        if (!batchColorState) return;
-        // 只有当前在途行才是本定时器的对象
-        if (batchColorState.inFlightRow !== product.row) return;
-        console.warn(`row${product.row} 换色超时${batchColorState.running ? '' : '（任务处于暂停）'}`);
-        // 超时一律进入「待确认暂停」：无法确认豆包是否仍在执行 → 不自动派发、不自动重发
-        batchColorState.failCount++;
-        batchColorState.failedRows.push(product.row);
-        batchColorState.inFlightRow = null;
-        batchColorState.inFlightSince = 0;
-        batchColorState.currentIndex++;
-        batchColorState.running = false;
-        batchColorState.stopRequested = false;
-        batchColorState.pausedReason = `row${product.row} 换色超时（待确认）`;
-        const prev = getColorTimeoutRows();
-        if (prev.indexOf(product.row) < 0) setColorTimeoutRows([...prev, product.row]);
-        refreshColorResumeRowsFromState();
-        updateBatchColorProgress();
-        const msg = `⏱ row${product.row} 换色超时：豆包是否已结束【未确认】。已暂停后续派发；请先点「🔍 查询执行状态」，再用「✅ 已生成 / ↻ 重试 / ⏭ 跳过」明确处理`;
-        updateBatchColorStatus(msg);
-        showToast(msg);
-        syncBatchColorTimeoutActions();
+    if (!batchColorState) return;
+    if (batchColorState.currentTimeoutId) clearTimeout(batchColorState.currentTimeoutId);
+    const state = batchColorState, executionId = state.executionId;
+    state.currentTimeoutId = setTimeout(() => {
+        if (batchColorState !== state || state.executionId !== executionId || state.inFlightRow !== product.row) return;
+        finishBatchColor(false);
+        showToast('换色超时，已暂停');
     }, BATCH_COLOR_COMPLETE_TIMEOUT);
 }
 
@@ -5150,9 +5220,9 @@ function checkAllColorsReady(rowNum) {
 }
 
 function stopBatchColorChange() {
-    if (!batchColorState || !batchColorState.running) return;
+    if (!batchColorState) return;
     batchColorState.stopRequested = true;
-    updateBatchColorStatus('⏸ 正在停止...');
+    updateBatchColorStatus('⏸ 正在暂停...');
     // 立即收尾：扩展侧没有取消通道，若只设标记，推进只能等单款超时（最长 6 分钟），表现为「卡住」
     // finishBatchColor 内部会清超时、停轮询、恢复按钮
     finishBatchColor(false);
@@ -5160,6 +5230,24 @@ function stopBatchColorChange() {
 
 function finishBatchColor(completed, reason) {
     if (!batchColorState) return;
+    if (!completed) {
+        const state = batchColorState;
+        const row = state.inFlightRow || state.pendingAckRow;
+        const idx = state.queue.findIndex(p => p.row === row);
+        if (idx >= 0) state.currentIndex = idx;
+        state.running = false; state.stopRequested = true;
+        state.inFlightRow = null; state.pendingAckRow = null; state.inFlightSince = 0;
+        state.executionId = null; state.pausedReason = '';
+        if (state.currentTimeoutId) clearTimeout(state.currentTimeoutId);
+        state.currentTimeoutId = null;
+        stopBatchColorPolling();
+        setColorTimeoutRows([]); state.timedOutRows = [];
+        refreshColorResumeRowsFromState(); saveColorBatchState();
+        try { chrome.runtime.sendMessage(EXTENSION_ID, { action: 'pauseColorDispatch' }, () => { void chrome.runtime.lastError; }); } catch (_) {}
+        restoreBatchColorUI(); updateBatchColorProgress();
+        updateBatchColorStatus('换色已暂停');
+        return;
+    }
     const finishedState = batchColorState;
     const batchLabel = batchColorState.label || '批量换色';
     // 在途行仍会在豆包继续生成：保留其超时定时器与完成轮询，让完成/失败都能入账
@@ -5171,6 +5259,8 @@ function finishBatchColor(completed, reason) {
     if (!hasInFlight) stopBatchColorPolling();
     batchColorState.running = false;
     batchColorState.pausedReason = reason || '';
+    saveColorBatchState();
+    try { chrome.runtime.sendMessage(EXTENSION_ID, { action: 'pauseColorDispatch' }, () => { void chrome.runtime.lastError; }); } catch (_) {}
     const total = batchColorState.queue.length;
     const success = batchColorState.successCount;
     const fail = batchColorState.failCount;
@@ -5183,23 +5273,11 @@ function finishBatchColor(completed, reason) {
     const leftOver = computeColorResumeRows();
     setColorResumeRows(leftOver);
 
-    if (completed) {
-        updateBatchColorStatus(`✅ ${batchLabel}完成 ${success} 款${fail > 0 ? `，失败 ${fail} 款` : ''}（用时 ${timeStr}）`);
-        updateBatchColorFill(100);
-        showToast(`✅ ${batchLabel}完成！${success} 款成功${fail > 0 ? `，${fail} 款失败` : ''}，用时 ${timeStr}`);
-    } else {
-        const why = reason ? `（${reason}）` : '';
-        // 停止只作用于后续排队：已在生成中的那一款无法取消，界面必须说明，不能假装已取消
-        const waiting = batchColorState.inFlightRow
-            ? `；row${batchColorState.inFlightRow} 仍在豆包生成中，完成后会自动计入，请等它结束后再「继续」`
-            : '';
-        const note = '；停止只作用于后续排队，已在豆包生成中的那一款不会被取消';
-        updateBatchColorStatus(`⏸ ${batchLabel}已停止${why}。完成 ${success} 款，失败 ${fail} 款（用时 ${timeStr}）${note}${waiting}`);
-        showToast(`⏸ ${batchLabel}已暂停${why}。完成 ${success} 款，还剩 ${leftOver.length} 款可点「继续」${note}${waiting}`);
-    }
+    updateBatchColorStatus(`✅ ${batchLabel}完成 ${success} 款`);
+    updateBatchColorFill(100);
+    restoreBatchColorUI();
 
     if (colorPollTimer) { clearInterval(colorPollTimer); colorPollTimer = null; }
-    if (psPollTimer) { clearInterval(psPollTimer); psPollTimer = null; }
 
     setTimeout(() => {
         // 5 秒内若已开新任务，勿干扰新任务的状态与按钮
@@ -5220,7 +5298,13 @@ function finishBatchColor(completed, reason) {
         }
         const el = batchColorProgressEl();
         if (el) el.style.display = 'none';
-        if (batchColorState === finishedState) batchColorState = null;
+        if (batchColorState === finishedState) {
+            const key = colorBatchFileKey();
+            localStorage.removeItem(COLOR_BATCH_STATE_KEY + '::' + key);
+            const global = localStorage.getItem(COLOR_BATCH_STATE_KEY);
+            try { if (global && JSON.parse(global).fileKey === key) localStorage.removeItem(COLOR_BATCH_STATE_KEY); } catch (_) {}
+            batchColorState = null;
+        }
         setBatchColorToggle('stop');
     }, 5000);
 }
@@ -5244,11 +5328,14 @@ function updateBatchColorProgress() {
     const counter = batchColorCounterEl();
     if (counter) counter.textContent = `${current}/${total}`;
     const product = batchColorState.queue[current];
-    if (product && batchColorCurrentEl) {
-        const mem = batchColorState.lastMemMB ? ` · 可用 ${(batchColorState.lastMemMB / 1024).toFixed(1)}GB` : '';
-        batchColorCurrentEl.textContent = `正在处理 row${product.row} (${product.title_en || '未命名'})${mem}`;
-    }
-    updateBatchColorStatus(`🚀 ${batchColorState.label || '批量换色'}中 ${current}/${total}`);
+    const cur = batchColorCurrentEl();
+    if (cur) cur.textContent = batchColorState.inFlightRow ? `正在处理 row${batchColorState.inFlightRow}` : '';
+    let status;
+    if (batchColorState.running) status = `换色中 ${current}/${total}${batchColorState.inFlightRow ? ` · row${batchColorState.inFlightRow}` : ''}`;
+    else if (current >= total && !(batchColorState.failedRows || []).length) status = `换色已结束 · 成功 ${batchColorState.successCount} 款`;
+    else status = '换色已暂停';
+    if (colorBatchFileKey() !== currentFileKey()) status = `原文件「${batchColorState.fileFolder || '默认'}」：${status}`;
+    updateBatchColorStatus(status);
 }
 
 function updateBatchColorStatus(text) {
@@ -5268,10 +5355,11 @@ function startColorChange(rowNum) {
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 处理中...'; }
     try {
         chrome.runtime.sendMessage(EXTENSION_ID, {
-            action: 'startColorChange', task: { imagePath, prompt, rowNum }
+            action: 'startColorChange', task: { imagePath, prompt, rowNum, fileKey: currentFileKey(), fileFolder: loadedFileName || '默认' }
         }, (response) => {
             if (chrome.runtime.lastError) { showToast('⚠️ 请确认扩展已安装'); if (btn) { btn.disabled = false; btn.innerHTML = '🎨 AI换色'; } return; }
-            if (response?.ok) { showToast('✅ 已打开豆包开始生成'); startColorImagePolling(rowNum); }
+            if (response?.ok || response?.pending) { showToast(response.pending ? '等待豆包接收任务' : '✅ 豆包已接收换色任务'); startColorImagePolling(rowNum); }
+            else showToast('❌ ' + (response?.error || '豆包未接收换色任务'));
             if (btn) { btn.disabled = false; btn.innerHTML = '🎨 AI换色'; }
         });
     } catch (e) { showToast('⚠️ 未检测到扩展'); if (btn) { btn.disabled = false; btn.innerHTML = '🎨 AI换色'; } }
@@ -5287,7 +5375,8 @@ function startAiEdit(rowNum) {
             action: 'startAiEdit', task: { imagePath, prompt, rowNum }
         }, (response) => {
             if (chrome.runtime.lastError) { showToast('⚠️ 请确认扩展已安装'); if (btn) { btn.disabled = false; btn.innerHTML = '🤖 AI改图'; } return; }
-            if (response?.ok) { showToast('✅ 已打开豆包，请输入改图需求'); }
+            if (response?.ok) { showToast(response.pending ? '等待豆包页面加载改图任务' : '✅ 豆包已接收改图任务'); }
+            else showToast('❌ ' + (response?.error || '豆包未接收改图任务'));
             if (btn) { btn.disabled = false; btn.innerHTML = '🤖 AI改图'; }
         });
     } catch (e) { showToast('⚠️ 未检测到扩展'); if (btn) { btn.disabled = false; btn.innerHTML = '🤖 AI改图'; } }
@@ -5530,17 +5619,23 @@ function refreshMainImage(rowNum) {
 }
 
 function loadColorImagesFromExtension(rowNum) {
+    const imageFileKey = currentFileKey();
+    const imageProduct = currentProduct;
+    const stillCurrent = () => imageFileKey === currentFileKey() && currentProduct === imageProduct && currentProduct && currentProduct.row === rowNum;
     ['white', 'black', 'gray', 'navy'].forEach(color => {
         const localPath = getColorImagePath(rowNum, color);
         if (localPath) {
             const img = new Image();
             img.onload = () => {
+                if (!stillCurrent()) return;
                 setColorImage(rowNum, color, localPath);
             };
             img.onerror = () => {
+                if (!stillCurrent()) return;
                 if (!extensionInstalled) return;
                 try {
-                    chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color }, (resp) => {
+                    chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
+                        if (!stillCurrent()) return;
                         if (resp && resp.ok && resp.dataUrl) {
                             setColorImage(rowNum, color, resp.dataUrl);
                         }
@@ -5550,7 +5645,8 @@ function loadColorImagesFromExtension(rowNum) {
             img.src = localPath;
         } else if (extensionInstalled) {
             try {
-                chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color }, (resp) => {
+                chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
+                    if (!stillCurrent()) return;
                     if (resp && resp.ok && resp.dataUrl) {
                         setColorImage(rowNum, color, resp.dataUrl);
                     }
@@ -5561,6 +5657,7 @@ function loadColorImagesFromExtension(rowNum) {
 }
 
 function setColorImage(rowNum, color, dataUrl) {
+    if (!currentProduct || currentProduct.row !== rowNum) return;
     const grid = document.getElementById('colorImagesGrid');
     if (!grid) return;
     const item = grid.querySelector(`[data-color="${color}"]`);
@@ -6018,11 +6115,10 @@ function parseFaqs(text) {
     return faqs;
 }
 
+let uploadPollTimer = null;
 checkExtension();
 loadFromLocalStorage();
 loadSkippedItems();
-
-let uploadPollTimer = null;
 function startUploadPolling() {
     if (uploadPollTimer) clearInterval(uploadPollTimer);
     if (!products.length) return;
@@ -6033,22 +6129,34 @@ function startUploadPolling() {
             return;
         }
         try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getUploadedRows' }, (response) => {
+            const queriedFile = currentFileKey();
+            refreshPublishState();
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getUploadedRows', fileKey: queriedFile }, (response) => {
+                if (queriedFile !== currentFileKey()) return;
                 if (!chrome.runtime.lastError && response?.rows) {
+                    if (response.fileKey !== undefined && response.fileKey !== queriedFile) return;
+                    uploadedRows = response.rows;
+                    legacyRows = response.legacy || {};
                     const productCards = document.getElementById('productCards');
                     if (productCards) {
                         productCards.querySelectorAll('.product-card').forEach(card => {
                             const idx = parseInt(card.dataset.idx);
                             const product = products[idx];
-                            if (product && response.rows[product.row] && !card.querySelector('.uploaded-badge')) {
-                                const badge = document.createElement('span');
+                            if (product && response.rows[product.row]) {
+                                let badge = card.querySelector('.uploaded-badge');
+                                if (!badge) {
+                                    badge = document.createElement('span');
+                                    const tags = card.querySelector('.product-tags');
+                                    if (tags) tags.appendChild(badge);
+                                }
                                 badge.className = 'uploaded-badge';
                                 badge.textContent = '已保存';
-                                const tags = card.querySelector('.product-tags');
-                                if (tags) tags.appendChild(badge);
+                                badge.style.opacity = '';
+                                badge.removeAttribute('title');
                             }
                         });
                     }
+                    updateBatchBar();
                 }
             });
         } catch (e) {}
@@ -6076,6 +6184,7 @@ function navigateTab(direction) {
 
 // 键盘选择产品：W/↑ 上移，S/↓ 下移；A/← 左移Tab，D/→ 右移Tab
 document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.target?.closest('input,textarea,select,[contenteditable="true"],[contenteditable=""]')) return;
     if (e.key === 'w' || e.key === 'W' || e.key === 'ArrowUp') {
         e.preventDefault();
         navigateProduct('up');
