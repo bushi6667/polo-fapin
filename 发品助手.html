@@ -3980,6 +3980,9 @@ function handleColorFileSwitched(req) {
 // 核心：把 5 个单图步骤合成【一次】请求（一次发送 → 一步生成 5 张），不逐张发送。
 const SUITE_OUTPUTS = [['111', '卖点图'], ['222', '袖口图'], ['333', '面料图'], ['444', '白底图'], ['666', '领口图']];
 
+// 防重复点击：同一时间只允许一个套图任务在预检/创建中
+let suiteTaskRunning = false;
+
 const SuiteQuickFive = (() => {
     function normalizePrompt(resolved) {
         return String(resolved || '')
@@ -4067,41 +4070,173 @@ function updateSuiteStatus(text) {
 }
 
 // 点击「生成套图」：一次快速五图请求（不逐张发送）
-async function startSuiteGeneration() {
-    if (!products || products.length === 0) { showToast('⚠️ 请先上传 Excel'); return; }
-    const product = (typeof currentRowIndex === 'number' && products[currentRowIndex]) ? products[currentRowIndex] : products[0];
-    if (!product) { showToast('⚠️ 请先选择产品'); return; }
-    const btn = document.getElementById('suiteGenBtn');
+// ===== 套图素材预检：发往豆包前必须全部通过（有路径 ≠ 有图片） =====
+async function probeSuiteImage(label, url) {
+    if (!url) return { ok: false, error: `${label}：没有可用的图片来源` };
     try {
-        if (btn) { btn.disabled = true; btn.textContent = '⏳ 组装中...'; }
+        const resp = await fetch(url, { cache: 'no-store' });
+        if (!resp.ok) return { ok: false, error: `${label}：读取失败 HTTP ${resp.status}` };
+        const blob = await resp.blob();
+        if (!blob || blob.size === 0) return { ok: false, error: `${label}：文件为空` };
+        if (!/^image\/(png|jpeg|jpg|webp|bmp)$/i.test(blob.type || '')) {
+            return { ok: false, error: `${label}：不是位图（${blob.type || '未知类型'}）` };
+        }
+        const bmp = await createImageBitmap(blob);
+        const w = bmp.width, h = bmp.height;
+        if (typeof bmp.close === 'function') bmp.close();
+        if (!(w >= 64 && h >= 64)) return { ok: false, error: `${label}：尺寸无效 ${w}×${h}` };
+        return { ok: true, bytes: blob.size, width: w, height: h, type: blob.type };
+    } catch (e) {
+        return { ok: false, error: `${label}：无法解码（${e && e.message}）` };
+    }
+}
+
+// 按「源表文件标识 + 产品行号」取当前产品素材，不依赖全局最后一次生成
+async function resolveSuiteAssets(product) {
+    const fileKey = currentFileKey();
+    const assets = {};
+    const problems = [];
+    let mainUrl = product.imagePath || ('extracted_images/row' + product.row + '_main.jpg');
+    let probe = await probeSuiteImage('主图', mainUrl);
+    if (!probe.ok && /_main\.jpg$/i.test(mainUrl)) {
+        const pngUrl = mainUrl.replace(/_main\.jpg$/i, '_main.png');
+        const p2 = await probeSuiteImage('主图', pngUrl);
+        if (p2.ok) { probe = p2; mainUrl = pngUrl; }
+    }
+    if (probe.ok) assets.main = Object.assign({ color: 'main', url: mainUrl, fileKey, row: product.row }, probe);
+    else problems.push(probe.error);
+
+    for (const color of ['white', 'black', 'gray', 'navy']) {
+        let url = (typeof getColorImagePath === 'function') ? getColorImagePath(product.row, color) : null;
+        let p = await probeSuiteImage(color, url);
+        if (!p.ok && extensionInstalled) {
+            const dataUrl = await new Promise((res) => {
+                try {
+                    chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum: product.row, color, fileKey }, (r) => res(r && r.ok ? r.dataUrl : null));
+                } catch (_) { res(null); }
+            });
+            if (dataUrl) { const p2 = await probeSuiteImage(color, dataUrl); if (p2.ok) { p = p2; url = dataUrl; } }
+        }
+        if (p.ok) assets[color] = Object.assign({ color, url, fileKey, row: product.row }, p);
+        else problems.push(p.error);
+    }
+    return { assets, problems, fileKey };
+}
+
+// 变量解析校验：任何未解析的 {{变量}} 都要在发送前失败并指明步骤
+function checkSuiteVariables(steps, product) {
+    const problems = [];
+    for (const [key, name] of SUITE_OUTPUTS) {
+        const step = (steps || []).find(s => (s.outputKeys || []).some(o => (typeof o === 'string' ? o : o.key).trim() === key));
+        if (!step) { problems.push(`${key} ${name}：缺少该编号的步骤配置`); continue; }
+        const rendered = renderSuitePrompt(step, product);
+        const left = rendered.match(/\{\{\s*([^}]+?)\s*\}\}/g);
+        if (left && left.length) problems.push(`${name}：未解析变量 ${[...new Set(left)].join(' ')}`);
+    }
+    return problems;
+}
+
+// 统一消息封装：带超时与"扩展上下文失效"的真实提示，不无限重试
+function suiteSend(action, payload, timeoutMs = 8000) {
+    return new Promise((resolve) => {
+        let done = false;
+        const timer = setTimeout(() => { if (!done) { done = true; resolve({ ok: false, error: '扩展未响应（超时）' }); } }, timeoutMs);
+        try {
+            chrome.runtime.sendMessage(EXTENSION_ID, Object.assign({ action }, payload || {}), (resp) => {
+                if (done) return;
+                done = true; clearTimeout(timer);
+                if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
+                resolve(resp || { ok: false, error: '空响应' });
+            });
+        } catch (e) {
+            if (!done) { done = true; clearTimeout(timer); resolve({ ok: false, error: '扩展上下文失效，请刷新本页：' + (e && e.message) }); }
+        }
+    });
+}
+
+// 点击「生成套图」：一次快速五图请求（绝不拆成五次逐张）
+async function startSuiteGeneration() {
+    if (suiteTaskRunning) { showToast('⚠️ 已有套图任务进行中，请勿重复点击'); return null; }
+    if (!products || products.length === 0) { showToast('⚠️ 请先上传 Excel'); return null; }
+    const product = (typeof currentRowIndex === 'number' && products[currentRowIndex]) ? products[currentRowIndex] : products[0];
+    if (!product) { showToast('⚠️ 请先选择产品'); return null; }
+    const btn = document.getElementById('suiteGenBtn');
+    suiteTaskRunning = true;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 预检中...'; }
+    try {
         const steps = getSuiteSteps();
         if (!Array.isArray(steps) || steps.length === 0) throw new Error('未配置自定义步骤（请到「自定义步骤」页保存配置）');
+
+        // ① 变量解析（未解析即失败并指明步骤）
+        const varProblems = checkSuiteVariables(steps, product);
+        if (varProblems.length) throw new Error('变量解析失败：' + varProblems.join('；'));
+
+        // ② 素材真实性与完整性（主图 + 四色，按 fileKey+行号）
+        updateSuiteStatus('⏳ 正在检查素材…');
+        const { assets, problems, fileKey } = await resolveSuiteAssets(product);
+        if (problems.length) throw new Error('素材检查未通过：' + problems.join('；'));
+
+        // ③ 组装一次快速五图（外部/随机素材等冲突会在此抛出，指明步骤）
         const task = await SuiteQuickFive.build(steps, async (step) => renderSuitePrompt(step, product));
-        // 绑定身份：源表文件标识 + 产品行号 + 输出编号（避免跨表/跨产品混图）
-        task.fileKey = currentFileKey();
-        task.rowNum = product.row;
-        task.productId = product.row;
-        updateSuiteStatus(`⏳ 已发起 1 次请求，期望 5 张…`);
-        showToast('🚀 已发起一次快速五图生成请求（合并 5 张）');
-        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'startSuiteGeneration', task }, (resp) => {
-            if (chrome.runtime.lastError || !resp || !resp.ok) {
-                const err = (chrome.runtime.lastError && chrome.runtime.lastError.message) || (resp && resp.error) || '未知错误';
-                updateSuiteStatus(`❌ 套图请求未被接收：${err}`);
-                showToast(`❌ 套图请求未被接收：${err}`);
-            } else {
-                updateSuiteStatus(`⏳ 套图生成中（1 次请求 / 期望 5 张，任务 ${resp.taskId || '-'}）`);
+
+        // ④ 创建后台任务（含配置快照与素材对应；运行中改配置/切产品不影响本任务）
+        const created = await suiteSend('suiteCreate', {
+            task: {
+                fileKey, rowNum: product.row, productId: product.row,
+                mode: 'quick-five', expectCount: task.expectCount, targetKeys: task.outputKeys.map(o => o.key),
+                prompt: task.prompt,
+                configSnapshot: { model: task.model, ratio: task.ratio, outputKeys: task.outputKeys, steps: steps.length },
+                assets: Object.values(assets).map(a => ({ color: a.color, filename: a.url, fileKey: a.fileKey, row: a.row, bytes: a.bytes, width: a.width, height: a.height }))
             }
-            if (btn) { btn.disabled = false; btn.textContent = '🖼️ 生成套图'; }
         });
+        if (!created.ok) throw new Error(created.error);
+
+        updateSuiteStatus(`⏳ 任务 ${created.task.taskId} 已接收（阶段 received），等待豆包执行…`);
+        showToast('✅ 套图任务已创建（1 次请求 / 期望 5 张）');
+        return created.task;
     } catch (e) {
         updateSuiteStatus(`❌ ${e.message}`);
         showToast(`❌ ${e.message}`);
+        return null;
+    } finally {
+        suiteTaskRunning = false;
         if (btn) { btn.disabled = false; btn.textContent = '🖼️ 生成套图'; }
     }
 }
 
-function startSuiteRegenerate() {
-    showToast('ℹ️ 套图指定重生成：请先从预览中选择要替换的编号');
+// 套图结果区：按当前 fileKey + 行号取任务与结果（含刷新恢复）
+async function renderSuiteImages(product) {
+    const area = document.getElementById('suiteImagesArea');
+    const grid = document.getElementById('suiteImagesGrid');
+    if (!area || !grid) return;
+    const row = product ? product.row
+        : ((typeof currentRowIndex === 'number' && products && products[currentRowIndex]) ? products[currentRowIndex].row : null);
+    if (row === null || row === undefined) { area.style.display = 'none'; return; }
+    area.style.display = 'block';
+    const resp = await suiteSend('suiteListTasks', { fileKey: currentFileKey(), rowNum: row });
+    const tasks = (resp && resp.ok && resp.tasks) ? resp.tasks : [];
+    const t = tasks[0];
+    if (!t) {
+        grid.innerHTML = '<div style="font-size:12px;color:rgba(255,255,255,0.45);padding:8px;">该产品还没有套图任务</div>';
+        const st = document.getElementById('suiteStatusText');
+        if (st) st.textContent = '';
+        return;
+    }
+    const savedKeys = {};
+    for (const r of (t.results || [])) { if (r && r.saved && r.key) savedKeys[String(r.key)] = r; }
+    grid.innerHTML = (t.targetKeys || []).map(key => {
+        const rec = savedKeys[key];
+        return `<div class="color-img-item" style="text-align:center;cursor:pointer;" onclick="startSuiteRegenerate('${key}')">
+            <div class="img-label" style="justify-content:center;"><span>${key}</span></div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.55);">${rec ? '✅ 已保存' : '⏳ 未完成'}</div>
+        </div>`;
+    }).join('');
+    const st = document.getElementById('suiteStatusText');
+    if (st) st.textContent = `任务 ${t.taskId}｜阶段 ${t.stage}${t.error ? '｜' + t.error : ''}`;
+}
+
+function startSuiteRegenerate(key) {
+    showToast(key ? `ℹ️ 将对编号 ${key} 执行单张重生成（该步骤单独生成，仅替换这一张）` : 'ℹ️ 请从套图预览中选择要替换的编号');
 }
 
 function renderSuiteSteps() {

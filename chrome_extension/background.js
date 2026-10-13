@@ -1,4 +1,4 @@
-importScripts('upload/page2_upload.js', 'upload/page3_upload.js');
+importScripts('upload/page2_upload.js', 'upload/page3_upload.js', 'suite/suite-task.js');
 
 const STORAGE_KEY = 'polo_product_data';
 const DEFAULT_FILE_FOLDER = '默认'; // 颜色图默认子目录名（CURRENT_FILENAME 为空时使用）；历史路径一直是 '默认'，勿改 'default'（buildColorImagePath 读盘同源）
@@ -156,24 +156,16 @@ const PUBLISH_TASK_KEY = 'polo_publish_task';
 const PUBLISH_LOG_KEY = 'polo_publish_log';
 const PUBLISH_LOG_MAX = 500;
 const PUBLISH_SETTINGS_KEY = 'polo_publish_settings';
-const PUBLISH_VERIFIED_SAVED_KEY = 'polo_publish_verified_saved';   // 已核实保存（Stage 2 写入）
+const PUBLISH_VERIFIED_SAVED_KEY = 'polo_publish_verified_saved';   // 保存记录（用户定义：页3菜单点击保存；记录来源）
 const PUBLISH_LEGACY_UPLOADED_KEY = 'polo_publish_legacy_uploaded'; // 旧 uploaded 标记：历史待核，仅供展示
-const MEM_PAUSE_MB_KEY = 'polo_mem_pause_mb';
-const MEM_PAUSE_MB_DEFAULT = 1500;
-const MEM_ENDPOINT = 'http://127.0.0.1:8765/mem-info';  // 本地只读内存端点（提交额度）
-const MEM_SAMPLE_CACHE_MS = 10000;
 const PUBLISH_TICK_MS = 30000;                          // 运行期资源巡检间隔上限
 
 const PUBLISH_DEFAULTS = {
-    batchSize: 50,          // 每批预填款数（1-60）
-    pageLimit: 60,          // 目标页面总量上限（统计全部目标顶层标签）
-    rowTimeoutMs: 600000,   // 单行超时 10 分钟
-    commitFreeMinMB: 4096,  // 提交剩余额度下限
-    commitUsedPctMax: 90    // 已提交 / 提交上限（%）上限
+    batchSize: 50,          // 每批固定预填 50 款
+    rowTimeoutMs: 600000    // 单行超时 10 分钟
 };
 
 let publishTickTimer = null;
-let memSampleCache = { at: 0, value: null };
 
 // ---------- 异步互斥：所有任务状态变更串行执行（持久化 ≠ 互斥） ----------
 // 重复完成消息并发到达时，只有第一个能推进；后续在锁内重读状态后会被拒绝。
@@ -271,7 +263,9 @@ async function canOpenPublishPage(t, opts) {
 async function getPublishSettings() {
     return new Promise((resolve) => {
         chrome.storage.local.get(PUBLISH_SETTINGS_KEY, (r) => {
-            resolve({ ...PUBLISH_DEFAULTS, ...(r[PUBLISH_SETTINGS_KEY] || {}) });
+            const settings = { ...PUBLISH_DEFAULTS, ...(r[PUBLISH_SETTINGS_KEY] || {}), batchSize: 50 };
+            delete settings.pageLimit;
+            resolve(settings);
         });
     });
 }
@@ -280,9 +274,8 @@ async function setPublishSettings(patch) {
     return withPublishLock(async () => {
         const cur = await getPublishSettings();
         const next = { ...cur, ...patch };
-        next.batchSize = Math.min(60, Math.max(1, parseInt(next.batchSize, 10) || PUBLISH_DEFAULTS.batchSize));
-        // 页面上限安全边界固定为 60，不允许调高
-        next.pageLimit = Math.min(60, Math.max(1, parseInt(next.pageLimit, 10) || PUBLISH_DEFAULTS.pageLimit));
+        next.batchSize = 50;
+        delete next.pageLimit;
         next.rowTimeoutMs = Math.max(60000, parseInt(next.rowTimeoutMs, 10) || PUBLISH_DEFAULTS.rowTimeoutMs);
         await new Promise(r => chrome.storage.local.set({ [PUBLISH_SETTINGS_KEY]: next }, r));
 
@@ -298,26 +291,33 @@ async function setPublishSettings(patch) {
     });
 }
 
-async function getMemPauseThresholdMB() {
+// ---------- 任务持久化 ----------
+async function loadPublishTask() {
     return new Promise((resolve) => {
-        chrome.storage.local.get(MEM_PAUSE_MB_KEY, (r) => {
-            const v = parseInt(r[MEM_PAUSE_MB_KEY], 10);
-            resolve(Number.isInteger(v) && v >= 200 ? v : MEM_PAUSE_MB_DEFAULT);
+        chrome.storage.local.get(PUBLISH_TASK_KEY, (r) => {
+            const task = r[PUBLISH_TASK_KEY] || null;
+            if (task) {
+                task.batchSize = 50;
+                delete task.pageLimit;
+                if (task.state === 'paused' && ['memory', 'monitorFail', 'pageLimit'].includes(task.pauseReason)) {
+                    task.pauseReason = 'manual';
+                    task.pauseDetail = '上次任务已暂停，等待你继续（每批 50 款，无需内存服务）';
+                    task.resourceBlockDetail = '';
+                }
+            }
+            resolve(task);
         });
     });
 }
 
-// ---------- 任务持久化 ----------
-async function loadPublishTask() {
-    return new Promise((resolve) => {
-        chrome.storage.local.get(PUBLISH_TASK_KEY, (r) => resolve(r[PUBLISH_TASK_KEY] || null));
-    });
-}
-
 async function savePublishTask(task) {
-    return new Promise((resolve) => {
-        if (!task) { chrome.storage.local.remove(PUBLISH_TASK_KEY, resolve); return; }
-        chrome.storage.local.set({ [PUBLISH_TASK_KEY]: task }, resolve);
+    return new Promise((resolve, reject) => {
+        const done = () => {
+            const err = chrome.runtime.lastError;
+            if (err) reject(new Error('保存发品任务失败：' + err.message)); else resolve();
+        };
+        if (!task) { chrome.storage.local.remove(PUBLISH_TASK_KEY, done); return; }
+        chrome.storage.local.set({ [PUBLISH_TASK_KEY]: task }, done);
     });
 }
 
@@ -343,101 +343,11 @@ async function countTargetTabs() {
     return tabs.filter(t => isTargetPublishUrl(t.url)).length;
 }
 
-// ---------- 内存采样：物理（system.memory）+ 提交额度（本地端点） ----------
-async function sampleMemory(forceRefresh) {
-    const now = Date.now();
-    if (!forceRefresh && memSampleCache.value && now - memSampleCache.at < MEM_SAMPLE_CACHE_MS) return memSampleCache.value;
-
-    const out = {
-        physAvailableMB: null, physError: '',
-        commitFreeMB: null, commitLimitMB: null, commitUsedPct: null, commitError: '',
-        sampledAt: now
-    };
-
-    // 物理内存：system.memory 回调整体限时（3 秒），防回调挂起
-    if (chrome.system && chrome.system.memory) {
-        try {
-            const info = await Promise.race([
-                new Promise((resolve) => chrome.system.memory.getInfo((i) => resolve(i || null))),
-                new Promise((resolve) => setTimeout(() => resolve(null), 3000))
-            ]);
-            if (info && typeof info.availableCapacity === 'number' && Number.isFinite(info.availableCapacity) && info.availableCapacity >= 0) {
-                out.physAvailableMB = Math.round(info.availableCapacity / 1048576);
-            } else {
-                out.physError = 'system.memory 返回空或非法值';
-            }
-        } catch (e) { out.physError = 'system.memory 异常: ' + e.message; }
-    } else {
-        out.physError = '缺少 system.memory 权限（需在 chrome://extensions 重新加载扩展）';
-    }
-
-    // 提交额度（本地只读端点）：超时覆盖到响应体读取完成
-    try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 3000);
-        const resp = await fetch(MEM_ENDPOINT, { method: 'GET', signal: ctrl.signal, cache: 'no-store' });
-        let j = null;
-        try {
-            j = await resp.json();
-        } finally {
-            clearTimeout(timer);
-        }
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const cb = Number(j && j.committedBytes);
-        const cl = Number(j && j.commitLimitBytes);
-        const sampledAt = Number(j && j.sampledAt) || 0;
-        if (!Number.isFinite(cb) || !Number.isFinite(cl) || cb < 0 || cl <= 0 || cb > cl) {
-            out.commitError = '端点返回数值非法（committed/limit）';
-        } else if (!sampledAt || Date.now() - sampledAt > MEM_SAMPLE_CACHE_MS + 5000) {
-            out.commitError = '端点采样时间过期';
-        } else {
-            out.commitFreeMB = Math.round((cl - cb) / 1048576);
-            out.commitLimitMB = Math.round(cl / 1048576);
-            out.commitUsedPct = Math.round((cb / cl) * 1000) / 10;
-            out.sampledAt = sampledAt;
-        }
-    } catch (e) {
-        out.commitError = (e.name === 'AbortError' ? '本地内存服务超时' : '本地内存服务不可用: ' + e.message);
-    }
-
-    memSampleCache = { at: now, value: out };
-    return out;
-}
-
-// ---------- 资源闸门：任一条件满足即暂停；监测失败一律暂停（禁止静默放行） ----------
-// ---------- 内存闸门（不含页面上限）：发品与换色共用同一套判断，避免两套规则漂移 ----------
-// 判据：物理可用 < 用户阈值 ｜ 提交剩余 < 4096MiB ｜ 提交已用 ≥ 90% ｜ 监测失败/超时/数据不可信
-async function assessMemoryResources(forceRefresh) {
+// 页面数量仅用于诊断；不限制总页面数、不采样内存、不请求本地服务。
+async function checkPublishResources() {
     const settings = await getPublishSettings();
-    const threshold = await getMemPauseThresholdMB();
-    const mem = await sampleMemory(forceRefresh);
-    const r = [];
-
-    if (mem.physAvailableMB === null) {
-        r.push({ reason: 'monitorFail', detail: '物理内存监测不可用：' + (mem.physError || '未知') });
-    } else if (mem.physAvailableMB < threshold) {
-        r.push({ reason: 'memory', detail: `可用物理内存 ${mem.physAvailableMB}MiB < 阈值 ${threshold}MiB` });
-    }
-    if (mem.commitFreeMB === null) {
-        r.push({ reason: 'monitorFail', detail: '提交额度监测不可用：' + (mem.commitError || '未知') });
-    } else {
-        if (mem.commitFreeMB < settings.commitFreeMinMB) {
-            r.push({ reason: 'memory', detail: `提交剩余 ${mem.commitFreeMB}MiB < ${settings.commitFreeMinMB}MiB` });
-        } else if (mem.commitUsedPct !== null && mem.commitUsedPct >= settings.commitUsedPctMax) {
-            r.push({ reason: 'memory', detail: `提交已用 ${mem.commitUsedPct}% ≥ ${settings.commitUsedPctMax}%` });
-        }
-    }
-    return { ok: r.length === 0, reasons: r, mem, settings, threshold };
-}
-
-async function checkPublishResources(forceRefresh) {
-    const a = await assessMemoryResources(forceRefresh);
     const pages = await countTargetTabs();
-    const r = a.reasons.slice();
-    if (pages >= a.settings.pageLimit) {
-        r.push({ reason: 'pageLimit', detail: `已打开目标页面 ${pages} 个 ≥ 上限 ${a.settings.pageLimit}` });
-    }
-    return { ok: r.length === 0, reasons: r, mem: a.mem, pages, settings: a.settings, threshold: a.threshold };
+    return { ok: true, reasons: [], pages, settings, mem: {}, threshold: null };
 }
 
 function stopPublishTick() {
@@ -474,10 +384,11 @@ async function buildPublishStatePayload() {
     const t = await loadPublishTask();
     const pages = await countTargetTabs();
     const settings = await getPublishSettings();
-    // 已核实保存记录按文件隔离；本任务待保存数 = 本任务已填完且未核实保存的行
+    // 用户的保存记录按文件隔离；本任务只统计其选中行，不包含同文件其他任务。
     const fileKey = t ? taskFileKey(t) : getFilePrefix();
     const savedMap = await getVerifiedSavedMap(fileKey);
-    const savedCount = Object.keys(savedMap).length;
+    const taskRows = t ? new Set(Object.keys(t.products || {}).concat((t.remaining || []).map(String), (t.filledRows || []).map(String))) : null;
+    const savedCount = Object.keys(savedMap).filter(row => !taskRows || taskRows.has(row)).length;
     const filledRows = (t && Array.isArray(t.filledRows)) ? t.filledRows : [];
     const pendingSaveCount = filledRows.filter(r => !savedMap[r]).length;
     return {
@@ -513,13 +424,60 @@ async function broadcastPublishState(extra) {
     notifyAssistant('publishState', { ...payload, ...(extra || {}) });
 }
 
-// 已核实保存记录：按文件隔离 { [fileKey]: { row: {...} } }
+// 保存记录：按文件隔离，保留 source；人工菜单点击规则不冒充平台成功信号。
 // 注意：fileKey 允许为空字符串（未设置文件名时 getFilePrefix() 返回 ''），不能用 && 判断
 async function getVerifiedSavedMap(fileKey) {
     const r = await new Promise(res => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, res));
     const all = r[PUBLISH_VERIFIED_SAVED_KEY] || {};
     const key = (fileKey === undefined || fileKey === null) ? '' : String(fileKey);
     return all[key] || {};
+}
+
+// 页3人工保存入口：点击与记账在后台完成，保存触发页面刷新也不会丢失记账。
+async function savePublishProduct(request, sender, clickButton = true) {
+    return withPublishLock(async () => {
+        const tabId = sender && sender.tab && sender.tab.id;
+        let page;
+        try { page = new URL(sender.url || sender.tab?.url || ''); } catch (_) {}
+        if (!tabId || !page || page.hostname !== 'post.alibaba.com' || !page.pathname.startsWith('/product/publish')
+            || (sender.frameId !== undefined && sender.frameId !== 0)) return { ok: false, error: '仅允许页3保存入口' };
+        const row = Number(request.row), x = Number(request.x), y = Number(request.y);
+        if (!Number.isInteger(row) || row <= 0 || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) return { ok: false, error: '保存产品或按钮位置无效' };
+        const t = await loadPublishTask();
+        let fileKey;
+        if (request.taskId && t && t.taskId === request.taskId) {
+            const belongs = t.products ? Object.prototype.hasOwnProperty.call(t.products, String(row))
+                : [...(t.remaining || []), ...(t.filledRows || [])].some(r => Number(r) === row);
+            if (!belongs) return { ok: false, error: '产品行不属于该任务' };
+            fileKey = taskFileKey(t);
+        } else if (typeof request.fileKey === 'string') {
+            fileKey = request.fileKey; // 原任务页保存到原文件，不使用后来切换的新文件。
+        } else if (request.taskId) return { ok: false, error: '原任务文件信息缺失，未记入其他文件' };
+        else fileKey = getFilePrefix();
+
+        let clicked = clickButton ? await realClickCDP(tabId, x, y) : { ok: true };
+        if (!clicked.ok) {
+            try {
+                const results = await chrome.scripting.executeScript({ target: { tabId }, args: [x, y], func: (px, py) => {
+                    const button = document.elementFromPoint(px, py)?.closest('button');
+                    if (!button || (button.innerText || button.textContent || '').trim() !== '保存') return false;
+                    button.click(); return true;
+                } });
+                clicked = { ok: results.some(r => r.result === true) };
+            } catch (_) {}
+        }
+        if (!clicked.ok) return { ok: false, error: '保存按钮未点击，未标记已保存' };
+        const stored = await new Promise(resolve => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, resolve));
+        const all = stored[PUBLISH_VERIFIED_SAVED_KEY] || {};
+        all[fileKey] = { ...(all[fileKey] || {}), [row]: { at: Date.now(), source: 'page3_save_click', taskId: request.taskId || null } };
+        await new Promise((resolve, reject) => chrome.storage.local.set({ [PUBLISH_VERIFIED_SAVED_KEY]: all }, () => {
+            if (chrome.runtime.lastError) reject(new Error('已点击保存，但保存记录写入失败：' + chrome.runtime.lastError.message));
+            else resolve();
+        }));
+        notifyAssistant('publishSaved', { row, fileKey, source: 'page3_save_click' });
+        await broadcastPublishState();
+        return { ok: true, row, fileKey, source: 'page3_save_click' };
+    });
 }
 
 // ---------- 暂停 / 继续 ----------
@@ -602,8 +560,7 @@ async function resumePublishTask() {
         return { ok: false, message: '排队期间收到停止请求，未继续' };
     }
 
-    // 继续前强制刷新采样：不能用失败/过期缓存先检查
-    memSampleCache = { at: 0, value: null };
+    // 继续前重新检查页面数量上限
     const g = await checkPublishResources(true);
     if (!g.ok) {
         const detail = g.reasons.map(x => x.detail).join('；');
@@ -641,7 +598,6 @@ async function resumePublishTask() {
         t.batchFilledDone = 0;
     }
     await savePublishTask(t);
-    memSampleCache = { at: 0, value: null };
     await appendPublishLog({ level: 'resume', row: t.currentRow, pages: g.pages });
     ensurePublishTick();
     notifyAssistant('publishResumed', { remaining: t.remaining.length, batchSize: t.batchSize, waitingCurrent: t.currentRow !== null });
@@ -848,7 +804,7 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
 // ---------- 单行重试 / 明确跳过（用户主动触发） ----------
 // 语义：异常行「带入下一批」—— 重试重置下一批计数并把该页计入新批次；
 //       不再受"本批已开数"上限阻挡（否则每批最后一款失败后无法恢复）。
-//       仍受 页面总量 / 内存 / 文件 / 停止 闸门限制，另有单行重试上限防无限开页。
+//       仍受 页面总量 / 文件 / 停止 闸门限制，另有单行重试上限防无限开页。
 async function retryPublishRow() {
     // ① 进入串行队列【之前】捕获停止代次
     const epochAtRequest = publishStopEpoch;
@@ -980,6 +936,15 @@ if (chrome.alarms && chrome.alarms.onAlarm) {
 
 // 可靠的关页检测（不依赖巡检周期）
 chrome.tabs.onRemoved.addListener((tabId) => {
+    withColorCompletionLock(async () => {
+        const exec = await getActiveColorExec();
+        if (!exec || exec.tabId !== tabId || !['pending', 'accepted'].includes(exec.state)) return;
+        await saveActiveColorExec({ ...exec, state: 'cancelled', dispatchAllowed: false });
+        await savePendingColorTask(null);
+        const payload = { rowNum: exec.rowNum, batchId: exec.batchId, executionId: exec.executionId, fileKey: exec.fileKey, timestamp: Date.now() };
+        await new Promise(resolve => chrome.storage.local.set({ color_task_stopped_event: payload }, resolve));
+        notifyAssistant('colorTaskStopped', payload);
+    }).catch(() => {});
     withPublishLock(async () => {
         const t = await loadPublishTask();
         if (!publishRunning(t) || t.currentTabId !== tabId) return;
@@ -989,11 +954,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 recoverPublishTaskOnStartup();
 recoverColorExecOnStartup();
+// 套图：非终态任务在冷启动时标记为中断（不自动重发已提交的豆包请求）
+if (typeof SuiteTaskStore !== 'undefined') SuiteTaskStore.recoverOnStartup();
 
 async function realClickCDP(tabId, x, y) {
+    let attachedHere = false;
     try {
         try {
             await chrome.debugger.attach({ tabId }, '1.3');
+            attachedHere = true;
         } catch (e) {
             if (!e.message.includes('already attached')) {
                 throw e;
@@ -1023,6 +992,10 @@ async function realClickCDP(tabId, x, y) {
         return { ok: true };
     } catch (e) {
         return { ok: false, error: e.message };
+    } finally {
+        if (attachedHere) {
+            try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+        }
     }
 }
 
@@ -1032,14 +1005,59 @@ let pendingColorTask = null;
 // 派发前写入 storage，冷启动/校验前恢复；不从会被清空的 pendingColorTask 反推
 const ACTIVE_COLOR_EXEC_KEY = 'polo_active_color_exec';
 let activeColorExec = null;
+let colorDispatchStopped = false;
+let colorDispatchEpoch = 0;
+let colorCompletionLock = Promise.resolve();
+function withColorCompletionLock(operation) {
+    const next = colorCompletionLock.then(operation);
+    colorCompletionLock = next.catch(() => {});
+    return next;
+}
 
 // 执行绑定的文件标识：下载/缓存/通知一律用它，异步回调不得再读可变的 CURRENT_FILENAME
-function boundColorFileInfo() {
-    const exec = activeColorExec;
-    if (exec && typeof exec.fileFolder === 'string') {
-        return { fileKey: exec.fileKey || '', fileFolder: exec.fileFolder || DEFAULT_FILE_FOLDER };
+function boundColorFileInfo(exec) {
+    if (!exec || typeof exec.fileKey !== 'string' || typeof exec.fileFolder !== 'string') {
+        throw new Error('缺少请求绑定的执行文件身份');
     }
-    return { fileKey: getFilePrefix(), fileFolder: CURRENT_FILENAME || DEFAULT_FILE_FOLDER };
+    return Object.freeze({ fileKey: exec.fileKey, fileFolder: exec.fileFolder || DEFAULT_FILE_FOLDER });
+}
+
+function sameColorExec(exec, msg, sender) {
+    return !!exec && (!sender || sender.frameId === undefined || sender.frameId === 0) && exec.rowNum === msg.rowNum && (exec.batchId || null) === (msg.batchId || null)
+        && (!exec.executionId || exec.executionId === msg.executionId)
+        && (!sender || !sender.tab || !exec.tabId || exec.tabId === sender.tab.id);
+}
+
+async function colorDispatchAllowed(task, tabId) {
+    const exec = await getActiveColorExec();
+    return !colorDispatchStopped && !!exec && sameColorExec(exec, task) && exec.state === 'pending'
+        && exec.dispatchAllowed !== false && exec.fileKey === getFilePrefix()
+        && (!exec.tabId || exec.tabId === tabId);
+}
+
+async function stopPendingColorDispatch() {
+    colorDispatchStopped = true;
+    colorDispatchEpoch++;
+    return withColorCompletionLock(async () => {
+    const exec = await getActiveColorExec();
+    if (exec && ['pending', 'accepted'].includes(exec.state)) {
+        await saveActiveColorExec({ ...exec, dispatchAllowed: false, state: 'cancelled' });
+        await savePendingColorTask(null);
+        if (exec.tabId) {
+            try { await chrome.tabs.sendMessage(exec.tabId, { action: 'cancelColorTask', executionId: exec.executionId }); } catch (_) {}
+        }
+    }
+    });
+}
+
+async function bindPendingColorTab(task, tabId) {
+    return withColorCompletionLock(async () => {
+        const exec = await getActiveColorExec();
+        if (colorDispatchStopped || !sameColorExec(exec, task) || exec.state !== 'pending'
+            || exec.dispatchAllowed === false || exec.fileKey !== getFilePrefix()) return false;
+        await saveActiveColorExec({ ...exec, tabId });
+        return true;
+    });
 }
 
 async function saveActiveColorExec(exec) {
@@ -1061,7 +1079,23 @@ async function getActiveColorExec() {
 async function recoverColorExecOnStartup() {
     try { await getActiveColorExec(); } catch (_) {}
 }
-let pendingAiEditTask = null;
+const PENDING_AI_EDIT_KEY = 'polo_pending_ai_edit';
+
+async function dispatchPendingAiEdit(tabId) {
+    const saved = await new Promise(resolve => chrome.storage.local.get(PENDING_AI_EDIT_KEY, resolve));
+    const task = saved[PENDING_AI_EDIT_KEY];
+    if (!task || task.tabId !== tabId) return { ok: false, error: '无匹配的改图任务' };
+    if (task.fileKey !== getFilePrefix()) {
+        await new Promise(resolve => chrome.storage.local.remove(PENDING_AI_EDIT_KEY, resolve));
+        return { ok: false, error: '改图任务所属文件已切换' };
+    }
+    const response = await sendStartAiEditTask(tabId, task);
+    if (response.ok || response.busy) {
+        const current = await new Promise(resolve => chrome.storage.local.get(PENDING_AI_EDIT_KEY, resolve));
+        if (current[PENDING_AI_EDIT_KEY]?.executionId === task.executionId) await new Promise(resolve => chrome.storage.local.remove(PENDING_AI_EDIT_KEY, resolve));
+    }
+    return response;
+}
 
 const IDB_NAME = 'PoloColorImages';
 const IDB_STORE = 'images';
@@ -1146,8 +1180,8 @@ function productKey() {
 
 // 生成颜色图本地完整路径：按 COLOR_IMG_DIR/Polo发品_颜色图/{文件名}/rowN/rowN_{颜色}.png 拼接
 // （与 downloadDoubaoImage 的落盘目录保持一致）
-function buildColorImagePath(rowNum, color) {
-    let base = COLOR_IMG_DIR;
+function buildColorImagePath(rowNum, color, context) {
+    let base = context && context.colorImgDir !== undefined ? context.colorImgDir : COLOR_IMG_DIR;
     if (!base) {
         base = 'D:\\下载\\gg';
     }
@@ -1156,7 +1190,7 @@ function buildColorImagePath(rowNum, color) {
         ? base.slice(0, -1)
         : base;
     const hasSubDir = dir.includes('Polo发品_颜色图');
-    const fileFolder = CURRENT_FILENAME || DEFAULT_FILE_FOLDER; // 与 downloadDoubaoImage 下载侧保持一致
+    const fileFolder = context && context.fileFolder !== undefined ? context.fileFolder : (CURRENT_FILENAME || DEFAULT_FILE_FOLDER);
     let path;
     if (hasSubDir) {
         path = dir + sep + fileFolder + sep + 'row' + rowNum + sep + 'row' + rowNum + '_' + color + '.png';
@@ -1169,15 +1203,17 @@ function buildColorImagePath(rowNum, color) {
 
 // 读取某行某颜色的颜色图数据：优先当前文件键，其次 legacy 键（迁移后删除），
 // 返回 { url, path }（data URL 或本地路径），供发品页上传颜色图
-function getColorImagePathData(rowNum, color, callback) {
-    const storageKey = colorKey(rowNum);
+function getColorImagePathData(rowNum, color, callback, context) {
+    context = context || { fileKey: getFilePrefix(), fileFolder: CURRENT_FILENAME || DEFAULT_FILE_FOLDER, colorImgDir: COLOR_IMG_DIR };
+    const storageKey = context.fileKey + 'color__' + rowNum;
+    const boundImageDir = context.colorImgDir;
     console.log(`🔍 [getColorImagePathData] row=${rowNum}, color=${color}, COLOR_IMG_DIR=${COLOR_IMG_DIR}, CURRENT_FILENAME=${CURRENT_FILENAME}, storageKey=${storageKey}`);
     chrome.storage.local.get(storageKey, (result) => {
         let images = result[storageKey] || {};
         if (Object.keys(images).length === 0) {
             const legacyKey = 'color_images_row_' + rowNum;
             chrome.storage.local.get(legacyKey, (legacyResult) => {
-                const legacyImages = legacyResult[legacyKey] || {};
+                const legacyImages = context.taskId || context.fileKey ? {} : (legacyResult[legacyKey] || {});
                 if (Object.keys(legacyImages).length > 0) {
                     chrome.storage.local.set({ [storageKey]: legacyImages }, () => {
                         chrome.storage.local.remove(legacyKey);
@@ -1188,8 +1224,8 @@ function getColorImagePathData(rowNum, color, callback) {
                 const imgData = images[color];
                 const url = typeof imgData === 'string' ? imgData : (imgData?.url || null);
                 let path = null;
-                if (COLOR_IMG_DIR) {
-                    path = buildColorImagePath(rowNum, color);
+                if (boundImageDir) {
+                    path = buildColorImagePath(rowNum, color, context);
                     console.log(`🔍 [getColorImagePathData] storage空，用COLOR_IMG_DIR拼路径: ${path}`);
                 } else {
                     path = typeof imgData === 'string' ? null : (imgData?.path || null);
@@ -1211,8 +1247,8 @@ function getColorImagePathData(rowNum, color, callback) {
                 const url = typeof imgData === 'string' ? imgData : (imgData?.url || null);
                 console.log(`🔍 [getColorImagePathData] url: ${url}`);
                 let path = null;
-                if (COLOR_IMG_DIR) {
-                    path = buildColorImagePath(rowNum, color);
+                if (boundImageDir) {
+                    path = buildColorImagePath(rowNum, color, context);
                     console.log(`🔍 [getColorImagePathData] storage有数据，用COLOR_IMG_DIR拼路径: ${path}`);
                 } else {
                     path = typeof imgData === 'string' ? null : (imgData?.path || null);
@@ -1250,20 +1286,26 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         console.log('🌐 豆包页面加载完成:', tabId);
         doubaoTabId = tabId;
         await saveDoubaoTabId(tabId);
+        dispatchPendingAiEdit(tabId).catch(e => console.warn('改图任务接收失败:', e.message));
         
         const pendingTask = await getPendingColorTask();
         if (pendingTask) {
             console.log('📤 发送待处理的换色任务（从storage恢复）');
             setTimeout(async () => {
                 // 补发也必须核对接收结果：未确认接收就保留待派发记录（不能凭加载事件绕过）
+                if (!await colorDispatchAllowed(pendingTask, tabId)) return;
                 const resp = await sendStartColorTask(tabId, pendingTask);
                 if (resp && resp.ok) {
-                    await savePendingColorTask(null);
+                    await withColorCompletionLock(async () => {
                     const exec = await getActiveColorExec();
                     if (exec && (exec.batchId || null) === ((typeof pendingTask.batchId === 'string' && pendingTask.batchId) ? pendingTask.batchId : null)
-                        && exec.rowNum === pendingTask.rowNum) {
+                        && exec.rowNum === pendingTask.rowNum && (!exec.executionId || exec.executionId === pendingTask.executionId)
+                        && ['pending', 'accepted'].includes(exec.state) && exec.dispatchAllowed !== false
+                        && !(exec.state === 'pending' && colorDispatchStopped)) {
+                        await savePendingColorTask(null);
                         await saveActiveColorExec(Object.assign({}, exec, { state: 'accepted', acceptedAt: Date.now(), tabId }));
                     }
+                    });
                     console.log('✅ 补发已确认接收');
                 } else {
                     console.warn('⚠️ 补发未被接收（保留待派发记录）:', (resp && resp.error) || '无响应');
@@ -1276,7 +1318,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 // 共享动作分发器：处理 onMessage/onMessageExternal 的 17 种业务动作
 // （saveProductData/saveBatchProducts/getProductByRow/openPublishPage/…/getConfig），
 // 各动作内直接操作 storage 与目录配置并 sendResponse
-async function handleSharedAction(request, sendResponse) {
+async function handleSharedAction(request, sendResponse, sender) {
     // ---------- 发品任务控制（发品助手页 file:// 与扩展内部均可） ----------
     if (request.action === 'pausePublishQueue') {
         markPublishStop();   // 立即置闸门并递增停止代次：资源检查/开页途中也不再创建新页
@@ -1305,19 +1347,36 @@ async function handleSharedAction(request, sendResponse) {
         chrome.storage.local.remove(PUBLISH_LOG_KEY, () => sendResponse({ ok: true }));
         return true;
     }
-    // 豆包确认接收：把"待派发身份"提升为"已接收执行身份"
+    if (request.action === 'getColorTaskEvents') {
+        const events = await new Promise(resolve => chrome.storage.local.get(['color_task_complete_event', 'color_task_accepted_event', 'color_task_stopped_event'], resolve));
+        sendResponse({ ok: true, events });
+        return true;
+    }
+    if (request.action === 'pauseColorDispatch') {
+        await stopPendingColorDispatch();
+        sendResponse({ ok: true });
+        return true;
+    }
+    // 接收确认只来自已绑定的豆包执行页。
     if (request.action === 'colorTaskAccepted') {
-        const batchId = (typeof request.batchId === 'string' && request.batchId) ? request.batchId : null;
-        getActiveColorExec().then((exec) => {
-            if (!exec) { sendResponse({ ok: false, error: '无待派发身份' }); return; }
-            if ((exec.batchId || null) !== batchId || exec.rowNum !== request.rowNum) {
-                console.warn(`⚠️ 接收确认与待派发身份不符，忽略（收到 row${request.rowNum}/batch ${batchId || '(缺失)'}）`);
-                sendResponse({ ok: false, error: '身份不符' });
-                return;
-            }
-            saveActiveColorExec(Object.assign({}, exec, { state: 'accepted', acceptedAt: Date.now() }))
-                .then(() => sendResponse({ ok: true }));
-        }).catch(() => sendResponse({ ok: false, error: '身份读取异常' }));
+        await withColorCompletionLock(async () => {
+        const exec = await getActiveColorExec();
+        const tabId = sender && sender.tab && sender.tab.id;
+        if (!tabId || !sameColorExec(exec, request, sender) || !exec
+            || !['pending', 'accepted'].includes(exec.state) || (exec.state === 'pending' && colorDispatchStopped) || exec.dispatchAllowed === false
+            || (exec.state === 'pending' && exec.fileKey !== getFilePrefix())) {
+            sendResponse({ ok: false, error: '执行身份或派发许可已失效' });
+            return true;
+        }
+        const accepted = { ...exec, state: 'accepted', tabId, acceptedAt: Date.now() };
+        await saveActiveColorExec(accepted);
+        await savePendingColorTask(null);
+        const payload = { rowNum: exec.rowNum, batchId: exec.batchId, executionId: exec.executionId,
+            fileKey: exec.fileKey, timestamp: Date.now() };
+        await new Promise(resolve => chrome.storage.local.set({ color_task_accepted_event: payload }, resolve));
+        notifyAssistant('colorTaskAccepted', payload);
+        sendResponse({ ok: true });
+        });
         return true;
     }
     // 查询当前换色执行身份与豆包执行状态（供页面做超时后的明确处理动作）
@@ -1332,10 +1391,7 @@ async function handleSharedAction(request, sendResponse) {
                 if (tabId) {
                     try { await chrome.tabs.get(tabId); } catch (_) { tabId = null; }
                 }
-                if (!tabId) {
-                    const tab = await findDoubaoTab();
-                    tabId = tab ? tab.id : null;
-                }
+
                 if (tabId) {
                     engine = await chrome.tabs.sendMessage(tabId, { action: 'getColorTaskStatus' });
                     engineKnown = !!(engine && engine.ok === true && typeof engine.isProcessing === 'boolean');
@@ -1344,10 +1400,10 @@ async function handleSharedAction(request, sendResponse) {
                         const et = engine.task || null;
                         const etRow = et && et.rowNum;
                         const etBatch = (et && typeof et.batchId === 'string' && et.batchId) ? et.batchId : null;
-                        if (etRow !== undefined && etRow !== null && etRow !== exec.rowNum) {
+                        if (!et || etRow !== exec.rowNum || (exec.executionId && et.executionId !== exec.executionId)) {
                             console.warn(`⚠️ 引擎任务与执行身份不符（engine row${etRow} / exec row${exec.rowNum}），按未知处理`);
                             engineKnown = false;
-                        } else if (etBatch !== (exec.batchId || null) && etBatch !== null) {
+                        } else if (etBatch !== (exec.batchId || null)) {
                             console.warn(`⚠️ 引擎任务标识与执行身份不符（engine ${etBatch} / exec ${exec.batchId || '(单款)'}），按未知处理`);
                             engineKnown = false;
                         }
@@ -1365,29 +1421,75 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'clearColorExec') {
-        saveActiveColorExec(null).then(() => sendResponse({ ok: true }));
+        const exec = await getActiveColorExec();
+        if (exec && ((exec.executionId && exec.executionId !== request.executionId)
+            || (request.rowNum !== undefined && exec.rowNum !== request.rowNum)
+            || (request.fileKey !== undefined && exec.fileKey !== request.fileKey)
+            || (request.batchId !== undefined && (exec.batchId || null) !== request.batchId))) { sendResponse({ ok: false, error: '执行已变化，未清除新任务' }); return true; }
+        await saveActiveColorExec(null);
+        await savePendingColorTask(null);
+        sendResponse({ ok: true });
         return true;
     }
-    // 内存闸门查询：发品与换色共用同一套判断（换色侧不再自成一套规则）
-    if (request.action === 'getMemoryGate') {
-        assessMemoryResources(request.forceRefresh === true).then(a => {
-            sendResponse({
-                ok: true,
-                allowed: a.ok,
-                reasons: a.reasons,
-                reasonText: a.reasons.map(x => x.detail).join('；'),
-                physAvailableMB: a.mem.physAvailableMB,
-                physError: a.mem.physError,
-                commitFreeMB: a.mem.commitFreeMB,
-                commitLimitMB: a.mem.commitLimitMB,
-                commitUsedPct: a.mem.commitUsedPct,
-                commitError: a.mem.commitError,
-                sampledAt: a.mem.sampledAt,
-                thresholdMB: a.threshold,
-                commitFreeMinMB: a.settings.commitFreeMinMB,
-                commitUsedPctMax: a.settings.commitUsedPctMax
-            });
-        }).catch(e => sendResponse({ ok: false, error: e.message }));
+    /* ================= 套图（快速五图）任务：suite 命名空间 =================
+       与 color 任务完全隔离：独立存储键、独立动作名、独立阶段机。
+       豆包标签/输入通道两者共用 → 建立互斥，避免同时上传与输入。 */
+    if (request.action === 'suiteCreate') {
+        (async () => {
+            try {
+                // 互斥：换色任务仍在执行时不允许并发占用豆包输入通道
+                const cexec = await getActiveColorExec();
+                if (cexec && cexec.state === 'accepted') {
+                    sendResponse({ ok: false, error: '换色任务正在执行，请等它结束后再发起套图（两者共用豆包输入通道）' });
+                    return;
+                }
+                const t = await SuiteTaskStore.create(request.task || {});
+                sendResponse({ ok: true, task: t, stage: t.stage });
+            } catch (e) { sendResponse({ ok: false, error: e.message }); }
+        })();
+        return true;
+    }
+    if (request.action === 'suiteGetTask') {
+        SuiteTaskStore.get(request.taskId).then(t => sendResponse({ ok: true, task: t })).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'suiteListTasks') {
+        SuiteTaskStore.list({ fileKey: request.fileKey, rowNum: request.rowNum, activeOnly: !!request.activeOnly })
+            .then(list => sendResponse({ ok: true, tasks: list })).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'suiteCancel') {
+        SuiteTaskStore.cancel(request.taskId, request.reason)
+            .then(t => sendResponse({ ok: true, task: t })).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    // 进度/结果回传：先做身份核验（拒绝旧任务、其他产品、已取消、阶段倒退）
+    if (request.action === 'suiteProgress') {
+        (async () => {
+            try {
+                const check = await SuiteTaskStore.acceptReport(request.report || {});
+                if (!check.accepted) { sendResponse({ ok: false, rejected: true, error: check.reason }); return; }
+                const r = request.report || {};
+                let task;
+                if (r.final && r.finalStage) {
+                    task = await SuiteTaskStore.finish(r.taskId, r.finalStage, r.error || '', { results: r.results || check.task.results, diag: r.diag || check.task.diag });
+                } else if (r.stage) {
+                    task = await SuiteTaskStore.advance(r.taskId, r.stage, { results: r.results || check.task.results, diag: r.diag || check.task.diag });
+                } else {
+                    sendResponse({ ok: false, error: '缺少 stage 或 finalStage' });
+                    return;
+                }
+                sendResponse({ ok: true, task });
+            } catch (e) { sendResponse({ ok: false, error: e.message }); }
+        })();
+        return true;
+    }
+    if (request.action === 'suiteRecover') {
+        SuiteTaskStore.recoverOnStartup().then(ids => sendResponse({ ok: true, interrupted: ids })).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    // 兼容尚未刷新的助手页：内存保护已按用户要求移除，不发起监测请求。
+    if (request.action === 'getMemoryGate') {        sendResponse({ ok: true, allowed: true, disabled: true, reasons: [], reasonText: '' });
         return true;
     }
     if (request.action === 'retryPublishRow') {
@@ -1400,8 +1502,9 @@ async function handleSharedAction(request, sendResponse) {
     }
     if (request.action === 'saveProductData') {
         const pKey = productKey();
-        const setObj = { [pKey]: request.data };
-        setObj[STORAGE_KEY] = request.data;
+        const boundData = { ...request.data, _publishFileKey: getFilePrefix() };
+        const setObj = { [pKey]: boundData };
+        setObj[STORAGE_KEY] = boundData;
         chrome.storage.local.set(setObj, () => {
             sendResponse({ ok: true });
         });
@@ -1435,6 +1538,11 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'saveBatchProducts') {
+        const result = await withPublishLock(async () => {
+        const task = await loadPublishTask();
+        if (task && task.remaining.length && (task.state === 'running' || task.state === 'paused')) {
+            return { ok: false, error: '存在未完成发品任务，未覆盖原产品数据' };
+        }
         const products = request.products || [];
         const setObj = {};
         const prefix = getFilePrefix();
@@ -1464,15 +1572,15 @@ async function handleSharedAction(request, sendResponse) {
         } else if (request.colorImgDir && COLOR_IMG_DIR) {
             console.log('🖼️ 颜色图目录已由popup设置，忽略批量发品传入值。当前:', COLOR_IMG_DIR, '，批量传入:', request.colorImgDir);
         }
-        chrome.storage.local.set(setObj, () => {
-            console.log(`📦 已保存 ${products.length} 个产品数据`);
-            sendResponse({ ok: true, count: products.length });
+        await new Promise(resolve => chrome.storage.local.set(setObj, resolve));
+        return { ok: true, count: products.length };
         });
+        sendResponse(result);
         return true;
     }
     if (request.action === 'getProductByRow') {
         const rowNum = request.rowNum;
-        const finish = (prefix) => {
+        const finish = (prefix, flags = {}) => {
             const key = prefix + 'product__row' + rowNum;
             chrome.storage.local.get(key, (result) => {
                 const product = result[key] || null;
@@ -1481,19 +1589,30 @@ async function handleSharedAction(request, sendResponse) {
                 } else {
                     console.log(`⚠️ 未找到产品数据: row=${rowNum}`);
                 }
-                sendResponse({ ok: !!product, data: product });
+                sendResponse({ ok: !!product, data: product ? { ...product, _publishFileKey: prefix } : null, ...flags });
             });
         };
         const hasTaskId = (request.taskId !== undefined && request.taskId !== null && request.taskId !== '');
         if (hasTaskId) {
             // taskId 已提供：必须匹配存在的任务，且按任务绑定文件读取；不匹配一律拒绝（不回退当前文件）
-            loadPublishTask().then(t => {
+            loadPublishTask().then(async t => {
                 if (!t || t.taskId !== request.taskId) {
                     console.warn(`⛔ getProductByRow 任务标识不匹配（请求 ${request.taskId}），已拒绝，不回退当前文件`);
                     sendResponse({ ok: false, error: '任务标识不匹配，已拒绝（不回退当前文件）' });
                     return;
                 }
-                finish(taskFileKey(t));
+                // 已填入与已保存是独立状态：完成一轮后待保存，刷新不重复填入。
+                const alreadyFilled = (t.filledRows || []).some(row => Number(row) === Number(rowNum));
+                const saved = await getVerifiedSavedMap(taskFileKey(t));
+                const autoFillAllowed = !saved[rowNum] && !alreadyFilled
+                    && Number(t.currentRow) === Number(rowNum) && !!sender.tab && sender.tab.id === t.currentTabId;
+                if (t.products && Object.prototype.hasOwnProperty.call(t.products, String(rowNum))) {
+                    const data = t.products[String(rowNum)];
+                    sendResponse({ ok: !!data, autoFillAllowed, data: data ? { ...data, _publishTaskId: t.taskId, _publishFileKey: taskFileKey(t), _publishImageDir: t.imageDir } : null });
+                } else if (!t.products) {
+                    // 兼容已存在的旧任务；未完成任务期间存储写入已被拒绝。
+                    finish(taskFileKey(t), { autoFillAllowed });
+                } else sendResponse({ ok: false, error: '该行不属于任务产品快照' });
             });
         } else {
             finish(getFilePrefix());
@@ -1508,6 +1627,7 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'openBatchPublish') {
+        const epochAtRequest = publishStopEpoch;
         const rows = request.rows || [];
         if (rows.length === 0) {
             sendResponse({ ok: true, count: 0 });
@@ -1524,11 +1644,30 @@ async function handleSharedAction(request, sendResponse) {
                 return { ok: false, error: `存在暂停中的任务（剩 ${prev.remaining.length} 款）。请先点「继续下一批」` };
             }
 
+            if (publishStoppedSince(epochAtRequest)) return { ok: false, error: '等待创建期间收到停止请求，未创建任务' };
+            const fileKey = getFilePrefix();
+            if (request.fileKey !== undefined && request.fileKey !== fileKey) {
+                return { ok: false, error: 'Excel 文件已切换，未创建任务' };
+            }
+            const data = Array.isArray(request.products) ? request.products : null;
+            let snapshot = {};
+            if (data) {
+                for (const p of data) if (p && rows.includes(p.row)) snapshot[String(p.row)] = p;
+                if (rows.some(row => !snapshot[String(row)])) return { ok: false, error: '任务产品数据不完整，未创建任务' };
+            } else {
+                const keys = rows.map(row => fileKey + 'product__row' + row);
+                const stored = await new Promise(resolve => chrome.storage.local.get(keys, resolve));
+                for (const row of rows) snapshot[String(row)] = stored[fileKey + 'product__row' + row] || null;
+            }
             const s = await getPublishSettings();
             const now = Date.now();
             const task = {
                 taskId: 'pt_' + now + '_' + Math.random().toString(36).slice(2, 8),
-                fileKey: getFilePrefix(),
+                fileKey,
+                products: snapshot,
+                imageDir: request.imageDir || IMAGE_DIR,
+                colorImgDir: COLOR_IMG_DIR || request.colorImgDir || '',
+                fileFolder: CURRENT_FILENAME || DEFAULT_FILE_FOLDER,
                 total: rows.length,
                 remaining: [...rows],
                 filledCount: 0,
@@ -1549,8 +1688,16 @@ async function handleSharedAction(request, sendResponse) {
                 resourceBlockDetail: '',
                 startedAt: now
             };
+            if (request.imageDir && isValidDir(request.imageDir)) IMAGE_DIR = request.imageDir;
+            if (request.colorImgDir && isValidDir(request.colorImgDir) && !COLOR_IMG_DIR) COLOR_IMG_DIR = request.colorImgDir;
+            await new Promise(resolve => chrome.storage.local.set({ [IMAGE_DIR_KEY]: IMAGE_DIR, [COLOR_IMG_DIR_KEY]: COLOR_IMG_DIR }, resolve));
             await savePublishTask(task);
-            beginPublishRunIntent();   // 新任务：清掉旧停止并记录代次
+            if (publishStoppedSince(epochAtRequest)) {
+                task.state = 'paused'; task.pauseReason = 'manual'; task.pauseDetail = '创建期间收到停止请求';
+                await savePublishTask(task); await broadcastPublishState();
+                return { ok: true, count: rows.length, taskId: task.taskId, batchSize: 50 };
+            }
+            beginPublishRunIntentFrom(epochAtRequest);
             console.log(`📋 发品任务已创建 ${task.taskId}，共 ${task.total} 款，批次 ${task.batchSize}`);
             await appendPublishLog({ level: 'create', taskId: task.taskId, total: task.total, batchSize: task.batchSize, fileKey: task.fileKey });
 
@@ -1573,7 +1720,7 @@ async function handleSharedAction(request, sendResponse) {
         // 已废弃并拒绝：禁止外部页面伪造「已保存」
         console.warn(`⛔ markUploaded 已废弃并拒绝（row ${request.row}）`);
         await appendPublishLog({ level: 'reject', event: 'markUploaded', row: request.row });
-        sendResponse({ ok: false, error: 'markUploaded 已废弃：保存状态只能由已核实保存记录决定' });
+        sendResponse({ ok: false, error: 'markUploaded 已废弃：请使用页3保存菜单记账' });
         return true;
     }
     if (request.action === 'getUploadedRows') {
@@ -1588,7 +1735,7 @@ async function handleSharedAction(request, sendResponse) {
             }
             fileKey = taskFileKey(t);
         } else {
-            fileKey = getFilePrefix();
+            fileKey = typeof request.fileKey === 'string' ? request.fileKey : getFilePrefix();
         }
         const verified = await getVerifiedSavedMap(fileKey);
         const legacyKey = uploadedKey(fileKey);
@@ -1615,7 +1762,7 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'getColorImage') {
-        fetchColorImageAsBase64(request.rowNum, request.color).then(result => {
+        fetchColorImageAsBase64(request.rowNum, request.color, request.fileKey).then(result => {
             sendResponse(result);
         });
         return true;
@@ -1624,7 +1771,7 @@ async function handleSharedAction(request, sendResponse) {
         const storageKey = colorKey(request.rowNum);
         chrome.storage.local.get(storageKey, (result) => {
             let images = result[storageKey] || {};
-            if (Object.keys(images).length === 0) {
+            if (Object.keys(images).length === 0 && storageKey === 'color__' + request.rowNum) {
                 const legacyKey = 'color_images_row_' + request.rowNum;
                 chrome.storage.local.get(legacyKey, (legacyResult) => {
                     const legacyImages = legacyResult[legacyKey] || {};
@@ -1644,6 +1791,18 @@ async function handleSharedAction(request, sendResponse) {
         return true;
     }
     if (request.action === 'getColorImagePath') {
+        if (request.taskId) {
+            const task = await loadPublishTask();
+            if (!task || task.taskId !== request.taskId || (task.products ? !Object.prototype.hasOwnProperty.call(task.products, String(request.rowNum)) : ![...task.remaining, ...(task.filledRows || [])].includes(request.rowNum))) {
+                sendResponse({ ok: false, error: '发品图片任务身份不匹配' }); return true;
+            }
+            if (task.colorImgDir === undefined && task.fileKey !== getFilePrefix()) { sendResponse({ ok: false, error: '旧任务缺少图片目录绑定，请切回原 Excel' }); return true; }
+            getColorImagePathData(request.rowNum, request.color, sendResponse, {
+                taskId: task.taskId, fileKey: task.fileKey, fileFolder: task.fileFolder === undefined ? (CURRENT_FILENAME || DEFAULT_FILE_FOLDER) : task.fileFolder,
+                colorImgDir: task.colorImgDir === undefined ? COLOR_IMG_DIR : task.colorImgDir
+            });
+            return true;
+        }
         console.log(`🔍 [getColorImagePath] 调用: rowNum=${request.rowNum}, color=${request.color}, COLOR_IMG_DIR=${COLOR_IMG_DIR}, CURRENT_FILENAME=${CURRENT_FILENAME}`);
         const responseFn = (data) => {
             console.log(`🔍 [getColorImagePath] 收到getColorImagePathData回调，原始data: ${JSON.stringify(data)}`);
@@ -1666,9 +1825,13 @@ async function handleSharedAction(request, sendResponse) {
             sendResponse({ ok: true, filename: CURRENT_FILENAME, unchanged: true });
             return true;
         }
+        colorDispatchStopped = true;
+        colorDispatchEpoch++;
+        markPublishStop();
         // 先真正完成暂停（等锁释放）再切换当前文件，避免暂停与切换竞态
-        pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').then(() => {
+        pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').then(async () => {
             const prevName = CURRENT_FILENAME;
+            await stopPendingColorDispatch();
             CURRENT_FILENAME = nextName;
             console.log(`📄 当前文件名切换为: ${CURRENT_FILENAME || '(默认)'}`);
             // 通知助手页暂停换色批次（保留在途结果，不取消、不关页）
@@ -1782,26 +1945,6 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
             }
             return true;
         }
-        // 内存水位查询：供「发品助手」批量换色时做暂停保护
-        if (request.action === 'getSystemMemory') {
-            if (!chrome.system || !chrome.system.memory) {
-                sendResponse({ ok: false, error: 'system.memory 权限未生效（需在 chrome://extensions 重新加载扩展）' });
-                return true;
-            }
-            chrome.system.memory.getInfo((info) => {
-                if (chrome.runtime.lastError) {
-                    sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-                    return;
-                }
-                sendResponse({
-                    ok: true,
-                    capacity: info.capacity,
-                    availableCapacity: info.availableCapacity,
-                    availableMB: Math.round(info.availableCapacity / 1048576)
-                });
-            });
-            return true;
-        }
         // 扩展重载时间戳：页面据此自动刷新（SW 休眠不会改变它，故不会误刷）
         if (request.action === 'getExtBootInfo') {
             chrome.storage.local.get('polo_ext_reload_ts', (r) => {
@@ -1809,20 +1952,14 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
             });
             return true;
         }
-        // 阈值同步：页面把它的阈值写进扩展 storage，供上品队列闸门读取
-        if (request.action === 'setMemPauseMB') {
-            const n = parseInt(request.value, 10);
-            if (!Number.isInteger(n) || n < 200) {
-                sendResponse({ ok: false, error: '阈值需为 ≥200 的整数' });
-                return true;
-            }
-            chrome.storage.local.set({ [MEM_PAUSE_MB_KEY]: n }, () => {
-                console.log(`💾 内存暂停阈值已同步到扩展: ${n} MB`);
-                sendResponse({ ok: true, value: n });
-            });
+        // 兼容旧页面：不再保存或启用内存阈值。
+        if (request.action === 'setMemPauseMB' || request.action === 'getSystemMemory') {
+            sendResponse({ ok: true, disabled: true });
             return true;
         }
-        handleSharedAction(request, sendResponse);
+        handleSharedAction(request, sendResponse, sender).then(handled => {
+            if (!handled) sendResponse({ ok: false, error: '未知消息动作：' + request.action });
+        }).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }).catch((err) => {
         console.warn('[onMessageExternal] 来源校验异常，拒绝:', err.message);
@@ -1862,6 +1999,10 @@ chrome.runtime.onConnectExternal.addListener((port) => {
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log(`🔍 [onMessage] 收到消息: action=${request.action}, sender=${sender?.tab?.url ? 'tab' : 'unknown'}`);
+    if (request.action === 'savePublishProduct' || request.action === 'recordPublishSaveClick') {
+        savePublishProduct(request, sender, request.action === 'savePublishProduct').then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
 
     // ---------- 发品任务（内部通道：content script 发来，sender.tab 可信） ----------
     if (request.action === 'publishFilled') {
@@ -1955,7 +2096,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'heartbeat') {
         ensureConfigLoaded().then(() => {
             sendResponse({ ok: true, ts: Date.now() });
-        });
+        }).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
 
@@ -2070,9 +2211,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow'];
+    const sharedActions = ['saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover'];
     if (sharedActions.includes(request.action)) {
-        handleSharedAction(request, sendResponse);
+        handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
 
@@ -2178,7 +2319,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'downloadDoubaoImage') {
-        downloadDoubaoImage(request.url, request.filename, request.rowNum).then(result => {
+        (async () => {
+            const exec = await getActiveColorExec();
+            if (!exec || exec.state !== 'accepted' || !sameColorExec(exec, request, sender) || !new RegExp('^row' + request.rowNum + '_(white|black|gray|navy)\\.(png|jpe?g)$', 'i').test(request.filename)) return { ok: false, error: '下载执行身份或图片行号不匹配' };
+            return downloadDoubaoImage(request.url, request.filename, request.rowNum, Object.freeze({ ...exec }));
+        })().then(result => {
             sendResponse(result);
         });
         return true;
@@ -2192,13 +2337,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const batchId = (typeof rawBatchId === 'string' && rawBatchId) ? rawBatchId : null;
             const eventKey = 'color_task_complete_event';
             // 身份校验基于【持久化执行身份】：冷启动后同样有效；不得被旧消息覆盖
-            getActiveColorExec().then((exec) => {
+            withColorCompletionLock(async () => {
+                const exec = await getActiveColorExec();
                 if (!exec) {
                     console.warn(`⛔ 无当前执行身份记录，拒绝换色完成消息: row${rowNum}（不静默当作单款任务）`);
                     sendResponse({ ok: false, error: '执行身份未知，已拒绝' });
                     return;
                 }
-                if ((exec.batchId || null) !== batchId || exec.rowNum !== rowNum) {
+                if (!sameColorExec(exec, request, sender) || exec.state === 'cancelled') {
                     console.warn(`⛔ 换色完成身份不匹配（收到 row${rowNum}/batch ${batchId || '(缺失)'}，当前 row${exec.rowNum}/batch ${exec.batchId || '(单款)'}），已拒绝且不覆盖已保存事件`);
                     sendResponse({ ok: false, error: '执行身份不匹配，已拒绝' });
                     return;
@@ -2210,13 +2356,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     fileKey: exec.fileKey || '',
                     fileFolder: exec.fileFolder || DEFAULT_FILE_FOLDER,
                     execStartedAt: exec.startedAt || 0,
+                    executionId: exec.executionId || null,
                     results: request.results || null,
                     timestamp: Date.now()
                 });
+                if (exec.state === 'finished') { sendResponse({ ok: false, error: '重复完成消息' }); return; }
+                await saveActiveColorExec({ ...exec, state: 'finished' });
                 chrome.storage.local.set({ [eventKey]: payload }, () => {
                     console.log(`💾 换色完成事件已持久化: row${rowNum} (batch ${batchId || '-'})`);
                 });
                 notifyColorTaskComplete(rowNum, batchId, payload);
+                // 执行结束：释放与套图共用的豆包输入通道互斥
+                saveActiveColorExec(Object.assign({}, exec, { state: 'done', finishedAt: Date.now() }));
                 sendResponse({ ok: true });
             }).catch(() => sendResponse({ ok: false, error: '身份校验异常' }));
             return true;
@@ -2226,7 +2377,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'getColorImage') {
-        fetchColorImageAsBase64(request.rowNum, request.color).then(result => {
+        fetchColorImageAsBase64(request.rowNum, request.color, request.fileKey).then(result => {
             sendResponse(result);
         });
         return true;
@@ -2236,7 +2387,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const storageKey = colorKey(request.rowNum);
         chrome.storage.local.get(storageKey, (result) => {
             let images = result[storageKey] || {};
-            if (Object.keys(images).length === 0) {
+            if (Object.keys(images).length === 0 && storageKey === 'color__' + request.rowNum) {
                 const legacyKey = 'color_images_row_' + request.rowNum;
                 chrome.storage.local.get(legacyKey, (legacyResult) => {
                     const legacyImages = legacyResult[legacyKey] || {};
@@ -2257,6 +2408,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'getColorImagePath') {
+        if (request.taskId) { handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message })); return true; }
         console.log(`🔍 [getColorImagePath] onMessage调用: rowNum=${request.rowNum}, color=${request.color}, COLOR_IMG_DIR=${COLOR_IMG_DIR}, CURRENT_FILENAME=${CURRENT_FILENAME}`);
         const responseFn = (data) => {
             console.log(`🔍 [getColorImagePath] onMessage收到回调，原始data: ${JSON.stringify(data)}`);
@@ -2279,8 +2431,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ ok: true, filename: CURRENT_FILENAME, unchanged: true });
             return true;
         }
-        pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').then(() => {
+        colorDispatchStopped = true;
+        colorDispatchEpoch++;
+        markPublishStop();
+        pausePublishTask('fileSwitch', '用户切换了当前 Excel 文件，任务已暂停').then(async () => {
             const prevName = CURRENT_FILENAME;
+            await stopPendingColorDispatch();
             CURRENT_FILENAME = nextName;
             console.log(`📄 当前文件名切换为: ${CURRENT_FILENAME || '(默认)'}`);
             notifyAssistant('colorFileSwitched', { from: prevName, to: CURRENT_FILENAME });
@@ -2299,7 +2455,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
         sendResponse({ ok: true, accepted: true });
 
-        // 混合方案：先CDP，失败后降级到直接postMessage
+        // 由扩展 iframe 脚本完成操作，主页面另行核对关联结果。
         fillBoxRuleHybrid(tabId).then(result => {
             chrome.tabs.sendMessage(tabId, { action: 'fillBoxRuleResult', result }).catch(() => {});
         }).catch(err => {
@@ -2307,25 +2463,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         });
         return true;
     }
+    sendResponse({ ok: false, error: '未知消息动作：' + request.action });
+    return false;
 });
 
 async function fillBoxRuleHybrid(tabId) {
-    const sendLog = async (msg) => {
-        try { await chrome.tabs.sendMessage(tabId, { action: 'log', msg }); } catch (_) {}
-    };
-
-    await sendLog('📦 方案1: CDP坐标点击方式...');
-    const cdpResult = await tryFillBoxRuleCDP(tabId);
-    await sendLog(`📊 CDP结果: ok=${cdpResult.ok}, error=${cdpResult.error || 'none'}`);
-    if (cdpResult.ok) return cdpResult;
-
-    await sendLog('📦 方案2: iframe content script方式...');
-    const iframeResult = await fillBoxRuleViaIframeScript(tabId);
-    await sendLog(`📊 iframe脚本结果: ok=${iframeResult.ok}, error=${iframeResult.error || 'none'}`);
-    if (iframeResult.ok) return iframeResult;
-
-    await sendLog('📦 方案3: postMessage方案尝试...');
-    return await fillBoxRuleViaTabScript(tabId);
+    // 跨域弹窗由扩展的 iframe 脚本直接处理，避免从主页面访问 iframe.eval。
+    return await fillBoxRuleViaIframeScript(tabId);
 }
 
 // 箱规填写方案2：向 scm.alibaba.com 的模板关联弹窗 iframe 注入 boxRuleIframe.js
@@ -2400,269 +2544,6 @@ async function fillBoxRuleViaIframeScript(tabId) {
     }
 }
 
-async function tryFillBoxRuleCDP(tabId) {
-    const sendLog = async (msg) => {
-        try { await chrome.tabs.sendMessage(tabId, { action: 'log', msg }); } catch (_) {}
-    };
-    
-    console.log('📦 箱规关联 CDP Target 方式尝试...');
-    await sendLog('📦 CDP: 开始attach debugger...');
-    let mainAttached = false;
-    let iframeTargetId = null;
-    let iframeAttached = false;
-    try {
-        try {
-            await chrome.debugger.attach({ tabId }, '1.3');
-            mainAttached = true;
-            console.log('✅ 主页面 debugger attach 成功');
-            await sendLog('✅ CDP: main attach成功');
-        } catch (e) {
-            console.log('❌ 主页面 Debugger attach 失败:', e.message);
-            if (e.message && e.message.includes('already attached')) {
-                mainAttached = true;
-                console.log('⚠️ 已被attach，继续执行');
-                await sendLog('⚠️ CDP: 已被attach，继续执行');
-            } else {
-                await sendLog('❌ CDP: main attach失败: ' + e.message);
-                return { ok: false, error: 'Debugger attach 失败: ' + e.message };
-            }
-        }
-
-        await new Promise(r => setTimeout(r, 1500));
-
-        await sendLog('📦 CDP: 获取iframe位置...');
-        let iframeRect;
-        try {
-            const rectResult = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-                expression: `(function(){
-                    const iframes = document.querySelectorAll('iframe');
-                    for (const iframe of iframes) {
-                        if (iframe.src && iframe.src.includes('scm.alibaba.com') && iframe.src.includes('template_relate_package')) {
-                            const rect = iframe.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {
-                                return {left:rect.left, top:rect.top, width:rect.width, height:rect.height};
-                            }
-                        }
-                    }
-                    return null;
-                })()`,
-                returnByValue: true
-            });
-            iframeRect = rectResult.result?.value;
-            await sendLog(`📦 CDP: iframe位置: ${JSON.stringify(iframeRect)}`);
-        } catch (e) {
-            await sendLog('❌ CDP: 获取iframe位置失败: ' + e.message);
-            return { ok: false, error: '获取iframe位置失败' };
-        }
-
-        if (!iframeRect) {
-            await sendLog('📦 CDP: 尝试第二种方式查找iframe...');
-            try {
-                const rectResult = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-                    expression: `(function(){
-                        const iframes = document.querySelectorAll('iframe');
-                        for (const iframe of iframes) {
-                            const rect = iframe.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.height > 500) {
-                                return {left:rect.left, top:rect.top, width:rect.width, height:rect.height};
-                            }
-                        }
-                        return null;
-                    })()`,
-                    returnByValue: true
-                });
-                iframeRect = rectResult.result?.value;
-                await sendLog(`📦 CDP: 第二种方式iframe位置: ${JSON.stringify(iframeRect)}`);
-            } catch (e) {
-                await sendLog('❌ CDP: 第二种方式获取iframe位置失败: ' + e.message);
-            }
-        }
-
-        if (!iframeRect) {
-            return { ok: false, error: 'iframe未找到' };
-        }
-
-        await sendLog('📦 CDP: 通过主页面注入脚本到iframe...');
-        
-        const boxRuleScript = `(function(){
-            function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-            function nativeClick(el) {
-                if (!el) return;
-                var rect = el.getBoundingClientRect();
-                var x = rect.left + rect.width / 2;
-                var y = rect.top + rect.height / 2;
-                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
-                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
-                el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));
-            }
-            function findEl(text, selector) {
-                var els = document.querySelectorAll(selector);
-                for (var i = 0; i < els.length; i++) {
-                    var t = (els[i].innerText || els[i].textContent || '').trim();
-                    if (t.includes(text) && els[i].offsetParent !== null) return els[i];
-                }
-                return null;
-            }
-            async function run() {
-                var result = { s1: false, s2: false, s3: false, s4: false, s5: false, s6: false };
-                try {
-                    await sleep(800);
-                    
-                    var manual = findEl('手动设置', 'label, .next-radio-wrapper, [class*="radio"]');
-                    if (manual) { nativeClick(manual); await sleep(500); }
-                    var next1 = findEl('下一步', 'button, .next-btn');
-                    if (next1) { nativeClick(next1); await sleep(1500); result.s1 = true; }
-                    
-                    await sleep(800);
-                    
-                    var multi = findEl('一箱多件', 'label, .next-radio-wrapper, [class*="radio"]');
-                    if (multi) { nativeClick(multi); await sleep(500); }
-                    var confirm1 = findEl('确认', 'button, .next-btn');
-                    if (confirm1) { nativeClick(confirm1); await sleep(1500); result.s2 = true; }
-                    
-                    await sleep(1000);
-                    
-                    var next2 = findEl('下一步', 'button, .next-btn');
-                    if (next2) { nativeClick(next2); await sleep(1500); result.s3 = true; }
-                    
-                    await sleep(1500);
-                    
-                    var targetRow = null;
-                    var rows = document.querySelectorAll('tr, .next-table-row');
-                    for (var i = 0; i < rows.length; i++) {
-                        if (rows[i].innerText.includes('50*40*30') || rows[i].innerText.includes('50x40x30')) {
-                            targetRow = rows[i];
-                            break;
-                        }
-                    }
-                    if (targetRow) {
-                        var inputEl = targetRow.querySelector('input[type="number"], .next-number-picker input, input[aria-valuemax]');
-                        if (inputEl) {
-                            inputEl.focus();
-                            inputEl.select();
-                            inputEl.value = '25';
-                            inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-                            inputEl.dispatchEvent(new Event('change', { bubbles: true }));
-                            inputEl.blur();
-                            await sleep(800);
-                            result.s4 = true;
-                        }
-                    }
-                    
-                    await sleep(1000);
-                    
-                    var associate = null;
-                    var rows = document.querySelectorAll('tr, .next-table-row');
-                    for (var i = 0; i < rows.length; i++) {
-                        if (rows[i].innerText.includes('50*40*30') || rows[i].innerText.includes('50x40x30')) {
-                            var btns = rows[i].querySelectorAll('button, .next-btn');
-                            for (var j = 0; j < btns.length; j++) {
-                                if (btns[j].innerText.includes('关联')) {
-                                    associate = btns[j];
-                                    break;
-                                }
-                            }
-                            if (associate) break;
-                        }
-                    }
-                    if (!associate) associate = findEl('关联', 'button, .next-btn');
-                    if (associate) {
-                        if (associate.disabled) associate.disabled = false;
-                        nativeClick(associate);
-                        await sleep(1500);
-                        result.s5 = true;
-                    }
-                    
-                    await sleep(1500);
-                    
-                    var confirm2 = findEl('确认', 'button, .next-btn');
-                    if (confirm2) { nativeClick(confirm2); await sleep(1000); }
-                    var finish = findEl('确认完成', 'button, .next-btn');
-                    if (!finish) finish = findEl('完成', 'button, .next-btn');
-                    if (finish) { nativeClick(finish); await sleep(1000); result.s6 = true; }
-                } catch(e) {}
-                return result;
-            }
-            return run();
-        })()`;
-
-        const injectExpr = `(function(){
-            const iframes = document.querySelectorAll('iframe');
-            for (const iframe of iframes) {
-                if (iframe.src && iframe.src.includes('scm.alibaba.com') && iframe.src.includes('template_relate_package')) {
-                    try {
-                        const win = iframe.contentWindow;
-                        if (win && win.eval) {
-                            return win.eval(\`${boxRuleScript}\`);
-                        }
-                    } catch(e) {
-                        return { error: e.message };
-                    }
-                }
-            }
-            return { error: 'iframe not found' };
-        })()`;
-
-        await sendLog('📦 CDP: 注入脚本到iframe...');
-        try {
-            const result = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
-                expression: injectExpr,
-                returnByValue: true,
-                awaitPromise: true,
-                timeout: 30000
-            });
-            const res = result.result?.value;
-            await sendLog(`📦 CDP: iframe脚本结果: ${JSON.stringify(res)}`);
-            
-            if (res && !res.error) {
-                const allOk = res.s1 && res.s2 && res.s3 && res.s4 && res.s5 && res.s6;
-                if (allOk) {
-                    await sendLog('✅ CDP: 箱规步骤全部完成');
-                    return { ok: true, method: 'cdp-iframe-eval' };
-                } else {
-                    await sendLog(`⚠️ CDP: 部分步骤失败: ${JSON.stringify(res)}`);
-                }
-            }
-        } catch (e) {
-            await sendLog('❌ CDP: 脚本注入失败: ' + e.message);
-        }
-
-        return { ok: false, error: 'CDP脚本注入失败' };
-
-    } catch (e) {
-        console.log('❌ tryFillBoxRuleCDP 异常:', e.message);
-        await sendLog('❌ CDP: 异常: ' + e.message);
-        return { ok: false, error: e.message };
-    }
-}
-
-function buildBoxRuleStepsCode() {
-    var code = "";
-    code += "async function boxRuleSteps(){";
-    code += "const sleep=ms=>new Promise(r=>setTimeout(r,ms));";
-    code += "const nativeClick=el=>{if(!el)return;const rect=el.getBoundingClientRect();const x=rect.left+rect.width/2,y=rect.top+rect.height/2;el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,clientX:x,clientY:y}));el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,clientX:x,clientY:y}));el.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:x,clientY:y}));};";
-    code += "async function debugPage(){const d=[];d.push('URL:'+document.URL);d.push('TITLE:'+document.title);d.push('LABEL:'+document.querySelectorAll('label').length);d.push('BTN:'+document.querySelectorAll('button').length);d.push('NEXT:'+document.querySelectorAll('.next-btn').length);const ls=document.querySelectorAll('label');for(let i=0;i<Math.min(5,ls.length);i++){const t=(ls[i].innerText||'').substring(0,80).replace(/[\\r\\n]/g,' ');d.push('L'+i+':'+t);}const bs=document.querySelectorAll('button');for(let i=0;i<Math.min(5,bs.length);i++){const t=(bs[i].innerText||'').substring(0,40).replace(/[\\r\\n]/g,' ');d.push('B'+i+':'+t+'|'+bs[i].className.substring(0,50));}return d.join(';');}";
-    code += "async function step1(){const ls=doc.querySelectorAll('label');for(const l of ls){const t=l.innerText||'';if(t.includes('手动设置')&&l.offsetParent!==null){nativeClick(l);await sleep(400);break;}}const bs=doc.querySelectorAll('.next-btn,button');for(const b of bs){const t=(b.innerText||'').trim();if(t==='确认'&&b.offsetParent!==null){nativeClick(b);return true;}}return false;}";
-    code += "async function step2(){await sleep(800);const ls=doc.querySelectorAll('label');for(const l of ls){const t=l.innerText||'';if(t.includes('一箱多件')&&l.offsetParent!==null){nativeClick(l);await sleep(400);break;}}const bs=doc.querySelectorAll('.next-btn,button');for(const b of bs){const t=(b.innerText||'').trim();if(t==='下一步'&&b.offsetParent!==null){nativeClick(b);return true;}}return false;}";
-    code += "async function step3(){await sleep(1000);const bs=doc.querySelectorAll('.next-btn,button');for(const b of bs){const t=(b.innerText||'').trim();if(t==='下一步'&&b.offsetParent!==null){nativeClick(b);return true;}}return false;}";
-    code += "async function step4(){await sleep(1500);const rs=doc.querySelectorAll('tr,[class*=\"table-row\"],[class*=\"row\"]');for(const r of rs){const t=r.innerText||'';if(t.includes('50*40*30')){const is=r.querySelectorAll('input');for(const i of is){if(i.offsetParent!==null){i.focus();i.value='25';i.dispatchEvent(new Event('input',{bubbles:true}));i.dispatchEvent(new Event('change',{bubbles:true}));break;}}await sleep(300);const ls=r.querySelectorAll('a,button,[class*=\"link\"]');for(const l of ls){if(l.innerText&&l.innerText.trim()==='关联'&&l.offsetParent!==null){nativeClick(l);return true;}}return true;}}return false;}";
-    code += "async function step5(){await sleep(800);const bs=doc.querySelectorAll('.next-btn,button');for(const b of bs){const t=(b.innerText||'').trim();if(t==='确认'&&b.offsetParent!==null){nativeClick(b);return true;}}return false;}";
-    code += "const dbg=await debugPage();await sleep(500);const s1=await step1();await sleep(1200);const s2=await step2();await sleep(1200);const s3=await step3();await sleep(1500);const s4=await step4();await sleep(1000);const s5=await step5();return {ok:s1&&s2&&s3&&s4&&s5,steps:{s1,s2,s3,s4,s5},debug:dbg};";
-    code += "}";
-    return code;
-}
-
-// 通过 tab URL 方式获取 iframe reference 并 postMessage
-async function fillBoxRuleViaTabScript(tabId) {
-    console.log('📦 箱规关联 postMessage 方式尝试...');
-    return new Promise((resolve) => {
-        chrome.tabs.sendMessage(tabId, { action: 'fillBoxRuleViaPostMessage' }, (resp) => {
-            resolve(resp || { ok: false, error: 'postMessage方式无响应' });
-        });
-        setTimeout(() => resolve({ ok: false, error: 'postMessage超时' }), 25000);
-    });
-}
-
 async function batchUploadImages(tabId, imagePaths, uploadFn) {
     const sendLog = async (msg) => {
         try { await chrome.tabs.sendMessage(tabId, { action: 'log', msg }); } catch (_) {}
@@ -2684,11 +2565,27 @@ async function findDoubaoTab() {
     return null;
 }
 
-async function openDoubaoAndStartTask(task) {
+let colorStartLock = Promise.resolve();
+function openDoubaoAndStartTask(task) {
+    const epochAtRequest = colorDispatchEpoch;
+    const next = colorStartLock.then(() => openDoubaoAndStartTaskLocked(task, epochAtRequest));
+    colorStartLock = next.catch(() => {});
+    return next;
+}
+async function openDoubaoAndStartTaskLocked(task, epochAtRequest) {
+    if (epochAtRequest !== colorDispatchEpoch) return { ok: false, error: '等待派发期间收到停止请求' };
     console.log('🎨 启动豆包AI换色任务:', task);
-    pendingColorTask = task;
     // 保留上一份"已接收"身份：豆包繁忙被拒时不得覆盖原活动执行身份
     const prevExec = await getActiveColorExec();
+    if (prevExec && (prevExec.state === 'accepted' || prevExec.state === 'pending')) {
+        return { ok: false, busy: true, error: '已有执行或待接收任务，未覆盖原执行身份' };
+    }
+    if (task.fileKey !== undefined && task.fileKey !== getFilePrefix()) return { ok: false, error: '换色任务所属 Excel 已切换' };
+    if (epochAtRequest !== colorDispatchEpoch) return { ok: false, error: '启动期间收到停止请求' };
+    colorDispatchStopped = false;
+    task = { ...task, executionId: task.executionId || ('ce_' + Date.now() + '_' + Math.random().toString(36).slice(2)),
+        fileKey: task.fileKey === undefined ? getFilePrefix() : task.fileKey,
+        fileFolder: task.fileFolder || CURRENT_FILENAME || DEFAULT_FILE_FOLDER };
     const nextExec = {
         batchId: (task && typeof task.batchId === 'string' && task.batchId) ? task.batchId : null,
         rowNum: task && task.rowNum,
@@ -2696,21 +2593,26 @@ async function openDoubaoAndStartTask(task) {
         // 文件绑定：执行期内固定，贯穿下载/缓存/通知；异步回调不再读可变的 CURRENT_FILENAME
         fileKey: (task && typeof task.fileKey === 'string') ? task.fileKey : getFilePrefix(),
         fileFolder: (task && typeof task.fileFolder === 'string' && task.fileFolder) ? task.fileFolder : (CURRENT_FILENAME || DEFAULT_FILE_FOLDER),
+        executionId: task.executionId,
+        dispatchAllowed: true,
         state: 'pending',   // pending=待派发 / accepted=豆包已确认接收
         tabId: null,        // 接收后写入实际执行页，供状态查询绑定
         startedAt: Date.now()
     };
     await saveActiveColorExec(nextExec);
     await savePendingColorTask(task);
+    if (epochAtRequest !== colorDispatchEpoch) { await stopPendingColorDispatch(); return { ok: false, error: '启动期间收到停止请求' }; }
 
     let tab = await findDoubaoTab();
     if (tab) {
         doubaoTabId = tab.id;
         await saveDoubaoTabId(tab.id);
+        if (!await bindPendingColorTab(task, tab.id)) return { ok: false, error: '派发已停止或文件已切换' };
         await chrome.tabs.update(tab.id, { active: true });
         console.log('📌 找到已有豆包标签页:', tab.id);
         await new Promise(r => setTimeout(r, 1000));
         // 必须等待接收结果：busy / 拒绝要传回页面，不能无条件返回 ok:true
+        if (!await colorDispatchAllowed(task, tab.id)) return { ok: false, error: '派发已停止或文件已切换' };
         const resp = await sendStartColorTask(tab.id, task);
         if (!resp || !resp.ok) {
             if (resp && resp.busy) {
@@ -2723,22 +2625,33 @@ async function openDoubaoAndStartTask(task) {
             console.warn('⚠️ 派发通信失败，保留待派发状态:', (resp && resp.error) || '无响应');
             return { ok: false, pending: true, error: (resp && resp.error) || '通信失败', tabId: doubaoTabId };
         }
-        await saveActiveColorExec(Object.assign({}, nextExec, { state: 'accepted', acceptedAt: Date.now(), tabId: tab.id }));
-        await savePendingColorTask(null);
+        const confirmed = await withColorCompletionLock(async () => {
+            const currentExec = await getActiveColorExec();
+            if (!sameColorExec(currentExec, task) || currentExec.state === 'cancelled'
+                || (currentExec.state === 'pending' && colorDispatchStopped)) return false;
+            if (currentExec.state !== 'finished') await saveActiveColorExec({ ...currentExec, state: 'accepted', acceptedAt: Date.now(), tabId: tab.id });
+            await savePendingColorTask(null);
+            return true;
+        });
+        if (!confirmed) return { ok: false, error: '派发已停止' };
         return { ok: true, tabId: doubaoTabId, accepted: true };
     }
 
     console.log('🌐 打开新的豆包标签页...');
+    if (!await colorDispatchAllowed(task)) return { ok: false, error: '派发已停止或文件已切换' };
     const newTab = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
     doubaoTabId = newTab.id;
     await saveDoubaoTabId(newTab.id);
+    if (!await bindPendingColorTab(task, newTab.id)) return { ok: false, error: '开页期间已停止，保留页面但不派发任务' };
     // 新页加载后再派发：身份先记为 pending，doubao 真正启动后回传 accepted
     return { ok: true, tabId: doubaoTabId, pending: true };
 }
 
 async function openDoubaoForAiEdit(task) {
     console.log('🤖 启动豆包AI改图任务:', task);
-    pendingAiEditTask = task;
+    const exec = await getActiveColorExec();
+    if (exec && ['pending', 'accepted'].includes(exec.state)) return { ok: false, busy: true, error: '换色任务尚未结束，请等它完成后再改图' };
+    task = { ...task, fileKey: getFilePrefix(), executionId: 'ai_' + Date.now() + '_' + Math.random().toString(36).slice(2) };
 
     let tab = await findDoubaoTab();
     if (tab) {
@@ -2746,19 +2659,22 @@ async function openDoubaoForAiEdit(task) {
         await chrome.tabs.update(tab.id, { active: true });
         console.log('📌 找到已有豆包标签页:', tab.id);
         await new Promise(r => setTimeout(r, 1000));
-        sendStartAiEditTask(tab.id, task);
+        return { ...await sendStartAiEditTask(tab.id, task), tabId: tab.id };
     } else {
         console.log('🌐 打开新的豆包标签页...');
         const newTab = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
         doubaoTabId = newTab.id;
+        task.tabId = newTab.id;
+        await new Promise(resolve => chrome.storage.local.set({ [PENDING_AI_EDIT_KEY]: task }, resolve));
+        return { ok: true, pending: true, tabId: newTab.id };
     }
     return { ok: true, tabId: doubaoTabId };
 }
 
-function sendStartAiEditTask(tabId, task) {
-    chrome.tabs.sendMessage(tabId, { action: 'startAiEditTask', task }).catch(err => {
-        console.log('⚠️ 发送AI改图任务失败，等待页面加载:', err.message);
-    });
+async function sendStartAiEditTask(tabId, task) {
+    if (task.fileKey !== undefined && task.fileKey !== getFilePrefix()) return { ok: false, error: '改图任务所属文件已切换' };
+    try { return await chrome.tabs.sendMessage(tabId, { action: 'startAiEditTask', task }) || { ok: false, error: '豆包页面无响应' }; }
+    catch (err) { return { ok: false, error: err.message }; }
 }
 
 async function sendStartColorTask(tabId, task) {
@@ -2773,12 +2689,13 @@ async function sendStartColorTask(tabId, task) {
 
 async function uploadDoubaoImage(tabId, imagePath) {
     console.log('🖼️ 豆包页面上传图片:', imagePath);
+    let attached = false;
+    let targetId;
     try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: false });
-        const targetId = tabId || tab?.id;
+        targetId = tabId || tab?.id;
         if (!targetId) throw new Error('无法获取标签页ID');
 
-        let attached = false;
         try {
             await chrome.debugger.attach({ tabId: targetId }, '1.3');
             attached = true;
@@ -2816,15 +2733,15 @@ async function uploadDoubaoImage(tabId, imagePath) {
             files: [imagePath]
         });
 
-        if (attached) {
-            try { await chrome.debugger.detach({ tabId: targetId }); } catch (_) {}
-        }
-
         console.log('✅ 豆包图片上传成功');
         return { ok: true };
     } catch (e) {
         console.error('❌ 豆包图片上传失败:', e.message);
         return { ok: false, error: e.message };
+    } finally {
+        if (attached) {
+            try { await chrome.debugger.detach({ tabId: targetId }); } catch (_) {}
+        }
     }
 }
 
@@ -2832,7 +2749,7 @@ async function uploadDoubaoImage(tabId, imagePath) {
 // 再走 chrome.downloads 落盘到 Polo发品_颜色图/{文件名}/rowN/；
 // 强制文件名经 downloadFilenameMap（id/url 匹配）由 onDeterminingFilename 生效；
 // 失败降级 downloadViaFetch（fetch 拉取后 downloads 下载）
-async function downloadDoubaoImage(url, filename, rowNum) {
+async function downloadDoubaoImage(url, filename, rowNum, execution) {
     return new Promise(async (resolve) => {
         try {
             // M2-①：filename 白名单校验，拒绝路径分隔符/绝对路径/..（防覆盖下载目录外文件）
@@ -2843,7 +2760,7 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                 return resolve({ ok: false, error: '非法文件名' });
             }
             // 文件绑定：一律使用执行创建时绑定的文件，异步下载/回调期间切文件也不串目录
-            const bound = boundColorFileInfo();
+            const bound = boundColorFileInfo(execution);
             const fileFolder = bound.fileFolder || DEFAULT_FILE_FOLDER; // 与 buildColorImagePath 读盘侧保持一致
             const relativePath = 'Polo发品_颜色图/' + fileFolder + '/row' + rowNum + '/' + filename;
 
@@ -2904,7 +2821,7 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                 
                 if (chrome.runtime.lastError) {
                     console.warn(`⚠️ chrome.downloads 失败，改用 fetch 方式: ${chrome.runtime.lastError.message}`);
-                    downloadViaFetch(url, filename, rowNum, relativePath).then(resolve);
+                    downloadViaFetch(url, filename, rowNum, relativePath, bound).then(resolve);
                     return;
                 }
                 console.log(`📥 开始下载: ${filename} (id: ${downloadId})`);
@@ -2919,7 +2836,7 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                         chrome.downloads.search({ id: downloadId }, (items) => {
                             if (items && items[0]) {
                                 const fullPath = items[0].filename;
-                                const storageKey = colorKey(rowNum);
+                                const storageKey = bound.fileKey + 'color__' + rowNum;
                                 const colorMatch = filename.match(/_(white|black|gray|navy)\./);
                                 console.log(`💾 下载完成: ${filename} → ${fullPath}, storageKey=${storageKey}, colorMatch=`, colorMatch);
                                 chrome.downloads.onChanged.removeListener(onChanged);
@@ -2944,7 +2861,7 @@ async function downloadDoubaoImage(url, filename, rowNum) {
                     if (delta.error) {
                         chrome.downloads.onChanged.removeListener(onChanged);
                         console.warn(`⚠️ 下载出错，改用 fetch 方式: ${delta.error.current}`);
-                        downloadViaFetch(url, filename, rowNum, relativePath).then(resolve);
+                        downloadViaFetch(url, filename, rowNum, relativePath, bound).then(resolve);
                     }
                 };
                 chrome.downloads.onChanged.addListener(onChanged);
@@ -2970,6 +2887,7 @@ async function notifyColorTaskComplete(rowNum, batchId, payload) {
         fileKey: payload.fileKey || '',
         fileFolder: payload.fileFolder || '',
         execStartedAt: payload.execStartedAt || 0,
+        executionId: payload.executionId || null,
         timestamp: payload.timestamp
     } : {};
     if (assistantPort) {
@@ -3016,7 +2934,7 @@ async function notifyColorTaskComplete(rowNum, batchId, payload) {
         const tabs = await chrome.tabs.query({ url: '*://*/发品助手.html', currentWindow: true });
         if (tabs.length > 0) {
             assistantTabId = tabs[0].id;
-            await chrome.tabs.sendMessage(assistantTabId, { action: 'colorTaskComplete', rowNum, batchId });
+            await chrome.tabs.sendMessage(assistantTabId, Object.assign({ action: 'colorTaskComplete', rowNum, batchId }, extra));
             console.log('✅ 通过查找标签页成功通知发品助手');
             return;
         }
@@ -3030,7 +2948,7 @@ async function notifyColorTaskComplete(rowNum, batchId, payload) {
             assistantTabId = tabs[0].id;
             console.log('📌 找到发品助手标签页:', assistantTabId);
             try {
-                await chrome.tabs.sendMessage(assistantTabId, { action: 'colorTaskComplete', rowNum, batchId });
+                await chrome.tabs.sendMessage(assistantTabId, Object.assign({ action: 'colorTaskComplete', rowNum, batchId }, extra));
                 console.log('✅ 通过 tabs.sendMessage 成功通知发品助手');
                 return;
             } catch (e) {
@@ -3044,8 +2962,9 @@ async function notifyColorTaskComplete(rowNum, batchId, payload) {
     console.log('❌ 无法通知发品助手，换色任务完成消息丢失');
 }
 
-async function downloadViaFetch(url, filename, rowNum, relativePath) {
+async function downloadViaFetch(url, filename, rowNum, relativePath, bound) {
     try {
+        if (!bound) throw new Error('缺少下载文件身份');
         console.log(`🔄 使用 fetch 方式下载: ${filename}`);
         const response = await fetch(url, {
             headers: { 'Referer': 'https://www.doubao.com/' }
@@ -3070,7 +2989,7 @@ async function downloadViaFetch(url, filename, rowNum, relativePath) {
         const colorMatch = filename.match(/_(white|black|gray|navy)\./);
         if (colorMatch && dataUrl) {
             const color = colorMatch[1];
-            const idbKey = colorImageIDBKey(CURRENT_FILENAME, rowNum, color);
+            const idbKey = colorImageIDBKey(bound.fileKey.endsWith('__') ? bound.fileKey.slice(0, -2) : bound.fileKey, rowNum, color);
             saveColorImageToIDB(idbKey, dataUrl).then(() => {
                 console.log(`💾 颜色图已存 IndexedDB: ${idbKey}`);
             });
@@ -3103,7 +3022,7 @@ async function downloadViaFetch(url, filename, rowNum, relativePath) {
                         chrome.downloads.search({ id: downloadId }, (items) => {
                             if (items && items[0]) {
                                 const fullPath = items[0].filename;
-                                const storageKey = colorKey(rowNum);
+                                const storageKey = bound.fileKey + 'color__' + rowNum;
                                 const colorMatch = filename.match(/_(white|black|gray|navy)\./);
                                 console.log(`💾 下载完成(fetch): ${filename} → ${fullPath}, storageKey=${storageKey}, colorMatch=`, colorMatch);
                                 chrome.downloads.onChanged.removeListener(onChanged);
@@ -3145,21 +3064,23 @@ async function downloadViaFetch(url, filename, rowNum, relativePath) {
     }
 }
 
-async function fetchColorImageAsBase64(rowNum, color) {
+async function fetchColorImageAsBase64(rowNum, color, expectedFileKey) {
+    const fileKey = getFilePrefix(), fileName = CURRENT_FILENAME;
+    if (expectedFileKey !== undefined && expectedFileKey !== fileKey) return { ok: false, error: '颜色图所属文件已切换' };
     try {
-        const idbKey = colorImageIDBKey(CURRENT_FILENAME, rowNum, color);
+        const idbKey = colorImageIDBKey(fileName, rowNum, color);
         const cached = await getColorImageFromIDB(idbKey);
         if (cached) {
             console.log(`✅ 颜色图从 IndexedDB 命中: ${idbKey}`);
             return { ok: true, dataUrl: cached };
         }
 
-        const storageKey = colorKey(rowNum);
+        const storageKey = fileKey + 'color__' + rowNum;
         let result = await new Promise((resolve) => {
             chrome.storage.local.get(storageKey, (r) => resolve(r));
         });
         let images = result[storageKey] || {};
-        if (Object.keys(images).length === 0) {
+        if (Object.keys(images).length === 0 && !fileKey) {
             const legacyKey = 'color_images_row_' + rowNum;
             const legacyResult = await new Promise((resolve) => {
                 chrome.storage.local.get(legacyKey, (r) => resolve(r));
