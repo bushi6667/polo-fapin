@@ -241,9 +241,10 @@ const SuiteCore = (() => {
             }
             if (used.has(idx)) throw new Error(`候选序号 ${idx} 被重复分配给多个编号`);
             used.add(idx);
-            const c = byKey[key];
-            if (!c) throw new Error(`未知编号 ${key}`);
-            out.push({ key, index: idx, url: c.url, source: 'user-confirmed' });
+            if (!byKey[key]) throw new Error(`未知编号 ${key}`);
+            // 取【用户所选候选】的图片，而不是该编号原本位置上的图片
+            const picked = candidates[idx];
+            out.push({ key, index: idx, url: picked.url, fingerprint: picked.fingerprint || null, source: 'user-confirmed' });
         }
         if (out.length !== candidates.length) throw new Error('确认结果必须覆盖全部编号');
         return out;
@@ -288,7 +289,10 @@ const SuiteCore = (() => {
                 if (!f || f.size === 0) { out.push(Object.assign(base, { status: 'corrupt', detail: '文件为空' })); continue; }
                 if (!/^image\//i.test(f.type || '')) { out.push(Object.assign(base, { status: 'corrupt', detail: `类型不是图片（${f.type || '未知'}）` })); continue; }
                 if (typeof deps.decodeSize === 'function') {
-                    const s = await deps.decodeSize(f);
+                    let s = null;
+                    // 解码失败属于"文件损坏"，应与"读取错误"区分
+                    try { s = await deps.decodeSize(f); }
+                    catch (e) { out.push(Object.assign(base, { status: 'corrupt', detail: '无法解码：' + ((e && e.message) || '未知') })); continue; }
                     if (!s || !(s.width >= 64 && s.height >= 64)) {
                         out.push(Object.assign(base, { status: 'corrupt', detail: `解码尺寸无效（${s ? s.width + '×' + s.height : '无法解码'}）` }));
                         continue;
