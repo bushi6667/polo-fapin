@@ -6757,8 +6757,8 @@ function noteColorDirUnauthorized(err) {
     if (!(typeof colorDirUnauthorizedNoted !== 'undefined' && colorDirUnauthorizedNoted)) {
         colorDirUnauthorizedNoted = true;
         showToast(recordLost
-            ? '⚠️ 颜色图目录记录已失效：点击颜色图右侧「🔐 重新选择目录」重新选一次即可'
-            : '⚠️ 颜色图目录授权已失效：点击颜色图右侧「🔐 重新授权」即可');
+            ? '⚠️ 颜色图目录记录已失效：点「🔐 重新选择目录」；或改用路径模式（弹窗里粘贴文件夹绝对路径，无需授权）'
+            : '⚠️ 颜色图目录授权已失效：点「🔐 重新授权」；或改用路径模式（弹窗里粘贴文件夹绝对路径，永不失效）');
     }
     showColorDirFixButton(recordLost);
 }

@@ -101,14 +101,14 @@ function addToHistory(historyKey, value) {
 
 // 把历史记录渲染进指定下拉框（首项为占位文案）
 function loadHistoryIntoSelect(selectId, historyKey) {
-    chrome.storage.local.get(historyKey, (result) => {
+    chrome.storage.local.get([historyKey, 'polo_directory_labels'], (result) => {
         const list = result[historyKey] || [];
         const sel = document.getElementById(selectId);
         sel.innerHTML = '<option value="">曾经用过...</option>';
         for (const v of list) {
             const opt = document.createElement('option');
             opt.value = v;
-            opt.textContent = v;
+            opt.textContent = result.polo_directory_labels?.[v] || (selectId === 'color-img-dir-history' ? v.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : v);
             sel.appendChild(opt);
         }
     });
@@ -118,7 +118,8 @@ function loadHelperPath() {
     chrome.storage.local.get(HELPER_PATH_KEY, (result) => {
         if (result[HELPER_PATH_KEY]) {
             helperPath = result[HELPER_PATH_KEY];
-            document.getElementById('helper-path').value = helperPath;
+            window.PoloSavedHelperPath = helperPath;
+            document.getElementById('helper-path').value = decodeURIComponent(helperPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop());
         }
     });
 }
@@ -169,10 +170,18 @@ function pathToFileUrl(path) {
     return 'file:///' + resolved.replace(/\\/g, '/').replace(/^\//, '');
 }
 
-document.getElementById('save-helper-path').addEventListener('click', () => {
-    const path = document.getElementById('helper-path').value.trim();
+document.getElementById('save-helper-path').addEventListener('click', async () => {
+    if (window.PoloPathPickers?.['helper-path']?.validate() === false) return;
+    let path;
+    try {
+    path = window.PoloPathPickers?.['helper-path']
+        ? await window.PoloPathPickers['helper-path'].configurationValue()
+        : document.getElementById('helper-path').value.trim();
+    } catch(error) {alert(error.message);return;}
     chrome.storage.local.set({ [HELPER_PATH_KEY]: path }, async () => {
         helperPath = path;
+        window.PoloSavedHelperPath = path;
+        await window.PoloPathPickers?.['helper-path']?.committed();
         broadcastConfigChange();
         if (path) {
             await addToHistory(HELPER_PATH_HISTORY_KEY, path);
@@ -194,36 +203,49 @@ document.getElementById('helper-path-history').addEventListener('change', (e) =>
     }
 });
 
-document.getElementById('save-color-dir').addEventListener('click', () => {
-    const dir = document.getElementById('color-img-dir').value.trim();
-    chrome.storage.local.set({ [COLOR_IMG_DIR_KEY]: dir }, async () => {
-        chrome.runtime.sendMessage({ action: 'updateConfig', config: { colorImgDir: dir } }, async () => {
-            broadcastConfigChange();
-            if (dir) {
-                await addToHistory(COLOR_IMG_DIR_HISTORY_KEY, dir);
-                loadHistoryIntoSelect('color-img-dir-history', COLOR_IMG_DIR_HISTORY_KEY);
-                alert('✅ 颜色图目录已保存\n\n' + dir);
-            } else {
-                alert('⚠️ 目录已清空');
-            }
-        });
-    });
-});
-
-document.getElementById('color-img-dir-history').addEventListener('change', (e) => {
-    const v = e.target.value;
-    if (v) {
-        document.getElementById('color-img-dir').value = v;
-        chrome.runtime.sendMessage({ action: 'updateConfig', config: { colorImgDir: v } }, () => {
-            broadcastConfigChange();
-        });
+async function saveExtensionColorDirectory(dir) {
+    const result = await chrome.runtime.sendMessage({action:'updateConfig',config:{colorImgDir:dir}});
+    if (!result?.ok) throw new Error(result?.error || '目录保存失败');
+    broadcastConfigChange();
+    if (dir) await addToHistory(COLOR_IMG_DIR_HISTORY_KEY,dir);
+    loadHistoryIntoSelect('color-img-dir-history',COLOR_IMG_DIR_HISTORY_KEY);
+}
+document.getElementById('save-color-dir').addEventListener('click', async () => {
+    if (window.PoloPathPickers?.['color-img-dir']?.validate() === false) return;
+    try {
+    const dir = window.PoloPathPickers?.['color-img-dir']
+        ? await window.PoloPathPickers['color-img-dir'].configurationValue()
+        : document.getElementById('color-img-dir').value.trim();
+    // 统一路径模式：颜色图目录只接受绝对路径（纯字符串，永不失效、无需授权）。
+    // 句柄令牌（polo-dir:）每次重载/重启都会退回 prompt，已废弃。
+    if (typeof dir === 'string' && dir.startsWith('polo-dir:')) {
+        alert('请改为填写文件夹绝对路径，例如 C:\\Users\\你\\Downloads\\Polo发品_颜色图。路径模式无需授权、不会失效，套图也写入同一目录。');
+        return;
     }
+    // 套图写入/回读需要读写权限：保存句柄时就地申请，避免「已保存但权限仍为 prompt」。
+    const record = await PoloDirectories.pickerRecord('color-img-dir');
+    if (record?.handle) {
+        let permission = await record.handle.queryPermission({mode:'readwrite'});
+        if (permission !== 'granted') permission = await record.handle.requestPermission({mode:'readwrite'});
+        if (permission !== 'granted') throw new Error('未取得读写权限，原目录未更改');
+    }
+    await saveExtensionColorDirectory(dir);await window.PoloPathPickers?.['color-img-dir']?.committed();alert(dir?'✅ 颜色图目录已保存':'目录已清空');}
+    catch(e){alert('保存失败：'+e.message);}
+});
+document.getElementById('color-img-dir-history').addEventListener('change',async e=>{
+    if(!e.target.value)return;
+    const labels = await chrome.storage.local.get('polo_directory_labels');
+    window.PoloSavedColorDir = e.target.value;
+    document.getElementById('color-img-dir').value=labels.polo_directory_labels?.[e.target.value] || e.target.value.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+    await window.PoloPathPickers?.['color-img-dir']?.useSaved(e.target.value);
+    try{await saveExtensionColorDirectory(e.target.value);}catch(error){alert('保存失败：'+error.message);}
 });
 
 function loadColorImgDir() {
-    chrome.storage.local.get(COLOR_IMG_DIR_KEY, (result) => {
+    chrome.storage.local.get([COLOR_IMG_DIR_KEY, 'polo_directory_labels'], (result) => {
         if (result[COLOR_IMG_DIR_KEY]) {
-            document.getElementById('color-img-dir').value = result[COLOR_IMG_DIR_KEY];
+            window.PoloSavedColorDir = result[COLOR_IMG_DIR_KEY];
+            document.getElementById('color-img-dir').value = result.polo_directory_labels?.[result[COLOR_IMG_DIR_KEY]] || result[COLOR_IMG_DIR_KEY].replace(/[\\/]+$/, '').split(/[\\/]/).pop();
         }
     });
 }
@@ -235,8 +257,10 @@ document.getElementById('open-helper').addEventListener('click', () => {
         alert('请先设置发品助手.html的本地路径');
         return;
     }
-    const url = pathToFileUrl(helperPath);
-    chrome.tabs.create({ url });
+    // 启动时传递当前扩展ID，助手记住后不再需要页面里的单独设置入口。
+    const url = new URL(pathToFileUrl(helperPath));
+    url.searchParams.set('poloExtension', chrome.runtime.id);
+    chrome.tabs.create({ url: url.href });
 });
 
 document.getElementById('open-publish').addEventListener('click', () => {
@@ -360,3 +384,4 @@ document.getElementById('import-config-input')?.addEventListener('change', async
 
 initExtIdDisplay();
 checkWizard();
+

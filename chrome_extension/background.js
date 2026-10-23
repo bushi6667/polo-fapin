@@ -1386,7 +1386,16 @@ function suiteOutputSubdir(subdir) {
 async function suiteOutputPlan(subdir) {
     const seg = suiteOutputSubdir(subdir);
     const rec = await suiteOutputRec();
-    if (!rec || !rec.handle) throw new Error('套图输出目录未配置：请在扩展的「🖼️ 产品套图目录」选择文件夹并保存');
+    // 统一路径模式：没有句柄记录时，直接用颜色图目录（绝对路径）的目录名作为下载根，
+    // 套图与颜色图落在同一目录（下载/<颜色图目录名>/<文件名>/rowN/），无需任何授权。
+    if (!rec || !rec.handle) {
+        const dirPath = String(COLOR_IMG_DIR || '');
+        const base = dirPath.replace(/[\/]+$/, '').split(/[\/]/).pop();
+        if (dirPath && !dirPath.startsWith('polo-dir:') && base && SUITE_OUTPUT_SEGMENT_RE.test(base)) {
+            return { mode: 'downloads', root: base, seg, relPrefix: seg ? `${base}/${seg}/` : `${base}/`, permission: 'none' };
+        }
+        throw new Error('套图输出目录未配置：请在扩展里把颜色图目录填成绝对路径（套图会写入同一目录）');
+    }
     let perm = 'denied';
     try { perm = await rec.handle.queryPermission({ mode: 'readwrite' }); } catch (_) { perm = 'denied'; }
     if (perm === 'granted') {
