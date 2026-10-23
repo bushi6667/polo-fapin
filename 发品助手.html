@@ -6679,26 +6679,43 @@ function loadColorImagesFromExtension(rowNum) {
     const imageFileKey = currentFileKey();
     const imageProduct = currentProduct;
     const stillCurrent = () => imageFileKey === currentFileKey() && currentProduct === imageProduct && currentProduct && currentProduct.row === rowNum;
+    // 诊断用：把每张颜色图的实际来源记到控制台，排查「删了还显示」时一眼定位
+    // 诊断：仅在「行号或目录模式变化」时打印，并脱敏用户目录（避免日志泄露用户名）
+    const __dirRaw = (typeof colorImgBaseDir !== 'undefined') ? String(colorImgBaseDir || '') : '';
+    const __mode = __dirRaw.startsWith('polo-dir:') ? 'token' : (__dirRaw ? 'path' : 'default');
+    const __mask = (t) => String(t || '').replace(/C:\Users\[^\/]+/i, 'C:\Users\***');
+    const __stamp = __mode + '|row' + rowNum + '|' + (typeof loadedFileName !== 'undefined' ? loadedFileName : '');
+    const __prev = (typeof colorLogStamp === 'undefined') ? null : colorLogStamp;
+    if (__prev !== __stamp) {
+        colorLogStamp = __stamp;
+        console.debug(`[颜色图] 模式=${__mode} row${rowNum} file=${__mask(typeof loadedFileName !== 'undefined' ? loadedFileName : '')} dir=${__mask(__dirRaw)}`);
+    }
     ['white', 'black', 'gray', 'navy'].forEach(color => {
         const localPath = getColorImagePath(rowNum, color);
         if (localPath) {
             const img = new Image();
             img.onload = () => {
                 if (!stillCurrent()) return;
+                console.info(`[颜色图] ${color} ← 本地路径直读 OK：${localPath}`);
                 setColorImage(rowNum, color, localPath);
             };
             img.onerror = () => {
                 if (!stillCurrent()) return;
-                if (!extensionInstalled) { clearColorImage(rowNum, color); return; }
+                if (!extensionInstalled) { console.info(`[颜色图] ${color} ← 本地失败且无扩展 → 清空`); clearColorImage(rowNum, color); return; }
                 try {
                     chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
                         if (!stillCurrent()) return;
+                        console.info(`[颜色图] ${color} ← 本地失败，扩展应答：`, resp && { ok: resp.ok, fromDisk: resp.fromDisk, error: resp.error });
                         // 本地路径已探测失败：只有扩展【真实读盘】的结果才可信；
                         // 纯 IndexedDB 缓存（fromDisk!==true）不能证明磁盘上还有这张图。
                         if (resp && resp.ok && resp.dataUrl && resp.fromDisk === true) {
                             setColorImage(rowNum, color, resp.dataUrl);
                         } else {
                             clearColorImage(rowNum, color);
+                            // 只有「令牌目录」才有授权概念；路径/默认模式静默清空（探测本身就是磁盘真相）
+                            if (__mode === 'token' && ((resp && resp.fromDisk === false) || (resp && !resp.ok && /授权|permission|authoriz|denied/i.test(String(resp.error || ''))))) {
+                                noteColorDirUnauthorized();
+                            }
                         }
                     });
                 } catch (e) { clearColorImage(rowNum, color); }
@@ -6710,10 +6727,17 @@ function loadColorImagesFromExtension(rowNum) {
             try {
                 chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
                     if (!stillCurrent()) return;
-                    if (resp && resp.ok && resp.dataUrl) {
+                    console.info(`[颜色图] ${color} ← 无本地路径，扩展应答：`, resp && { ok: resp.ok, fromDisk: resp.fromDisk, error: resp.error });
+                    // 令牌目录模式：同样只认【真实读盘】。缓存图不能证明磁盘还在，
+                    // 否则删了文件仍会显示旧图。fromDisk===false 表示扩展只拿到缓存
+                    //（通常是目录授权失效），此时清空并提示重新授权，而不是继续显示。
+                    if (resp && resp.ok && resp.dataUrl && resp.fromDisk === true) {
                         setColorImage(rowNum, color, resp.dataUrl);
                     } else {
                         clearColorImage(rowNum, color);
+                        if (__mode === 'token' && ((resp && resp.fromDisk === false) || (resp && !resp.ok && /授权|permission|authoriz|denied/i.test(String(resp.error || ''))))) {
+                            noteColorDirUnauthorized();
+                        }
                     }
                 });
             } catch (e) { clearColorImage(rowNum, color); }
@@ -6721,6 +6745,15 @@ function loadColorImagesFromExtension(rowNum) {
             clearColorImage(rowNum, color);
         }
     });
+}
+
+let colorDirUnauthorizedNoted = false;
+let colorLogStamp = '';   // 诊断日志限流（同一行/同一模式只打一次）
+// 目录授权失效时只提示一次：说明为什么之前能看到的图现在不显示了（不是误判为删除）
+function noteColorDirUnauthorized() {
+    if (typeof colorDirUnauthorizedNoted !== 'undefined' && colorDirUnauthorizedNoted) return;
+    colorDirUnauthorizedNoted = true;
+    showToast('⚠️ 颜色图目录授权已失效：未核验的缓存图不再显示，请在扩展里重新授权颜色图目录');
 }
 
 // 删除后清 DOM 残留：移除图片、恢复 missing 样式、移除该产品的颜色图角标
