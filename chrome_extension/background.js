@@ -3559,7 +3559,7 @@ async function fetchColorImageAsBase64(rowNum, color, expectedFileKey) {
     if (expectedFileKey !== undefined && expectedFileKey !== fileKey) return {ok:false,error:'颜色图所属文件已切换'};
     let directoryError = null;
     if (typeof PoloDirectories !== 'undefined' && PoloDirectories.isColorSelection(COLOR_IMG_DIR)) {
-        try { return {ok:true,dataUrl:await PoloDirectories.colorImage(COLOR_IMG_DIR,fileName||DEFAULT_FILE_FOLDER,rowNum,color)}; }
+        try { return {ok:true,fromDisk:true,dataUrl:await PoloDirectories.colorImage(COLOR_IMG_DIR,fileName||DEFAULT_FILE_FOLDER,rowNum,color)}; }
         catch(error) {
             // 磁盘是唯一真相：文件明确缺失/读取失败 → 如实返回缺失，不回落缓存冒充存在。
             // 仅「权限待确认」这类无法判定磁盘状态的错误，才允许用已有缓存临时展示。
@@ -3579,7 +3579,8 @@ async function fetchColorImageAsBase64(rowNum, color, expectedFileKey) {
         const cached = await getColorImageFromIDB(idbKey);
         if (cached) {
             console.log(`✅ 颜色图从 IndexedDB 命中: ${idbKey}`);
-            return { ok: true, dataUrl: cached };
+            // fromDisk:false —— 这只是历史缓存，不能作为「磁盘文件仍存在」的证据
+            return { ok: true, fromDisk: false, dataUrl: cached };
         }
 
         const storageKey = fileKey + 'color__' + rowNum;
@@ -3621,7 +3622,7 @@ async function fetchColorImageAsBase64(rowNum, color, expectedFileKey) {
                 saveColorImageToIDB(idbKey, dataUrl).then(() => {
                     console.log(`💾 颜色图缓存到 IndexedDB: ${idbKey}`);
                 });
-                resolve({ ok: true, dataUrl });
+                resolve({ ok: true, fromDisk: false, dataUrl });
             };
             reader.onerror = () => {
                 resolve({ ok: false, error: '读取失败' });

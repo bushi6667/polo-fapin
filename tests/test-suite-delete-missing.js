@@ -106,7 +106,7 @@ async function makeEnv(opts = {}) {
         SUITE_STEP_KEYS: ['111', '222', '333', '444', '666'],
         suiteSend: async (action, payload) => {
             suiteSendLog.push(action);
-            if (action === 'suiteListTasks') return { ok: true, tasks: [] };
+            if (action === 'suiteListTasks') return { ok: true, tasks: opts.tasks || [] };
             if (action === 'suiteVerifyOutput') return opts.verifyResp || { items: [], unverified: [] };
             return { ok: true };
         },
@@ -194,6 +194,15 @@ function makeFakeIDB(initial) {
     }
 
     // ---------- ② 颜色图缺失 → 清 DOM + 移除角标 ----------
+    // ---------- ⑥ 任务已失败但无图 → 整区隐藏（不留标题/状态占位） ----------
+    console.log('\n【⑥】failed 任务且无可显示图片 → 整区隐藏');
+    {
+        const env = await makeEnv({ suiteRecs: [], tasks: [{ taskId: 'suite_x', stage: 'failed', error: '执行阶段', targetKeys: ['111', '222', '333', '444', '666'], results: [] }] });
+        await vm.runInContext('renderSuiteImages(products[0])', env.ctx);
+        await new Promise(r => setTimeout(r, 60));
+        ok(env.dom.byId.suiteImagesArea.style.display === 'none', 'failed 且 0 张 → area 隐藏（不占位置）');
+    }
+
     // ---------- ⑤ 跨产品状态更新不得唤醒当前空态套图区 ----------
     console.log('\n【⑤】updateSuiteStatus 跨产品门控');
     {
@@ -205,9 +214,13 @@ function makeFakeIDB(initial) {
         ok(env.dom.byId.suiteImagesArea.style.display === 'none', '跨产品任务状态不弹出空态区（仍 display:none）');
         ok(env.dom.byId.suiteStatusText.textContent !== '其它行任务状态', '跨产品状态文本不覆盖当前产品');
         env.ctx.suiteStatusOwner = 'A__::412';
-        await vm.runInContext('updateSuiteStatus("本行任务状态")', env.ctx);
-        ok(env.dom.byId.suiteImagesArea.style.display === 'block', '本行任务状态正常显示区域');
-        ok(env.dom.byId.suiteStatusText.textContent === '本行任务状态', '本行状态文本正常写入');
+        env.ctx.suiteTaskRunning = false;
+        await vm.runInContext('updateSuiteStatus("本行错误状态")', env.ctx);
+        ok(env.dom.byId.suiteStatusText.textContent === '本行错误状态', '本行状态文本正常写入');
+        ok(env.dom.byId.suiteImagesArea.style.display === 'none', '空闲且空 grid → 仍不占位置（失败收尾不弹空区）');
+        env.ctx.suiteTaskRunning = true;
+        await vm.runInContext('updateSuiteStatus("本行任务进行中")', env.ctx);
+        ok(env.dom.byId.suiteImagesArea.style.display === 'block', '任务进行中 → 显示进度区');
     }
 
     console.log('\n【②】磁盘 missing 时颜色图报缺失且清 DOM');

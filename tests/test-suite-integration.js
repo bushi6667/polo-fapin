@@ -52,6 +52,7 @@ function loadModules() {
     const ctx = vm.createContext(env);
     vm.runInContext(CORE, ctx, { filename: 'suite-core.js' });
     vm.runInContext(POST, ctx, { filename: 'suite-postprocess.js' });
+    vm.runInContext(fs.readFileSync(path.join(ROOT, 'chrome_extension/suite/suite-image-transform.js'), 'utf8'), ctx);
     return env;
 }
 
@@ -72,7 +73,7 @@ function makeDir(opts = {}) {
     };
 }
 
-const writeDir = () => { const written = new Map(); return { kind: 'directory', queryPermission: async () => 'granted', getFileHandle: async (n) => ({ createWritable: async () => ({ write: async (b) => { written.set(n, b && b.size || 0); }, close: async () => {} }), getFile: async () => ({ size: written.has(n) ? written.get(n) : 0, type: 'image/png' }) }) }; };
+const writeDir = () => { const written = new Map(); return { kind: 'directory', queryPermission: async () => 'granted', getFileHandle: async (n) => ({ createWritable: async () => ({ write: async (b) => { written.set(n, b); }, close: async () => {} }), getFile: async () => ({ size: written.has(n) ? written.get(n).size : 0, type: 'image/png', arrayBuffer: async () => written.get(n).arrayBuffer() }) }) }; };
 const KEYS = ['111', '222', '333', '444', '666'];
 const blob = (n = 100) => ({ size: n, arrayBuffer: async () => new ArrayBuffer(n) });
 
@@ -230,25 +231,74 @@ const blob = (n = 100) => ({ size: n, arrayBuffer: async () => new ArrayBuffer(n
             for (let j = s + 1; j < lines.length; j++) { if (lines[j] === '}') return lines.slice(s, j + 1).join('\n'); }
             throw new Error('函数未闭合: ' + name);
         }
-        const src = ['confirmSuiteNumbering', 'finishSuiteTask'].map(extractFn).join('\n\n');
-        const sent = [];
+        // finishSuiteTask 现在按「任务冻结行快照 + 面板保存的步骤」执行，因此冻结相关的真实实现
+        // （excelRowSpec / freezeSuiteTaskData / persistSuiteFreeze / suiteFrozenSteps）必须一起抽出来，
+        // 否则沙箱里缺少这些自由变量，确认流程会直接 ReferenceError 而不是被断言捕获。
+        const src = ['confirmSuiteNumbering', 'finishSuiteTask', 'assertSuiteTaskActive', 'suiteProgressChecked', 'suiteContentHash', 'suiteBlobToDataUrl', 'persistSuitePending', 'suiteDecodeSize',
+            'excelRowSpec', 'suiteFrozenSteps', 'freezeSuiteTaskData', 'readSuiteFreeze', 'persistSuiteFreeze', 'readSuiteAutoState', 'saveSuiteAutoState', 'renderSuiteAutoControls', 'suiteAutoCheckpoint'].map(extractFn).join('\n\n');
+        // finishSuiteTask 的后处理失败分支会引用 SUITE_OUTPUTS（页面常量，不在函数切片内），必须一并注入。
+        const suiteOutputsLine = lines.find(l => /^const SUITE_OUTPUTS =/.test(l.trim()));
+        if (!suiteOutputsLine) throw new Error('页面缺少 SUITE_OUTPUTS 常量');
+        const fullSrc = suiteOutputsLine.trim() + '\n' + src;
+        const sent = [], reports = [];
+        // 浏览器边界替身：页面用 FileReader 把结果图片转 base64 交给扩展写盘（真实浏览器自带）。
+        const FileReaderStub = class {
+            constructor() { this.result = null; this.onload = null; this.onerror = null; }
+            readAsDataURL(b) { Promise.resolve(b.arrayBuffer()).then(bytes => { this.result = 'data:' + (b.type || 'image/png') + ';base64,' + Buffer.from(bytes).toString('base64'); this.onload && this.onload(); }, e => { this.onerror && this.onerror(e); }); }
+        };
         const sandbox = {
             console: { log() {}, warn() {}, error() {} },
-            suitePendingNumbering: null,
-            SuiteCore, SuitePostprocess,
-            // 页面消息封装：记录所有动作（真实 finishSuiteTask 会调用它）
-            suiteSend: async (action, payload) => { sent.push(action); return { ok: true, task: { taskId: 't1' } }; },
+            suitePendingNumbering: null, suiteTaskRunning: false, suiteAutoState: null, currentProduct: { row: 412 }, currentFileKey: () => 'A__', loadedFileName: 'A__', crypto: require('crypto').webcrypto, Uint8Array, FileReader: FileReaderStub,
+            SuiteCore, SuitePostprocess, SuiteImageTransform: M.SuiteImageTransform,
+            // 页面消息封装：记录所有动作（真实 finishSuiteTask 会调用它）。
+            // 套图输出目录桥（suiteWriteOutput）在生产里由扩展实施写盘；此处按真实语义用 SuiteCore.saveAll 写进假目录。
+            suiteSend: async (action, payload) => {
+                sent.push(action); if (payload && payload.report) reports.push(payload.report);
+                if (action === 'suiteWriteOutput') {
+                    const items = (payload.files || []).map(f => ({ key: f.key, filename: f.filename, blob: blob(100) }));
+                    const saved = await SuiteCore.saveAll(writeDir(), items, { buildFilename: it => it.filename, decodeSize: async () => ({ width: 800, height: 800 }) });
+                    return { ok: saved.ok, results: saved.results, savedCount: saved.savedCount, failedKeys: saved.failedKeys };
+                }
+                return { ok: true, task: { taskId: 't1', fileKey: 'A__', rowNum: 412, stage: 'acquired' } };
+            },
             loadSuiteDirHandle: async () => writeDir(),
             createImageBitmap: async () => ({ width: 800, height: 800, close() {} }),
-            fetch: async () => ({ blob: async () => blob(100) }),
-            document: { getElementById: () => null, createElement: () => ({ getContext: () => ({ drawImage() {} }), toBlob: (cb) => cb(blob(50)) }) },
-            products: [{ row: 412 }],
-            showToast: () => {}, updateSuiteStatus: () => {}, addEventListener: () => {}, URL,
+            fetch: async () => ({ ok: true, blob: async () => blob(100) }),
+            document: {
+                getElementById: () => null,
+                // 既是 DOM 节点（renderSuiteAutoControls 需要 style/firstElementChild/append），
+                // 也是 canvas（SuiteImageSdk.createSurface 需要 getContext/toDataURL），二者都保留。
+                createElement: () => Object.assign(
+                    { style: {}, firstElementChild: { textContent: '' }, textContent: '', append() {}, setAttribute() {} },
+                    { getContext: () => ({ drawImage() {} }), toDataURL: () => 'data:image/png;base64,AAAA' }
+                ),
+                body: { append() {} },
+                addEventListener: () => {}
+            },
+            // 面板保存的 polo 步骤是执行期的唯一真源：出厂默认脚本为空（占位），按新规则会明确报错，
+            // 因此这里给出一份「已导入脚本内容」的已保存配置，让确认链路能真正跑完。
+            localStorage: { getItem: (k) => k === 'polo_custom_step_editor_v1'
+                ? JSON.stringify({ polo: KEYS.map(key => ({ name: key, key, prompt: 'p', upload: 'original',
+                    postprocess: [{ name: key + '.js', path: key + '.js', code: 'CustomJsSDK.run(async ({ input }) => input);' }], mappings: [] })) })
+                : null, setItem: () => {} },
+            products: [{ row: 412 }], renderSuiteImages: async () => {},
+            showToast: () => {}, updateSuiteStatus: () => {}, hideSuiteAreaIfEmpty: () => {}, addEventListener: () => {}, URL,
+            // 冻结链路经 ResultStore 读写「冻结记录 / 待确认记录」，需要真实 indexedDB（浏览器本就具备）
+            indexedDB: fakeIndexedDB(), queueMicrotask,
             setTimeout, clearTimeout, Promise, JSON, Number, Array, Object, String, Math, Date, RegExp, Set, Map, Error
         };
         sandbox.globalThis = sandbox;
+        sandbox.window = sandbox;   // 业务模块挂到 window.*，与页面一致
         const ctx = vm.createContext(sandbox);
-        vm.runInContext(src, ctx, { filename: 'page:suite-confirm' });
+        // 冻结链路依赖的真实模块：类目字段规则 → 行快照 → 默认步骤 → 面板配置真源 → 图像 SDK
+        // （发品助手.html 的 finishSuiteTask 会引用 SuiteImageSdk.createSurface / .draw，沙箱需与真实页面一致地加载）
+        for (const f of ['category-field-rules.js', 'excel-row.js', 'custom-step-defaults.js', 'custom-step-config.js', 'chrome_extension/suite/suite-image-sdk.js']) {
+            vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), ctx, { filename: f });
+        }
+        // 当前导入 Excel：polo 真实表头，第 412 行是该任务绑定的产品行
+        vm.runInContext(`currentSheet = { fileName: 'A__.xlsx', sheetName: 'S1', startRow: 412, headers: Array.from(window.CategoryFieldRules.columnsOf('polo')), rows: [] };
+currentSheet.rows[0] = currentSheet.headers.map(h => ({ '类目': 'polo(2)', '材质': 'Cotton / 棉', '面料克重': 180 }[h] ?? ''));`, ctx);
+        vm.runInContext(fullSrc, ctx, { filename: 'page:suite-confirm' });
 
         // 准备待确认状态并确认
         sandbox.suitePendingNumbering = {
@@ -259,7 +309,7 @@ const blob = (n = 100) => ({ size: n, arrayBuffer: async () => new ArrayBuffer(n
         await vm.runInContext('confirmSuiteNumbering()', ctx);
         await new Promise(r => setTimeout(r, 50));
         ok(sent.indexOf('suiteRun') < 0, `确认流程未发送 suiteRun（实际动作：${sent.join(',') || '无'}）`);
-        ok(sent.indexOf('suiteProgress') >= 0, '确认后有阶段回传（suiteProgress）');
+        ok(reports.some(r => r.finalStage === 'completed'), '确认后完成后处理、保存及索引并回传 completed');
         ok(sent.indexOf('suiteCreate') < 0, '确认不重新创建任务');
     }
 
@@ -269,3 +319,4 @@ const blob = (n = 100) => ({ size: n, arrayBuffer: async () => new ArrayBuffer(n
     console.log('='.repeat(54));
     process.exit(fail === 0 ? 0 : 1);
 })().catch(e => { console.error('测试运行异常:', e && e.stack || e); process.exit(1); });
+

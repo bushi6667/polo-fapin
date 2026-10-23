@@ -4064,7 +4064,17 @@ function updateSuiteStatus(text) {
     const el = document.getElementById('suiteStatusText');
     if (el) el.textContent = text || '';
     const area = document.getElementById('suiteImagesArea');
-    if (area) area.style.display = 'block';
+    // 空 grid 且无任务在跑 → 不显示（避免失败收尾把空区弹出来占位置）
+    const grid = document.getElementById('suiteImagesGrid');
+    const hasCells = !!(grid && grid.children && grid.children.length);
+    if (area) area.style.display = (hasCells || suiteTaskRunning) ? 'block' : 'none';
+}
+
+// 任务收尾后：没有任何图片格子就把整个套图区隐藏（标题/状态一并消失）
+function hideSuiteAreaIfEmpty() {
+    const grid = document.getElementById('suiteImagesGrid');
+    const area = document.getElementById('suiteImagesArea');
+    if (area && grid && !(grid.children && grid.children.length)) area.style.display = 'none';
 }
 
 // ===== 套图素材预检：发往豆包前必须全部通过（有路径 ≠ 有图片） =====
@@ -4423,7 +4433,7 @@ async function runSuiteJob(keys, {automatic=false,targeted=false} = {}) {
         const auto=readSuiteAutoState();
         if(auto&&auto.phase!=='completed')saveSuiteAutoState({...auto,paused:true});
         suiteStatusOwner = null;
-        suiteTaskRunning = false;renderSuiteAutoControls();
+        suiteTaskRunning = false;hideSuiteAreaIfEmpty();renderSuiteAutoControls();
         if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
     }
 }
@@ -4797,6 +4807,7 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false } = {}) 
     } finally {
         suiteStatusOwner = null;
         suiteTaskRunning = false;
+        hideSuiteAreaIfEmpty();
         renderSuiteAutoControls();
         if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
     }
@@ -5062,7 +5073,7 @@ async function finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned }) {
         const auto=readSuiteAutoState();
         if(auto&&auto.phase!=='completed')saveSuiteAutoState({...auto,paused:true});
         suiteStatusOwner = null;
-        suiteTaskRunning = false;renderSuiteAutoControls();
+        suiteTaskRunning = false;hideSuiteAreaIfEmpty();renderSuiteAutoControls();
         if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
     }
 }
@@ -5170,7 +5181,7 @@ async function renderSuiteImages(product) {
         return;
     }
 
-    grid.innerHTML = keys.map(key => {
+    const cells = keys.map(key => {
         const r = byKey[key];
         let url = '';
         if (r && r.blob && r.blob.size) {
@@ -5189,7 +5200,18 @@ async function renderSuiteImages(product) {
             <div class="img-label" style="justify-content:center;"><span>${key}</span></div>
             <img src="${url}" alt="${escapeHtml(key)} 套图" style="width:100%;border-radius:8px;cursor:zoom-in;" onclick="openImageModal(this.src)">
         </div>`;
-    }).filter(Boolean).join('');
+    }).filter(Boolean);
+    grid.innerHTML = cells.join('');
+
+    // 没有任何可显示的图，且任务已终态（失败/中断/完成/已生成）→ 整区隐藏，和颜色图一样不占位置
+    const TERM = (typeof SuiteTaskStore !== 'undefined' && Array.isArray(SuiteTaskStore.TERMINAL))
+        ? SuiteTaskStore.TERMINAL : ['completed', 'failed', 'interrupted', 'generated'];
+    if (cells.length === 0 && (!t || TERM.includes(t.stage))) {
+        area.style.display = 'none';
+        const st0 = document.getElementById('suiteStatusText');
+        if (st0) st0.textContent = '';
+        return;
+    }
 
     const st = document.getElementById('suiteStatusText');
     if (st) st.textContent = t ? `任务 ${t.taskId}｜阶段 ${t.stage}${t.error ? '｜' + t.error : ''}` : `已保存 ${recs.length} 张`;
@@ -5206,7 +5228,7 @@ async function recoverSuiteExistingResults(taskId,recoveryUrl) {
         const restored=await suiteSend('suiteRecoverResults',{taskId,fileKey,rowNum,recoveryUrl},60000);
         if(!restored.ok)throw new Error(restored.error||'恢复失败');
         await renderSuiteImages(currentProduct);
-    } catch(e){updateSuiteStatus('❌ '+e.message);}finally{suiteStatusOwner=null;suiteTaskRunning=false;}
+    } catch(e){updateSuiteStatus('❌ '+e.message);}finally{suiteStatusOwner=null;suiteTaskRunning=false;hideSuiteAreaIfEmpty();}
 }
 
 // 单张重生成入口：与「生成套图」共用同一条单步骤链路（mode=single-regen，一次请求一张）。
@@ -6671,10 +6693,11 @@ function loadColorImagesFromExtension(rowNum) {
                 try {
                     chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
                         if (!stillCurrent()) return;
-                        if (resp && resp.ok && resp.dataUrl) {
+                        // 本地路径已探测失败：只有扩展【真实读盘】的结果才可信；
+                        // 纯 IndexedDB 缓存（fromDisk!==true）不能证明磁盘上还有这张图。
+                        if (resp && resp.ok && resp.dataUrl && resp.fromDisk === true) {
                             setColorImage(rowNum, color, resp.dataUrl);
                         } else {
-                            // 磁盘与缓存都没有 → 清 DOM 残留，不显示旧图
                             clearColorImage(rowNum, color);
                         }
                     });
