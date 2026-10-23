@@ -1879,7 +1879,25 @@ async function handleSharedAction(request, sendResponse, sender) {
                 const toTab = async (action, payload) => {
                     const live = await SuiteTaskStore.get(taskId);
                     if (!live || live.cancelled || SuiteTaskStore.isTerminal(live.stage)) throw new Error('套图任务已取消或结束');
-                    return chrome.tabs.sendMessage(tabId, Object.assign({ action, binding: { taskId, fileKey: t.fileKey, rowNum: t.rowNum } }, payload || {}));
+                    const msg = Object.assign({ action, binding: { taskId, fileKey: t.fileKey, rowNum: t.rowNum } }, payload || {});
+                    const send = () => chrome.tabs.sendMessage(tabId, msg);
+                    try {
+                        return await send();
+                    } catch (e) {
+                        const m = String((e && e.message) || '');
+                        // 扩展重载后，旧的豆包标签页里没有内容脚本 → 注入后重试一次
+                        if (!/Receiving end does not exist|Could not establish connection/i.test(m)) throw e;
+                        try {
+                            await chrome.scripting.executeScript({ target: { tabId }, files: ['content/common.js', 'suite/suite-doubao.js'] });
+                            await new Promise(r => setTimeout(r, 300));
+                            return await send();
+                        } catch (_) {
+                            // 注入也失败：刷新标签页让 manifest 重新注入，再试最后一次
+                            await chrome.tabs.reload(tabId).catch(() => {});
+                            await new Promise(r => setTimeout(r, 4000));
+                            return await send();
+                        }
+                    }
                 };
 
                 // ① 探测就绪 / 登录

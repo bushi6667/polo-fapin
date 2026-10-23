@@ -4484,7 +4484,8 @@ async function clearSuiteFive(fileKey, rowNum) {
 
 // 逐张写盘 + 索引：单张失败不影响已完成步骤，重试只重做失败步骤。
 async function suiteSaveOne({ key, blob, fileKey, rowNum, jobId }) {
-    const filename = SuiteCore.buildFilename(fileKey, rowNum, key + '_' + jobId);
+    // 文件名直接用输出编号（111/222/333/444/666），与用户约定一致
+    const filename = String(key) + '.png';
     // 落盘子目录与颜色图同构：Polo发品_颜色图/<文件名>/rowN/，套图成品与该产品颜色图放同一文件夹，不再平铺根层。
     const subdir = (loadedFileName ? loadedFileName + '/' : '') + 'row' + rowNum;
     const resp = await suiteSend('suiteWriteOutput', { subdir, files: [{ key, filename, dataUrl: await suiteBlobToDataUrl(blob) }] }, 60000);
@@ -4999,7 +5000,7 @@ async function finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned }) {
         for (const it of items) {
             writeFiles.push({
                 key: it.key,
-                filename: SuiteCore.buildFilename(fileKey, rowNum, it.key + '_' + taskId),
+                filename: String(it.key) + '.png',
                 dataUrl: await suiteBlobToDataUrl(it.blob)
             });
         }
