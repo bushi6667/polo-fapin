@@ -5170,9 +5170,10 @@ async function renderSuiteImages(product) {
         // 不显示 IndexedDB 缓存里的图片（缓存只是历史快照，不能冒充磁盘现状）。
         // no-permission / cache-only 属于「无法核验」，不等于缺失，仍保留显示。
         const diskBad = check && ['missing', 'corrupt', 'replaced', 'error'].includes(check.status);
+        // 没有可显示的图（未生成 / 磁盘缺失等）→ 只显示编号，不放占位框和提示文案
         const img = (url && !diskBad)
             ? `<img src="${url}" alt="${escapeHtml(key)} 套图" style="width:100%;border-radius:8px;cursor:zoom-in;" onclick="openImageModal(this.src)">`
-            : `<div style="height:90px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.04);border-radius:8px;font-size:11px;color:rgba(255,255,255,0.4);" title="${check ? check.detail : ''}">${diskBad ? '文件缺失或已移动' : (r ? '文件缺失或已移动' : '未生成')}</div>`;
+            : '';
         return `<div class="color-img-item" style="text-align:center;">
             <div class="img-label" style="justify-content:center;"><span>${key}</span></div>
             ${img}

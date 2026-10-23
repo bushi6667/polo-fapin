@@ -166,7 +166,7 @@ function makeFakeIDB(initial) {
         await new Promise(r => setTimeout(r, 60));
         const html = env.dom.byId.suiteImagesGrid.innerHTML;
         ok(!/<img src="blob:/.test(html), 'missing 时不渲染缓存图（无 <img>）');
-        ok(/文件缺失或已移动/.test(html), '显示"文件缺失或已移动"');
+        ok(!/文件缺失或已移动/.test(html) && !/未生成/.test(html), '缺图时只显示编号（无占位框/缺失文案）');
         ok(env.suiteSendLog.indexOf('suiteVerifyOutput') >= 0, '真实调用磁盘核验入口 suiteVerifyOutput');
     }
 
