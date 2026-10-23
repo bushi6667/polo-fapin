@@ -1,4 +1,6 @@
-importScripts('upload/page2_upload.js', 'upload/page3_upload.js', 'suite/suite-task.js');
+importScripts('directory-store.js');
+importScripts('upload/publication-images.js');
+importScripts('upload/page2_upload.js', 'upload/page3_upload.js', 'suite/suite-task.js', 'suite/suite-core.js', 'suite/suite-native-input.js');
 
 const STORAGE_KEY = 'polo_product_data';
 const DEFAULT_FILE_FOLDER = '默认'; // 颜色图默认子目录名（CURRENT_FILENAME 为空时使用）；历史路径一直是 '默认'，勿改 'default'（buildColorImagePath 读盘同源）
@@ -25,6 +27,18 @@ const DOUBAO_URL = 'https://www.doubao.com/chat';
 
 let assistantTabId = null;
 let assistantPort = null;
+const publicationRequests=new Map();
+const publicationUploadLocks=new Set();
+function readPublicationGenerated(request){
+    return new Promise((resolve,reject)=>{
+        if(!assistantPort){reject(Error('请先打开本项目发品助手页面以读取生成套图'));return;}
+        const requestId='publication_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+        const timer=setTimeout(()=>{publicationRequests.delete(requestId);reject(Error('读取生成套图超时，请检查发品助手页面'));},60000);
+        publicationRequests.set(requestId,{resolve,reject,timer});
+        try{assistantPort.postMessage({action:'publicationImagesRequest',requestId,...request});}
+        catch(e){clearTimeout(timer);publicationRequests.delete(requestId);reject(e);}
+    });
+}
 
 // 发品任务状态改为持久化在 chrome.storage.local（PUBLISH_TASK_KEY），
 // 不再使用会随 MV3 休眠消失的内存变量作真相源。
@@ -45,6 +59,11 @@ async function isTrustedSender(sender) {
     const url = sender?.url || '';
     // 注意：扩展自身页面走 onMessage（内部消息），不会进入 onMessageExternal；
     // 此处出现的 chrome-extension:// 来源只可能是其他扩展，一律拒绝（review blocking 修复）
+    // 本机辅助服务的同一助手页；不放行任意 localhost 页面或其他端口。
+    try {
+        const page = new URL(url);
+        if (page.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(page.hostname) && page.port === '8765' && !page.username && !page.password && decodeURIComponent(page.pathname) === '/发品助手.html') return true;
+    } catch (_) {}
     if (!url.startsWith('file://')) return false;
     let path;
     try {
@@ -1205,6 +1224,19 @@ function buildColorImagePath(rowNum, color, context) {
 // 返回 { url, path }（data URL 或本地路径），供发品页上传颜色图
 function getColorImagePathData(rowNum, color, callback, context) {
     context = context || { fileKey: getFilePrefix(), fileFolder: CURRENT_FILENAME || DEFAULT_FILE_FOLDER, colorImgDir: COLOR_IMG_DIR };
+    if (typeof PoloDirectories !== 'undefined' && PoloDirectories.isColorSelection(context.colorImgDir)) {
+        PoloDirectories.colorImage(context.colorImgDir,context.fileFolder,rowNum,color)
+            .then(url => callback({ok:true,url,path:null}))
+            .catch(async error => {
+                // 临时权限待确认时，已有的同文件图片缓存仍可用于展示与上传。
+                try {
+                    const cached = await getColorImageFromIDB(colorImageIDBKey(context.fileFolder === DEFAULT_FILE_FOLDER ? '' : context.fileFolder,rowNum,color));
+                    if (cached) {callback({ok:true,url:cached,path:null});return;}
+                } catch (_) {}
+                callback({ok:false,error:error.message});
+            });
+        return;
+    }
     const storageKey = context.fileKey + 'color__' + rowNum;
     const boundImageDir = context.colorImgDir;
     console.log(`🔍 [getColorImagePathData] row=${rowNum}, color=${color}, COLOR_IMG_DIR=${COLOR_IMG_DIR}, CURRENT_FILENAME=${CURRENT_FILENAME}, storageKey=${storageKey}`);
@@ -1315,10 +1347,294 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     }
 });
 
+// ---------- 套图输出目录桥 ----------
+// 输出目录句柄只存在于扩展源（PoloExtensionDirectories/picker-color-img-dir），跨源无法把句柄交给 file:// 页面。
+// 因此由扩展在自身源使用既有「🖼️ 产品套图目录」句柄执行套图【写入 + 回读校验】，再经既有受信任消息桥返回结果。
+// 不新增任何路径配置：唯一配置就是扩展里已有的那个目录入口。
+const SUITE_OUTPUT_SEGMENT_RE = /^[^\\/:*?"<>|\u0000]{1,40}$/;                 // 子目录路径段：不含分隔符与非法字符
+const SUITE_OUTPUT_FILE_RE = /^suite_[a-zA-Z0-9\u4e00-\u9fff._-]{1,140}\.(png|jpg|jpeg|webp)$/i; // 只允许套图输出命名，杜绝路径穿越
+
+function suiteOutputRec() {
+    return PoloDirectories.pickerRecord('color-img-dir');
+}
+
+// 子目录名是纯参数校验：不依赖目录是否已配置，非法输入先失败（不触碰文件系统）。
+// 支持多级相对路径（如「<文件名>/row3」），与颜色图按 fileName/rowN 归类的子目录层级同构；
+// 只允许 `/` 作分隔，拒绝反斜杠、绝对路径、`.`/`..`/空段与非法字符，杜绝路径穿越。
+function suiteOutputSubdir(subdir) {
+    if (subdir === undefined || subdir === null || subdir === '') return null;
+    const raw = String(subdir);
+    if (raw.length > 120) throw new Error('输出子目录路径过长：' + raw);
+    if (raw.includes('\\')) throw new Error('非法输出子目录（不允许反斜杠）：' + raw);
+    const segs = [];
+    for (const part of raw.split('/')) {
+        const p = String(part).trim();
+        if (p === '' || p === '.' || p === '..') throw new Error('非法输出子目录段：' + part);
+        if (!SUITE_OUTPUT_SEGMENT_RE.test(p)) throw new Error('非法输出子目录段：' + part);
+        segs.push(p);
+    }
+    if (segs.length === 0) return null;
+    return segs.join('/');
+}
+
+// 输出通道选择。目录授权（File System Access）是【会话级】的：扩展后台(service worker)休眠、
+// 扩展重载、浏览器重启之后权限一律回落为 prompt，而后台没有用户手势、无法调用 requestPermission。
+// 因此不再把「权限必须是 granted」当硬闸门，改为二选一（目录未配置才报错）：
+//   fs        → 权限仍为 granted：沿用原有最严格的「写入 → 关闭流 → 重新读取 → 校验大小/类型/解码/指纹」
+//   downloads → 权限回落：改走 chrome.downloads 落到「下载/<已保存目录名>/[子目录]/」，不需要任何授权
+// 两条都落到真实磁盘；目录名仍取自扩展里已保存的那个句柄，不新增任何路径配置。
+async function suiteOutputPlan(subdir) {
+    const seg = suiteOutputSubdir(subdir);
+    const rec = await suiteOutputRec();
+    if (!rec || !rec.handle) throw new Error('套图输出目录未配置：请在扩展的「🖼️ 产品套图目录」选择文件夹并保存');
+    let perm = 'denied';
+    try { perm = await rec.handle.queryPermission({ mode: 'readwrite' }); } catch (_) { perm = 'denied'; }
+    if (perm === 'granted') {
+        let dir = rec.handle;
+        // 多级相对路径（<文件名>/rowN）：逐级创建子目录，与颜色图子目录层级一致
+        if (seg) for (const part of seg.split('/')) dir = await dir.getDirectoryHandle(part, { create: true });
+        return { mode: 'fs', dir, dirName: rec.name || '' };
+    }
+    const root = String(rec.name || '').trim();
+    if (!root || !SUITE_OUTPUT_SEGMENT_RE.test(root)) {
+        throw new Error(`套图输出目录权限为 ${perm}，且已保存的目录名「${root}」不能作为下载子目录：请在扩展中展开该项并点击保存确认权限`);
+    }
+    return { mode: 'downloads', root, seg, relPrefix: seg ? `${root}/${seg}/` : `${root}/`, permission: perm };
+}
+
+function suiteDataUrlToBlob(dataUrl) {
+    const m = /^data:([^;,]*);base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ''));
+    if (!m) throw new Error('结果图片数据格式非法（应为 base64 data URL）');
+    const bin = atob(m[2]);
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return new Blob([u8], { type: m[1] || 'image/png' });
+}
+
+async function suiteSwDecodeSize(blobOrFile) {
+    const b = await createImageBitmap(blobOrFile);
+    try { return { width: b.width, height: b.height }; } finally { if (b.close) b.close(); }
+}
+
+async function suiteSwContentHash(blobOrFile) {
+    const bytes = await crypto.subtle.digest('SHA-256', await blobOrFile.arrayBuffer());
+    return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// 状态查询：只报告配置与权限，不写任何文件。
+// 只要目录已配置（有句柄记录），就一定能落盘：权限在 → 磁盘句柄；权限回落 → 下载通道降级。
+async function suiteOutputStatus() {
+    const rec = await suiteOutputRec();
+    if (!rec || !rec.handle) return { configured: false, name: '', permission: 'none', canFallback: false, mode: 'none', message: '套图输出目录未配置：请在扩展的「🖼️ 产品套图目录」选择文件夹并保存' };
+    let perm = 'unknown';
+    try { perm = await rec.handle.queryPermission({ mode: 'readwrite' }); } catch (_) { perm = 'denied'; }
+    const canFallback = perm !== 'granted' && !!String(rec.name || '').trim() && SUITE_OUTPUT_SEGMENT_RE.test(String(rec.name).trim());
+    return {
+        configured: true, name: rec.name || '', permission: perm, canFallback,
+        fallbackTarget: canFallback ? '下载/' + rec.name : '',
+        mode: perm === 'granted' ? 'fs' : (canFallback ? 'downloads' : 'none')
+    };
+}
+
+// ---- 下载通道（无需任何目录授权）：blob → data URL、按 id 等待落盘、路径比对 ----
+async function suiteSwBlobToDataUrl(blob) {
+    const u8 = new Uint8Array(await blob.arrayBuffer());
+    let bin = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < u8.length; i += CHUNK) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+    return `data:${blob.type || 'image/png'};base64,${btoa(bin)}`;
+}
+
+function suiteDownloadSearch(query) {
+    return new Promise((resolve, reject) => {
+        try {
+            chrome.downloads.search(query, (items) => {
+                const err = chrome.runtime.lastError;
+                if (err) reject(new Error(err.message)); else resolve(items || []);
+            });
+        } catch (e) { reject(e); }
+    });
+}
+
+// 等待下载真正结束（complete / interrupted），最多 timeoutMs；超时如实返回未完成状态。
+async function suiteAwaitDownload(id, timeoutMs = 20000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const item = (await suiteDownloadSearch({ id }))[0] || null;
+        if (item && (item.state === 'complete' || item.state === 'interrupted')) return item;
+        if (Date.now() >= deadline) return item || { id, state: 'missing', filename: '', error: '等待下载结果超时' };
+        await new Promise(r => setTimeout(r, 300));
+    }
+}
+
+// 降级写盘：校验级别如实标注为 download-record（下载记录 state=complete 且记录大小与写入前一致），
+// 与 fs 模式的「回读解码校验」不是同一级别，绝不冒充。
+async function suiteWriteViaDownloads(plan, items) {
+    const results = [];
+    for (const it of items) {
+        const base = { key: it.key, filename: it.filename, saved: false, bytes: 0, error: '' };
+        try {
+            const bytes = it.blob.size;
+            let size = null;
+            try { size = await suiteSwDecodeSize(it.blob); } catch (_) { size = null; }
+            const contentHash = await suiteSwContentHash(it.blob);
+            const dataUrl = await suiteSwBlobToDataUrl(it.blob);
+            const relPath = plan.relPrefix + it.filename;
+            // 与既有颜色图下载流程同一套机制：download() 之前先把目标相对路径预登记到
+            // downloadFilenameMap，由 chrome.downloads.onDeterminingFilename 监听器 suggest() 该路径。
+            // 不登记的话监听器会走 suggest() 空参分支，落盘名字就变成「下载 - 时间戳.png」。
+            const preKey = 'pre:' + dataUrl;
+            downloadFilenameMap.set(preKey, { filename: it.filename, relativePath: relPath, url: dataUrl });
+            const id = await new Promise((resolve, reject) => {
+                chrome.downloads.download({ url: dataUrl, filename: relPath, conflictAction: 'overwrite', saveAs: false }, (downloadId) => {
+                    downloadFilenameMap.delete(preKey);            // 命中后监听器也可能已消费该条目
+                    const err = chrome.runtime.lastError;
+                    if (err) reject(new Error(err.message));
+                    else if (downloadId === undefined || downloadId === null) reject(new Error('下载未返回任务号'));
+                    else {
+                        downloadFilenameMap.set(downloadId, { filename: it.filename, relativePath: relPath, url: dataUrl });
+                        resolve(downloadId);
+                    }
+                });
+            });
+            const item = await suiteAwaitDownload(id);
+            downloadFilenameMap.delete(id);
+            const savedPath = String((item && item.filename) || '');
+            const matchesTarget = savedPath.replace(/\\/g, '/').endsWith(relPath);
+            const state = (item && item.state) || 'missing';
+            if (state === 'complete' && matchesTarget && (!item.fileSize || item.fileSize === bytes)) {
+                results.push(Object.assign(base, { saved: true, bytes, width: size && size.width, height: size && size.height, contentHash, downloadId: id, downloadState: state, savedPath, error: '' }));
+            } else {
+                const why = state !== 'complete' ? `下载未完成（state=${state}${item && item.error ? '，' + item.error : ''}）`
+                    : (matchesTarget ? `下载记录大小不一致（${item.fileSize} ≠ ${bytes}）` : `落盘路径与预期不符（${savedPath}）`);
+                results.push(Object.assign(base, { bytes, error: why, contentHash, downloadId: id, downloadState: state, savedPath }));
+            }
+        } catch (e) {
+            results.push(Object.assign(base, { error: '下载写入失败：' + ((e && e.message) || e) }));
+        }
+    }
+    const allSaved = results.length > 0 && results.every(r => r.saved);
+    return {
+        ok: allSaved, results,
+        savedCount: results.filter(r => r.saved).length,
+        failedKeys: results.filter(r => !r.saved).map(r => r.key),
+        retrySaveOnly: !allSaved,
+        mode: 'downloads', verification: 'download-record', fallback: true, dirName: plan.root,
+        savedPaths: results.filter(r => r.savedPath).map(r => r.savedPath),
+        note: `产品套图目录未授权，已走下载通道落盘到「下载/${plan.root}/」（按下载记录校验，非磁盘回读解码）`
+    };
+}
+
+// 降级核验：按下载记录核对。下载历史跨会话保留，故必须排除「早于本次保存时间」的旧记录 ——
+// 旧记录不能证明文件现在还在磁盘上。
+async function suiteVerifyViaDownloads(plan, mapped) {
+    // 按时间倒序取最近的下载记录；某些 Chrome 版本不接受 orderBy，则退化为普通查询（后面仍按 savedAt 过滤）。
+    let all = [];
+    try { all = await suiteDownloadSearch({ limit: 500, orderBy: ['-startTime'] }); }
+    catch (_) { all = await suiteDownloadSearch({ limit: 500 }); }
+    const items = mapped.map(m => {
+        const base = { key: m.key, filename: m.meta.filename, status: 'error', detail: '' };
+        if (!m.meta.filename) return Object.assign(base, { status: 'cache-only', detail: '历史索引缺少文件定位信息，无法核验磁盘' });
+        const target = (plan.relPrefix + m.meta.filename).replace(/\\/g, '/');
+        const hits = all.filter(d => String(d.filename || '').replace(/\\/g, '/').endsWith(target));
+        if (!hits.length) return Object.assign(base, { status: 'missing', detail: '下载记录中未找到该文件' });
+        const fresh = m.meta.savedAt ? hits.filter(d => Date.parse(d.startTime || '') >= m.meta.savedAt - 5000) : hits;
+        if (!fresh.length) return Object.assign(base, { status: 'missing', detail: '仅找到早于本次保存时间的旧下载记录，无法证明文件仍在磁盘上' });
+        const hit = fresh[0];
+        if (hit.state !== 'complete') return Object.assign(base, { status: 'error', detail: `下载未完成（state=${hit.state}）` });
+        if (!hit.fileSize) return Object.assign(base, { status: 'error', detail: '下载记录没有文件大小，无法校验' });
+        if (m.meta.bytes && hit.fileSize !== m.meta.bytes) return Object.assign(base, { status: 'replaced', detail: `大小与保存时不一致（${hit.fileSize} ≠ ${m.meta.bytes}）` });
+        return Object.assign(base, { status: 'verified', detail: `下载记录已核验 ${hit.fileSize} 字节（${hit.filename}）` });
+    });
+    const allOk = items.length > 0 && items.every(i => i.status === 'verified');
+    return {
+        ok: allOk, items, unverified: items.filter(i => i.status !== 'verified').map(i => i.key),
+        mode: 'downloads', verification: 'download-record', fallback: true, dirName: plan.root,
+        note: '产品套图目录未授权，本次为下载记录核验（非磁盘回读解码）'
+    };
+}
+
+// 写入 + 回读校验（写盘后重新读取，校验大小/类型/可解码/尺寸/内容指纹）。
+async function suiteWriteOutput(request) {
+    const files = Array.isArray(request.files) ? request.files : [];
+    if (!files.length) throw new Error('没有要保存的结果图片');
+    if (files.length > 20) throw new Error(`一次最多保存 20 张，实际 ${files.length} 张`);
+    // 先做纯参数校验（文件名 / 子目录），非法输入立即失败，不触碰文件系统
+    const normalized = files.map(f => {
+        const filename = String((f && f.filename) || '');
+        if (!SUITE_OUTPUT_FILE_RE.test(filename)) throw new Error('非法输出文件名：' + filename);
+        return { key: String((f && f.key) || ''), filename, dataUrl: f && f.dataUrl };
+    });
+    const items = normalized.map(n => ({ key: n.key, filename: n.filename, blob: suiteDataUrlToBlob(n.dataUrl) }));
+    const plan = await suiteOutputPlan(request.subdir);
+    // 覆盖策略与页面既有设计一致：文件名含 fileKey/行号/任务号，天然防跨文件跨产品覆盖；
+    // 同一任务重试保存需能重写同名文件，故此处允许覆盖，仅由文件名白名单约束。
+    if (plan.mode === 'fs') {
+        const saved = await SuiteCore.saveAll(plan.dir, items, { buildFilename: it => it.filename, decodeSize: suiteSwDecodeSize, hash: suiteSwContentHash });
+        return Object.assign(saved, { mode: 'fs', verification: 'disk-readback', fallback: false, dirName: plan.dirName || '', savedPaths: [] });
+    }
+    return await suiteWriteViaDownloads(plan, items);
+}
+
+// 磁盘核验：只读，逐编号回读真实文件。目录不可用时按 no-permission 返回（≠ 文件缺失）。
+async function suiteVerifyOutput(request) {
+    const records = Array.isArray(request.records) ? request.records : [];
+    if (!records.length) return { ok: false, items: [], unverified: [], error: '没有需要核验的记录' };
+    const mapped = records.map(r => ({
+        key: String(r.key),
+        meta: { filename: r.filename || '', bytes: Number(r.bytes) || 0, contentHash: r.contentHash || '', savedAt: Number(r.savedAt) || 0 }
+    }));
+    let plan = null, planError = '';
+    try { plan = await suiteOutputPlan(request.subdir); } catch (e) { planError = e.message; }
+    if (!plan) {
+        return {
+            ok: false, error: planError,
+            items: mapped.map(m => ({ key: m.key, filename: m.meta.filename, status: 'no-permission', detail: planError || '输出目录不可用，无法核验（不等于文件缺失）' })),
+            unverified: mapped.map(m => m.key)
+        };
+    }
+    if (plan.mode === 'fs') {
+        return await SuiteCore.verifySavedFiles(mapped, { dirHandle: plan.dir, decodeSize: suiteSwDecodeSize, hash: suiteSwContentHash });
+    }
+    return await suiteVerifyViaDownloads(plan, mapped);
+}
+
 // 共享动作分发器：处理 onMessage/onMessageExternal 的 17 种业务动作
 // （saveProductData/saveBatchProducts/getProductByRow/openPublishPage/…/getConfig），
 // 各动作内直接操作 storage 与目录配置并 sendResponse
 async function handleSharedAction(request, sendResponse, sender) {
+    if (['listScriptDirectory','readScriptDirectory'].includes(request.action)) {
+        try {
+            const result = request.action === 'listScriptDirectory' ? await PoloDirectories.scriptDirectoryFiles()
+                : await PoloDirectories.scriptDirectoryRead(request.paths,request.revision);
+            sendResponse({ok:true,...result});
+        } catch(error) {sendResponse({ok:false,error:error.message});}
+        return true;
+    }
+
+    if (['psDirectoryStatus','readPsImage','writePsImage'].includes(request.action)) {
+        try {
+            const result = request.action === 'psDirectoryStatus' ? await PoloDirectories.status()
+                : request.action === 'readPsImage' ? await PoloDirectories.read(request.fileName)
+                : await PoloDirectories.write(request.fileName, request.data, request.format);
+            sendResponse({ok:true,...result});
+        } catch(e) {sendResponse({ok:false,error:e.message});}
+        return true;
+    }
+
+    // 套图输出目录桥：由扩展在自身源用既有「产品套图目录」句柄写盘/回读，经消息桥返回结果
+    if (['suiteOutputStatus','suiteWriteOutput','suiteVerifyOutput'].includes(request.action)) {
+        (async () => {
+            try {
+                const result = request.action === 'suiteOutputStatus' ? await suiteOutputStatus()
+                    : request.action === 'suiteWriteOutput' ? await suiteWriteOutput(request)
+                    : await suiteVerifyOutput(request);
+                sendResponse({ok:true,...result});
+            } catch(e) {sendResponse({ok:false,error:e.message});}
+        })();
+        return true;
+    }
+
     // ---------- 发品任务控制（发品助手页 file:// 与扩展内部均可） ----------
     if (request.action === 'pausePublishQueue') {
         markPublishStop();   // 立即置闸门并递增停止代次：资源检查/开页途中也不再创建新页
@@ -1450,12 +1766,12 @@ async function handleSharedAction(request, sendResponse, sender) {
         return true;
     }
     if (request.action === 'suiteGetTask') {
-        SuiteTaskStore.get(request.taskId).then(t => sendResponse({ ok: true, task: t })).catch(e => sendResponse({ ok: false, error: e.message }));
+        SuiteTaskStore.get(request.taskId).then(t => sendResponse({ ok: true, task: request.summary&&t ? Object.assign({},t,{images:undefined,assets:undefined,prompt:undefined}):t })).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'suiteListTasks') {
         SuiteTaskStore.list({ fileKey: request.fileKey, rowNum: request.rowNum, activeOnly: !!request.activeOnly })
-            .then(list => sendResponse({ ok: true, tasks: list })).catch(e => sendResponse({ ok: false, error: e.message }));
+            .then(list => sendResponse({ ok: true, tasks: list.map(t=>Object.assign({},t,{images:undefined,assets:undefined,prompt:undefined})) })).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'suiteCancel') {
@@ -1473,6 +1789,8 @@ async function handleSharedAction(request, sendResponse, sender) {
                 let task;
                 if (r.final && r.finalStage) {
                     task = await SuiteTaskStore.finish(r.taskId, r.finalStage, r.error || '', { results: r.results || check.task.results, diag: r.diag || check.task.diag });
+                } else if (r.stage === check.task.stage) {
+                    task = check.task; // idempotent checkpoint, never resend generation
                 } else if (r.stage) {
                     task = await SuiteTaskStore.advance(r.taskId, r.stage, { results: r.results || check.task.results, diag: r.diag || check.task.diag });
                 } else {
@@ -1484,6 +1802,30 @@ async function handleSharedAction(request, sendResponse, sender) {
         })();
         return true;
     }
+    if(request.action==='suiteRecoverResults') {
+        (async()=>{try{
+            const task=await SuiteTaskStore.get(request.taskId);
+            if(!task||task.cancelled||!task.stageAt.sent)throw new Error('没有可恢复的已发送任务');
+            if(task.fileKey!==request.fileKey||task.rowNum!==request.rowNum)throw new Error('恢复任务身份不符');
+            const url=task.doubaoUrl||request.recoveryUrl;
+            if(!url||!/^https:\/\/(www\.)?doubao\.com\/chat\//.test(url))throw new Error('缺少原豆包对话地址');
+            const tabs=await chrome.tabs.query({});let tab=tabs.find(t=>t.url===url);
+            if(!tab){tab=await chrome.tabs.create({url,active:true});await new Promise(r=>setTimeout(r,3000));}
+            const binding={taskId:task.taskId,fileKey:task.fileKey,rowNum:task.rowNum};
+            const bound=await chrome.tabs.sendMessage(tab.id,{action:'suite-recover-bind',binding,baselineUrls:task.baselineUrls||[]});
+            if(!bound?.success)throw new Error(bound?.error||'原对话未就绪');
+            let result;
+            for(let i=0;i<12;i++){
+                const response=await chrome.tabs.sendMessage(tab.id,{action:'suite-poll',binding,baselineUrls:task.baselineUrls||[],expectCount:task.expectCount});
+                if(!response?.success)throw new Error(response?.error||'读取已有图片失败');
+                if(response.result?.ready){result=response.result;break;}
+                await new Promise(r=>setTimeout(r,1500));
+            }
+            if(!result)throw new Error('原对话尚未加载完整结果，未发送新请求');
+            const restored=await SuiteTaskStore.recoverResults(task.taskId,{fileKey:request.fileKey,rowNum:request.rowNum},result.images);
+            sendResponse({ok:true,taskId:restored.taskId,count:restored.images.length});
+        }catch(e){sendResponse({ok:false,error:e.message});}})();return true;
+    }
     if (request.action === 'suiteRecover') {
         SuiteTaskStore.recoverOnStartup().then(ids => sendResponse({ ok: true, interrupted: ids })).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
@@ -1492,20 +1834,24 @@ async function handleSharedAction(request, sendResponse, sender) {
        步骤：互斥检查 → 取/建豆包页 → 探测就绪 → 记基线 → 上传素材 →
              输入合并提示词 → 明确发送一次 → 等待本次新结果 → 交页面识别/后处理/保存 */
     if (request.action === 'suiteRun') {
+        if(globalThis.__suiteExecLock){sendResponse({ok:false,error:'Suite execution already running'});return false;}
+        globalThis.__suiteExecLock={taskId:request.taskId,at:Date.now()};
+        sendResponse({ok:true,accepted:true,taskId:request.taskId});
+        const reply=()=>{};
         (async () => {
-            const taskId = request.taskId;
+            const taskId=request.taskId;
             const report = (stage, extra) => chrome.runtime.sendMessage(EXTENSION_ID,
                 Object.assign({ action: 'suiteProgress', report: Object.assign({ taskId, stage }, extra || {}) }, {})).catch(() => {});
             try {
                 const t = await SuiteTaskStore.get(taskId);
-                if (!t) { sendResponse({ ok: false, error: '未知任务：' + taskId }); return; }
-                if (SuiteTaskStore.isTerminal(t.stage)) { sendResponse({ ok: false, error: `任务已终态：${t.stage}` }); return; }
+                if (!t) { reply({ ok: false, error: '未知任务：' + taskId }); return; }
+                if (t.stage !== 'received' || SuiteTaskStore.isTerminal(t.stage)) { reply({ ok: false, error: `任务已终态：${t.stage}` }); return; }
 
                 // 双向互斥①：换色正在执行 → 抢占失败，明确失败而不是排队等待
                 const cexec = await getActiveColorExec();
                 if (cexec && cexec.state === 'accepted') {
                     await SuiteTaskStore.fail(taskId, '阶段 channel：换色任务正在执行，套图无法占用豆包输入通道');
-                    sendResponse({ ok: false, error: '换色任务正在执行，套图无法占用豆包输入通道' });
+                    reply({ ok: false, error: '换色任务正在执行，套图无法占用豆包输入通道' });
                     return;
                 }
                 // 取得套图执行锁（换色启动前会检查它）
@@ -1518,7 +1864,14 @@ async function handleSharedAction(request, sendResponse, sender) {
                     await new Promise(r => setTimeout(r, 4000));
                 }
                 const tabId = tab.id;
-                const toTab = (action, payload) => chrome.tabs.sendMessage(tabId, Object.assign({ action }, payload || {}));
+                await chrome.tabs.update(tabId,{active:true});
+                await chrome.windows.update(tab.windowId,{focused:true});
+                globalThis.__suiteExecLock.tabId = tabId;
+                const toTab = async (action, payload) => {
+                    const live = await SuiteTaskStore.get(taskId);
+                    if (!live || live.cancelled || SuiteTaskStore.isTerminal(live.stage)) throw new Error('套图任务已取消或结束');
+                    return chrome.tabs.sendMessage(tabId, Object.assign({ action, binding: { taskId, fileKey: t.fileKey, rowNum: t.rowNum } }, payload || {}));
+                };
 
                 // ① 探测就绪 / 登录
                 const pr = await toTab('suite-probe');
@@ -1529,7 +1882,9 @@ async function handleSharedAction(request, sendResponse, sender) {
                 // ② 基线（发送前已有图片）
                 const bl = await toTab('suite-baseline', { binding: { taskId, fileKey: t.fileKey, rowNum: t.rowNum } });
                 if (!bl || !bl.success) throw new Error('记录图片基线失败');
-                await SuiteTaskStore.advance(taskId, 'sent', { diag: [`基线 ${bl.baselineUrls.length} 张`] }).catch(() => {});
+                const settings = await toTab('suite-settings', { settings: t.configSnapshot || {} });
+                if (!settings || !settings.success) throw new Error('模型/比例校验失败：' + ((settings && settings.error) || '无响应'));
+                // sent 只在实际发送取得证据之后写入。
 
                 // ③ 上传素材（执行器内部实际等待上传完成）
                 const assets = (t.assets && t.assets.length) ? t.assets : ((t.configSnapshot && t.configSnapshot.assets) || []);
@@ -1547,24 +1902,37 @@ async function handleSharedAction(request, sendResponse, sender) {
                 // ⑤ 明确发送一次（执行器内部防止重复发送）
                 const sd = await toTab('suite-send');
                 if (!sd || !sd.success) throw new Error('发送失败：' + ((sd && sd.error) || '未知'));
-                await SuiteTaskStore.advance(taskId, 'sent', { diag: [`已发送，基线 ${(sd.baselineUrls || []).length} 张，证据 ${sd.evidence || '-'}`] }).catch(() => {});
+                await SuiteTaskStore.advance(taskId, 'sent', { baselineUrls:sd.baselineUrls||bl.baselineUrls,doubaoUrl:(await chrome.tabs.get(tabId)).url,diag: [`已发送，基线 ${(sd.baselineUrls || []).length} 张，证据 ${sd.evidence || '-'}`] });
 
                 // ⑥ 等待并采集本次新结果
-                const wt = await toTab('suite-wait', { baselineUrls: sd.baselineUrls || bl.baselineUrls, expectCount: t.expectCount || 5, timeoutMs: 600000 });
+                let wt;
+                const deadline=Date.now()+600000;
+                while(Date.now()<deadline){
+                    wt=await toTab('suite-poll',{baselineUrls:sd.baselineUrls||bl.baselineUrls,expectCount:t.expectCount||5});
+                    if(!wt?.success||wt.result?.ready)break;
+                    await new Promise(resolve=>setTimeout(resolve,2000));
+                }
+
                 if (!wt || !wt.success) throw new Error('等待结果失败：' + ((wt && wt.error) || '未知'));
+                const liveAfterWait = await SuiteTaskStore.get(taskId);
+                if (!liveAfterWait || liveAfterWait.cancelled || SuiteTaskStore.isTerminal(liveAfterWait.stage)) throw new Error('任务已取消，丢弃迟到结果');
                 const r = wt.result || {};
                 if (!r.images || r.images.length < (t.expectCount || 5)) {
                     await SuiteTaskStore.fail(taskId, `结果不足：期望 ${t.expectCount || 5} 张，实际 ${(r.images || []).length} 张（原始 ${r.rawCount || 0}，同图归并 ${r.mergedGroups || 0} 组）`);
-                    sendResponse({ ok: false, error: `结果不足：${(r.images || []).length}/${t.expectCount || 5}` });
+                    reply({ ok: false, error: `结果不足：${(r.images || []).length}/${t.expectCount || 5}` });
                     return;
                 }
                 await SuiteTaskStore.advance(taskId, 'acquired', { images: r.images, diag: [`获取 ${r.images.length} 张（原始 ${r.rawCount}，归并 ${r.mergedGroups} 组，基线 ${r.baselineCount}）`] }).catch(() => {});
-                sendResponse({ ok: true, taskId, stage: 'acquired', images: r.images, baselineUrls: sd.baselineUrls || bl.baselineUrls });
+                reply({ ok: true, taskId, stage: 'acquired', images: r.images, baselineUrls: sd.baselineUrls || bl.baselineUrls });
             } catch (e) {
                 await SuiteTaskStore.fail(taskId, '执行阶段：' + (e && e.message)).catch(() => {});
-                sendResponse({ ok: false, error: e && e.message });
+                reply({ ok: false, error: e && e.message });
             } finally {
-                globalThis.__suiteExecLock = null;
+                const owned = globalThis.__suiteExecLock;
+                if (owned && owned.taskId === taskId) {
+                    if (owned.nativeAttached && owned.tabId) await chrome.debugger.detach({ tabId: owned.tabId }).catch(() => {});
+                    globalThis.__suiteExecLock = null;
+                }
             }
         })();
         return true;
@@ -1825,6 +2193,7 @@ async function handleSharedAction(request, sendResponse, sender) {
         return true;
     }
     if (request.action === 'startColorChange') {
+        if (globalThis.__suiteExecLock) { sendResponse({ ok: false, error: '套图正在执行，请稍后换色' }); return true; }
         openDoubaoAndStartTask(request.task).then(result => {
             sendResponse(result);
         });
@@ -1849,7 +2218,8 @@ async function handleSharedAction(request, sendResponse, sender) {
         return true;
     }
     if (request.action === 'getColorImagesInfo') {
-        const storageKey = colorKey(request.rowNum);
+        const fileKey = typeof request.fileKey === 'string' ? request.fileKey : getFilePrefix();
+        const storageKey = fileKey + 'color__' + request.rowNum;
         chrome.storage.local.get(storageKey, (result) => {
             let images = result[storageKey] || {};
             if (Object.keys(images).length === 0 && storageKey === 'color__' + request.rowNum) {
@@ -1863,10 +2233,10 @@ async function handleSharedAction(request, sendResponse, sender) {
                         });
                         images = legacyImages;
                     }
-                    sendResponse({ ok: true, images: Object.keys(images) });
+                    sendResponse({ ok: true, images: Object.keys(images), fileKey });
                 });
             } else {
-                sendResponse({ ok: true, images: Object.keys(images) });
+                sendResponse({ ok: true, images: Object.keys(images), fileKey });
             }
         });
         return true;
@@ -2029,7 +2399,7 @@ chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => 
         // 扩展重载时间戳：页面据此自动刷新（SW 休眠不会改变它，故不会误刷）
         if (request.action === 'getExtBootInfo') {
             chrome.storage.local.get('polo_ext_reload_ts', (r) => {
-                sendResponse({ ok: true, reloadTs: r['polo_ext_reload_ts'] || 0 });
+                sendResponse({ ok: true, reloadTs: r['polo_ext_reload_ts'] || 0, publicationImagesVersion: 1 });
             });
             return true;
         }
@@ -2066,9 +2436,16 @@ chrome.runtime.onConnectExternal.addListener((port) => {
             broadcastPublishState().catch(() => {});
             port.onDisconnect.addListener(() => {
                 console.log('🔌 [onConnectExternal] 发品助手长连接已断开');
+                if(assistantPort!==port)return;
                 assistantPort = null;
+                for(const pending of publicationRequests.values()){clearTimeout(pending.timer);pending.reject(Error('发品助手连接断开，图片上传已停止'));}
+                publicationRequests.clear();
             });
             port.onMessage.addListener((msg) => {
+                if(msg.action==='publicationImagesResponse'&&assistantPort===port){
+                    const pending=publicationRequests.get(msg.requestId);
+                    if(pending){clearTimeout(pending.timer);publicationRequests.delete(msg.requestId);msg.ok?pending.resolve(msg.files):pending.reject(Error(msg.error||'生成图片读取失败'));}
+                }
                 console.log('🔍 [onConnectExternal] 收到消息:', msg.action);
             });
         }
@@ -2079,6 +2456,8 @@ chrome.runtime.onConnectExternal.addListener((port) => {
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // The native bridge owns this response; do not race it with the unknown-action fallback.
+    if (request.action === 'doubao-native-input') return;
     console.log(`🔍 [onMessage] 收到消息: action=${request.action}, sender=${sender?.tab?.url ? 'tab' : 'unknown'}`);
     if (request.action === 'savePublishProduct' || request.action === 'recordPublishSaveClick') {
         savePublishProduct(request, sender, request.action === 'savePublishProduct').then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
@@ -2262,14 +2641,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ ok: false, error: '来源不符' });
             return true;
         }
-        if ((request.data?.byteLength || 0) > 100 * 1024 * 1024) {
+        if ((request.data?.byteLength || request.data?.length || 0) > 100 * 1024 * 1024) {
             console.warn('⛔ [PS编辑] psEditSave 数据过大拒绝:', request.data?.byteLength);
             sendResponse({ ok: false, error: '数据过大' });
             return true;
         }
         console.log('[PS编辑] background 收到 psEditSave 消息');
-        handlePsEditSave(request.data);
-        sendResponse({ ok: true });
+        handlePsEditSave(request.data).then(sendResponse).catch(e=>sendResponse({ok:false,error:e.message}));
         return true;
     }
 
@@ -2280,24 +2658,54 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ ok: false, error: '来源不符' });
             return true;
         }
-        if ((request.data?.byteLength || 0) > 100 * 1024 * 1024) {
+        if ((request.data?.byteLength || request.data?.length || 0) > 100 * 1024 * 1024) {
             console.warn('⛔ [PS编辑] psEditSaveFsa 数据过大拒绝:', request.data?.byteLength);
             sendResponse({ ok: false, error: '数据过大' });
             return true;
         }
         console.log('[PS编辑] background 收到 psEditSaveFsa 消息，fileName:', request.fileName, 'data length:', request.data?.byteLength);
-        handlePsEditSaveFsa(request.data, request.fileName);
-        sendResponse({ ok: true });
+        handlePsEditSaveFsa(request.data, request.fileName).then(sendResponse).catch(e=>sendResponse({ok:false,error:e.message}));
         return true;
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRun'];
+    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
 
+    if(request.action==='uploadPublicationImages'){
+        const tabId=sender.tab?.id;
+        if(!tabId){sendResponse({ok:false,error:'缺少上传目标页面'});return false;}
+        if(!/^https:\/\/post\.alibaba\.com\/product\/publish/.test(sender.tab?.url||sender.url||'')){
+            sendResponse({ok:false,error:'只能在阿里商品发布编辑页上传图片'});return false;
+        }
+        if(publicationUploadLocks.has(tabId)){sendResponse({ok:false,error:'该页面正在上传图片，请等待完成'});return false;}
+        publicationUploadLocks.add(tabId);
+        (async()=>{try{
+            const prepared=await PublicationImages.prepare(request.product,request.kind,readPublicationGenerated,async path=>{
+                const response=await fetch(chrome.runtime.getURL(path));if(!response.ok)throw Error('类目公共图读取失败：'+path);return response.blob();
+            });
+            const frames=await chrome.webNavigation.getAllFrames({tabId});let chosen=null,enable=null;
+            for(const frame of frames||[{frameId:0}]){
+                if(frame.frameId!==0){try{if(!/(^|\.)alibaba\.com$/.test(new URL(frame.url).hostname))continue;}catch(_){continue;}}
+                try{
+                    await chrome.scripting.executeScript({target:{tabId,frameIds:[frame.frameId]},files:['upload/publication-dom.js']});
+                    const result=await chrome.scripting.executeScript({target:{tabId,frameIds:[frame.frameId]},func:kind=>globalThis.PublicationDom.probe(kind),args:[request.kind]});
+                    if(result[0]?.result?.found){chosen=frame.frameId;break;}
+                    if(result[0]?.result?.canEnable)enable=frame.frameId;
+                }catch(e){if(frame.frameId===0)throw e;}
+            }
+            if(chosen===null)chosen=enable;
+            if(chosen===null)throw Error('未找到'+(request.kind==='main'?'主图':'细节图')+'上传区域，请先选择对应模板');
+            const executed=await chrome.scripting.executeScript({target:{tabId,frameIds:[chosen]},func:async(kind,files)=>{
+                try{return await globalThis.PublicationDom.perform(kind,files);}catch(e){return {ok:false,error:e.message};}
+            },args:[request.kind,prepared.files]});
+            const result=executed[0]?.result;if(!result?.ok)throw Error(result?.error||'页面没有确认上传成功');
+            sendResponse({...result,category:prepared.category});
+        }catch(e){sendResponse({ok:false,error:e.message});}finally{publicationUploadLocks.delete(tabId);}})();return true;
+    }
     if (request.action === 'uploadMainImage') {
         const tabId = sender.tab?.id;
         if (!tabId) {
@@ -2385,6 +2793,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'startColorChange') {
+        if (globalThis.__suiteExecLock) { sendResponse({ ok: false, error: '套图正在执行，请稍后换色' }); return true; }
         openDoubaoAndStartTask(request.task).then(result => {
             sendResponse(result);
         });
@@ -3147,6 +3556,23 @@ async function downloadViaFetch(url, filename, rowNum, relativePath, bound) {
 
 async function fetchColorImageAsBase64(rowNum, color, expectedFileKey) {
     const fileKey = getFilePrefix(), fileName = CURRENT_FILENAME;
+    if (expectedFileKey !== undefined && expectedFileKey !== fileKey) return {ok:false,error:'颜色图所属文件已切换'};
+    let directoryError = null;
+    if (typeof PoloDirectories !== 'undefined' && PoloDirectories.isColorSelection(COLOR_IMG_DIR)) {
+        try { return {ok:true,dataUrl:await PoloDirectories.colorImage(COLOR_IMG_DIR,fileName||DEFAULT_FILE_FOLDER,rowNum,color)}; }
+        catch(error) {
+            // 磁盘是唯一真相：文件明确缺失/读取失败 → 如实返回缺失，不回落缓存冒充存在。
+            // 仅「权限待确认」这类无法判定磁盘状态的错误，才允许用已有缓存临时展示。
+            const msg = String((error && error.message) || error || '');
+            const permUncertain = /permission|authoriz|denied|notallowed|securityerror|授权|待确认|用户拒绝/i.test(msg);
+            if (!permUncertain) {
+                console.log(`⛔ 颜色图磁盘缺失（${COLOR_IMG_DIR}/${fileName||DEFAULT_FILE_FOLDER}/row${rowNum}/${color}）：${msg}`);
+                return { ok: false, error: msg || '颜色图文件缺失' };
+            }
+            directoryError = error;
+        }
+    }
+
     if (expectedFileKey !== undefined && expectedFileKey !== fileKey) return { ok: false, error: '颜色图所属文件已切换' };
     try {
         const idbKey = colorImageIDBKey(fileName, rowNum, color);
@@ -3178,7 +3604,7 @@ async function fetchColorImageAsBase64(rowNum, color, expectedFileKey) {
         }
         const imgData = images[color];
         const url = typeof imgData === 'string' ? imgData : imgData?.url;
-        if (!url) return { ok: false, error: '图片URL不存在' };
+        if (!url) return { ok: false, error: directoryError?.message || '图片URL不存在' };
 
         const response = await fetch(url, {
             headers: {
@@ -3236,6 +3662,7 @@ async function startPsEdit(task) {
     const tabId = tab.id;
 
     psEditState = {
+        saveViaAssistant: task.saveViaAssistant === true,
         tabId,
         fileName,
         rowNum,
@@ -3369,86 +3796,7 @@ function injectFetchInterceptor(markerUrl, fileName) {
                         console.log('[PS拦截] 准备保存文件:', targetFileName);
                         const blob = new Blob([uint8], { type: format === 'png' ? 'image/png' : format === 'jpg' ? 'image/jpeg' : 'image/webp' });
                         
-                        async function saveFile(dirHandle, fileName, blobData) {
-                            try {
-                                const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-                                const writable = await fileHandle.createWritable();
-                                await writable.write(blobData);
-                                await writable.close();
-                                console.log('[PS拦截] ✅ 文件保存成功:', fileName);
-                                alert('✅ PS编辑图片已保存: ' + fileName);
-                            } catch (e) {
-                                console.error('[PS拦截] ❌ 文件保存失败:', e);
-                                alert('❌ 保存失败: ' + e.message);
-                            }
-                        }
-                        
-                        async function getDirHandle() {
-                            if (window.__psEditDirHandle) {
-                                const perm = await window.__psEditDirHandle.queryPermission({ mode: 'readwrite' });
-                                if (perm === 'granted') return window.__psEditDirHandle;
-                                const requested = await window.__psEditDirHandle.requestPermission({ mode: 'readwrite' });
-                                if (requested === 'granted') return window.__psEditDirHandle;
-                            }
-                            
-                            // 尝试从 IndexedDB 恢复句柄
-                            try {
-                                const db = await new Promise((resolve, reject) => {
-                                    const req = indexedDB.open('ps_edit_handles', 1);
-                                    req.onupgradeneeded = () => req.result.createObjectStore('handles');
-                                    req.onsuccess = () => resolve(req.result);
-                                    req.onerror = () => reject(req.error);
-                                });
-                                const savedHandle = await new Promise((resolve) => {
-                                    const tx = db.transaction('handles', 'readonly');
-                                    const req = tx.objectStore('handles').get('dir');
-                                    req.onsuccess = () => resolve(req.result || null);
-                                    req.onerror = () => resolve(null);
-                                });
-                                if (savedHandle) {
-                                    console.log('[PS拦截] 从IndexedDB恢复目录句柄');
-                                    const perm = await savedHandle.queryPermission({ mode: 'readwrite' });
-                                    if (perm === 'granted') {
-                                        window.__psEditDirHandle = savedHandle;
-                                        return savedHandle;
-                                    }
-                                    const requested = await savedHandle.requestPermission({ mode: 'readwrite' });
-                                    if (requested === 'granted') {
-                                        window.__psEditDirHandle = savedHandle;
-                                        return savedHandle;
-                                    }
-                                }
-                            } catch (e) {
-                                console.warn('[PS拦截] IndexedDB恢复失败:', e);
-                            }
-                            
-                            // 首次使用，弹出选择
-                            console.log('[PS拦截] 需要选择目录');
-                            const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-                            window.__psEditDirHandle = dirHandle;
-                            
-                            // 存储到 IndexedDB
-                            try {
-                                const db = await new Promise((resolve, reject) => {
-                                    const req = indexedDB.open('ps_edit_handles', 1);
-                                    req.onupgradeneeded = () => req.result.createObjectStore('handles');
-                                    req.onsuccess = () => resolve(req.result);
-                                    req.onerror = () => reject(req.error);
-                                });
-                                const tx = db.transaction('handles', 'readwrite');
-                                tx.objectStore('handles').put(dirHandle, 'dir');
-                                console.log('[PS拦截] 目录句柄已存储到IndexedDB');
-                            } catch (e) {
-                                console.warn('[PS拦截] IndexedDB存储失败:', e);
-                            }
-                            return dirHandle;
-                        }
-                        
-                        getDirHandle().then(dirHandle => {
-                            saveFile(dirHandle, targetFileName, blob);
-                        }).catch(err => {
-                            console.error('[PS拦截] 获取目录失败:', err);
-                        });
+                        window.postMessage({type:'PS_EDIT_SAVE_FSA',data:Array.from(uint8),format,fileName:targetFileName},location.origin);
                     };
                     reader.readAsArrayBuffer(blob);
                 })
@@ -3515,14 +3863,14 @@ function injectMessageBridge() {
             console.log('[PS拦截] 收到 PS_EDIT_SAVE 消息');
             chrome.runtime.sendMessage(EXT_ID, {
                 action: 'psEditSave',
-                data: event.data.data
+                data: event.data.data instanceof ArrayBuffer ? Array.from(new Uint8Array(event.data.data)) : event.data.data
             });
         }
         if (event.data && event.data.type === 'PS_EDIT_SAVE_FSA') {
             console.log('[PS拦截] 收到 PS_EDIT_SAVE_FSA 消息，format:', event.data.format, 'rowNum:', event.data.rowNum, 'fileName:', event.data.fileName);
             chrome.runtime.sendMessage(EXT_ID, {
                 action: 'psEditSaveFsa',
-                data: event.data.data,
+                data: event.data.data instanceof ArrayBuffer ? Array.from(new Uint8Array(event.data.data)) : event.data.data,
                 format: event.data.format,
                 rowNum: event.data.rowNum,
                 fileName: event.data.fileName
@@ -3562,29 +3910,9 @@ function parsePsSaveData(arrayBuffer) {
 }
 
 async function handlePsEditSave(arrayBuffer) {
-    if (!psEditState || psEditState.saved) return;
-
     const parsed = parsePsSaveData(arrayBuffer);
-    if (!parsed) {
-        console.error('❌ 解析PS保存数据失败');
-        return;
-    }
-
-    const { imgData, format } = parsed;
-    const { fileName, rowNum } = psEditState;
-
-    psEditState.saved = true;
-    console.log('✅ PS编辑完成，准备发送回页面:', fileName);
-
-    const uint8Array = Array.from(imgData);
-
-    chrome.runtime.sendMessage(EXTENSION_ID, {
-        action: 'psEditComplete',
-        rowNum,
-        fileName,
-        imgData: uint8Array,
-        format
-    }).catch(() => {});
+    if (!parsed) throw new Error('解析PS保存数据失败');
+    return handlePsEditSaveFsa(Array.from(parsed.imgData));
 }
 
 // 扩展自身 ID：动态获取，避免换电脑/重新加载扩展时 ID 变化导致失效
@@ -3593,51 +3921,23 @@ const EXTENSION_ID = chrome.runtime.id;
 const PS_EDIT_RESULT_KEY = 'ps_edit_result';
 
 async function handlePsEditSaveFsa(data, fileName) {
-    console.log('[PS编辑] handlePsEditSaveFsa 被调用，psEditState:', psEditState);
-    if (!psEditState || psEditState.saved) {
-        console.log('[PS编辑] psEditState 无效或已保存');
-        return;
-    }
-
-    let uint8;
-    if (typeof data === 'string') {
-        console.log('[PS编辑] 收到base64数据，长度:', data.length);
-        const binary = atob(data);
-        uint8 = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-            uint8[i] = binary.charCodeAt(i);
+    const state = psEditState;
+    if (!state || state.saved || state.saving) return {ok:false,error:'任务已保存或正在保存'};
+    state.saving = true;
+    try {
+        const bytes = typeof data === 'string' ? Uint8Array.from(atob(data), c=>c.charCodeAt(0)) : new Uint8Array(data);
+        if (!bytes.length || bytes.length > 100*1024*1024) throw new Error('图片为空或过大');
+        const format = bytes[0]===0xff && bytes[1]===0xd8 ? 'jpg' : 'png';
+        const directory = await PoloDirectories.status();
+        let savedByExtension = false;
+        if (directory.configured && directory.permission === 'granted' && !state.saveViaAssistant) {
+            await PoloDirectories.write(state.fileName, Array.from(bytes), format);
+            savedByExtension = true;
         }
-    } else {
-        uint8 = new Uint8Array(data);
-    }
-    let format = 'png';
-    if (uint8.length > 2 && uint8[0] === 0xFF && uint8[1] === 0xD8) {
-        format = 'jpg';
-    } else if (uint8.length > 8 && uint8[0] === 0x89 && uint8[1] === 0x50) {
-        format = 'png';
-    }
-
-    const { rowNum } = psEditState;
-    psEditState.saved = true;
-    console.log('✅ PS编辑完成(FSA方式)，准备保存结果:', fileName, 'format:', format, 'rowNum:', rowNum, '数据大小:', uint8.length);
-
-    const uint8Array = Array.from(uint8);
-
-    const result = {
-        rowNum,
-        fileName: psEditState.fileName,
-        imgData: uint8Array,
-        format,
-        timestamp: Date.now()
-    };
-
-    chrome.storage.local.set({ [PS_EDIT_RESULT_KEY]: result }, () => {
-        console.log('[PS编辑] 结果已保存到 storage');
-    });
-
-    chrome.runtime.sendMessage(EXTENSION_ID, {
-        action: 'psEditComplete',
-        ...result
-    }).catch(() => {});
+        const result = {rowNum:state.rowNum,fileName:state.fileName,imgData:Array.from(bytes),format,savedByExtension,timestamp:Date.now()};
+        await chrome.storage.local.set({[PS_EDIT_RESULT_KEY]:result});
+        state.saved = true; // captured export; disk success is separately explicit in savedByExtension
+        chrome.runtime.sendMessage(EXTENSION_ID,{action:'psEditComplete',...result}).catch(()=>{});
+        return {ok:true,saved:savedByExtension,pendingLegacySave:!savedByExtension};
+    } finally {state.saving=false;}
 }
-

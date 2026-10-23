@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#30263f">
 <title>Polo产品发品助手</title>
 <style>
 :root {
@@ -288,7 +289,7 @@ body::after {
     padding: 20px 16px;
     text-align: center;
     cursor: pointer;
-    transition: all var(--transition);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition);
     background: rgba(255, 255, 255, 0.03);
     backdrop-filter: blur(20px) saturate(180%);
     -webkit-backdrop-filter: blur(20px) saturate(180%);
@@ -438,7 +439,7 @@ body::after {
     border-radius: 16px;
     padding: 14px;
     cursor: pointer;
-    transition: all var(--transition);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition);
     background: rgba(255, 255, 255, 0.1);
     border: 1px solid rgba(255, 255, 255, 0.15);
     display: flex;
@@ -522,7 +523,7 @@ body::after {
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: all 0.2s;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s;
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
 }
@@ -580,7 +581,7 @@ body::after {
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: all 0.2s;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s;
 }
 .batch-select-all .mini-check.checked {
     background: var(--accent);
@@ -609,7 +610,7 @@ body::after {
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s;
     box-shadow: 0 2px 8px rgba(77, 150, 255, 0.3);
 }
 .batch-publish-btn:hover:not(:disabled) {
@@ -856,7 +857,7 @@ body::after {
     cursor: pointer;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    transition: all 0.2s ease;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s ease;
 }
 .publish-btn:hover {
     background: linear-gradient(
@@ -887,7 +888,7 @@ body::after {
     cursor: pointer;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    transition: all 0.2s ease;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s ease;
     font-weight: 500;
     white-space: nowrap;
 }
@@ -915,7 +916,7 @@ body::after {
     color: #fff;
     cursor: pointer;
     box-shadow: 0 4px 12px rgba(245, 87, 108, 0.3);
-    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
     overflow: hidden;
 }
@@ -969,6 +970,19 @@ body::after {
     color: rgba(255, 255, 255, 0.85);
     gap: 12px;
 }
+.task-progress { position: relative; box-sizing: border-box; align-self: stretch; width: 100%; max-width: 100%; min-width: 0; overflow: hidden; }
+ .progress-recycle-controls { position: absolute; right: 5px; top: 12px; bottom: 12px; width: 12px; transition: width .22s ease; }
+.progress-recycle-controls.is-open { width: 52px; }
+.progress-recycle-bar { position: absolute; left: 0; top: 22%; bottom: 22%; width: 12px; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.progress-recycle-bar::after { content: ''; display: block; width: 3px; height: 100%; margin: auto; border-radius: 3px; background: rgba(255,255,255,.8); transition: background .2s ease; }
+.progress-recycle-bar:hover::after { background: white; }
+.progress-recycle-arrow { position: absolute; right: 0; top: 0; bottom: 0; width: 35px; padding: 0; border: 0; background: transparent; color: white; font-size: 32px; line-height: 1; cursor: pointer; opacity: 0; visibility: hidden; transform: translateX(-12px) scale(.7); transition: opacity .22s ease, transform .22s ease; }
+.progress-recycle-controls.is-open .progress-recycle-arrow { opacity: 1; visibility: visible; transform: translateX(0) scale(1); }
+.progress-recycle-open { padding-right: 62px; transition: padding-right .22s ease; }
+.progress-recycling { pointer-events: none; overflow: hidden; transform-origin: left center; }
+.progress-recycle-bar:focus-visible, .progress-recycle-arrow:focus-visible { outline: 2px solid #c4a6ff; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) { .progress-recycle-controls, .progress-recycle-arrow, .progress-recycle-open { transition: none; } }
+
 .task-progress .progress-header > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
 .task-progress .progress-header > button { flex-shrink: 0; }
 .task-progress .stop-btn:disabled { opacity: 0.5; cursor: default; }
@@ -1002,7 +1016,7 @@ body::after {
     color: #fff;
     font-size: 11px;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s;
 }
 .task-progress .stop-btn:hover {
     background: rgba(245, 87, 108, 0.35);
@@ -1026,7 +1040,7 @@ body::after {
     cursor: pointer;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    transition: all 0.2s ease;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s ease;
     font-weight: 500;
     white-space: nowrap;
 }
@@ -1059,7 +1073,7 @@ body::after {
     cursor: pointer;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    transition: all 0.2s ease;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s ease;
 }
 
 /* AI改图按钮 - 紫色调 */
@@ -1076,7 +1090,7 @@ body::after {
     cursor: pointer;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    transition: all 0.2s ease;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s ease;
     font-weight: 500;
     white-space: nowrap;
 }
@@ -1131,7 +1145,7 @@ body::after {
     cursor: pointer;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    transition: all 0.2s ease;
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s ease;
 }
 .copy-all-btn:hover {
     background: linear-gradient(
@@ -1328,7 +1342,7 @@ body::after {
     max-height: 280px;
     border-radius: var(--radius-md);
     cursor: zoom-in;
-    transition: all var(--transition);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition);
     box-shadow: 0 8px 24px rgba(0,0,0,0.2);
     position: relative;
     z-index: 0;
@@ -1416,7 +1430,7 @@ body::after {
     justify-content: center;
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     cursor: pointer;
-    transition: all var(--transition);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition);
     border: 1px solid rgba(255, 255, 255, 0.08);
     backdrop-filter: blur(10px) saturate(180%);
     -webkit-backdrop-filter: blur(10px) saturate(180%);
@@ -1451,6 +1465,14 @@ body::after {
     text-align: center;
 }
 
+/* 套图卡片独立纵向布局，避免沿用颜色卡片的横向 flex 挤压图片。 */
+#suiteImagesGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+#suiteImagesGrid .color-img-item { display: flex; flex-direction: column; aspect-ratio: auto; min-width: 0; padding: 8px; gap: 6px; }
+#suiteImagesGrid .img-label { width: 100%; flex-shrink: 0; margin: 0; }
+#suiteImagesGrid .color-img-item > img { display: block; width: 100%; height: auto; aspect-ratio: 1; object-fit: contain; flex-shrink: 0; }
+#suiteImagesGrid .suite-image-status { width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: rgba(255,255,255,.5); }
+#suiteImagesGrid .batch-color-btn { flex-shrink: 0; }
+
 /* Field Group */
 .field-group { margin-bottom: 16px; }
 .field-label {
@@ -1472,7 +1494,7 @@ body::after {
     backdrop-filter: blur(15px) saturate(180%);
     -webkit-backdrop-filter: blur(15px) saturate(180%);
     box-shadow: inset 0 0.5px 0 rgba(255,255,255,0.08);
-    transition: all var(--transition);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition);
 }
 .field-value:hover {
     background: rgba(255, 255, 255, 0.08);
@@ -1488,7 +1510,7 @@ body::after {
     border-radius: var(--radius-md);
     margin-bottom: 10px;
     cursor: context-menu;
-    transition: all var(--transition);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition);
     border: 1px solid rgba(255, 255, 255, 0.06);
     color: #fff;
     backdrop-filter: blur(15px) saturate(180%);
@@ -1558,7 +1580,7 @@ body::after {
     border-radius: 28px;
     z-index: 99999;
     opacity: 0;
-    transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
     pointer-events: none;
     font-size: 14px;
     font-weight: 500;
@@ -1568,36 +1590,6 @@ body::after {
 .toast.show {
     opacity: 1;
     transform: translateX(-50%) translateY(0);
-}
-
-/* FPS 监测器（下移到扩展设置/内存阈值下方，避免右上角重叠） */
-.fps-monitor {
-    position: fixed;
-    top: 92px;
-    right: 18px;
-    z-index: 9999;
-    padding: 6px 12px;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
-    border-radius: 8px;
-    color: #34c759;
-    font-family: 'SF Mono', Menlo, Monaco, monospace;
-    font-size: 13px;
-    font-weight: 600;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    cursor: pointer;
-    user-select: none;
-    transition: opacity 0.2s;
-}
-.fps-monitor:hover {
-    opacity: 0.7;
-}
-.fps-monitor.low {
-    color: #ff9500;
-}
-.fps-monitor.critical {
-    color: #ff3b30;
 }
 
 /* Image Modal */
@@ -1650,7 +1642,7 @@ body::after {
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: all var(--transition);
+    transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition);
     box-shadow: inset 0 0.5px 0 rgba(255,255,255,0.2);
 }
 .image-modal-close:hover {
@@ -1667,13 +1659,10 @@ body::after {
     .container { padding: 12px; }
 }
 </style>
+<link rel="stylesheet" href="custom-step-config.css">
+<link rel="stylesheet" href="ui-polish.css">
 </head>
 <body>
-
-<!-- 扩展 ID 配置入口：换电脑/重装扩展后点击此处重新填 ID -->
-<button id="extIdBtn" style="position:fixed;top:14px;right:18px;z-index:9999;padding:7px 14px;border:none;border-radius:10px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;font-size:12px;font-weight:500;cursor:pointer;box-shadow:0 2px 8px rgba(102,126,234,0.35);" onclick="promptExtensionId()" title="配置 / 查看扩展 ID">
-    🔌 扩展设置
-</button>
 
 <div class="page-header">
     <h1>产品发品助手</h1>
@@ -1696,25 +1685,6 @@ body::after {
                 </div>
                 <input type="file" id="excelInput" accept=".xlsx">
                 
-                <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.1);">
-                    <div class="dir-tabs">
-                        <div class="dir-glider" id="dirGlider"></div>
-                        <button class="dir-tab active" id="tabColorDir" data-dir-tab="color" onclick="switchDirTab('color')">🖼️ 颜色图目录</button>
-                        <button class="dir-tab" id="tabPsDir" data-dir-tab="ps" onclick="switchDirTab('ps')">🖌️ PS编辑目录</button>
-                    </div>
-                    <div id="colorDirPanel">
-                        <input type="text" id="colorImgDirInput" placeholder="例如：D:\下载\gg" style="width: 100%; padding: 10px 14px; border: 1px solid rgba(255,255,255,0.15); border-radius: 10px; background: rgba(255,255,255,0.05); color: #fff; font-size: 13px; outline: none; transition: border-color 0.3s;" oninput="this.style.borderColor='rgba(77,150,255,0.5)';" onblur="this.style.borderColor='rgba(255,255,255,0.15)';">
-                        <div style="display: flex; gap: 6px; margin-top: 8px;">
-                            <button id="saveColorDirBtn" style="flex: 1; padding: 8px; border: none; border-radius: 10px; background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.85); font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);" onclick="saveColorImgDir()">保存目录</button>
-                            <button id="syncToExtensionBtn" style="flex: 1; padding: 8px; border: none; border-radius: 10px; background: linear-gradient(135deg, rgba(77,150,255,0.3) 0%, rgba(102,126,234,0.3) 100%); color: rgba(255,255,255,0.9); font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(77,150,255,0.3);" onclick="syncToExtension()">🔄 同步到插件</button>
-                        </div>
-                        <div id="colorDirHint" style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 6px;">颜色图会从 {目录}\Polo发品_颜色图\{文件名}\ 读取</div>
-                    </div>
-                    <div id="psDirPanel" style="display: none;">
-                        <button id="authorizePsDirBtn" style="width: 100%; padding: 10px 14px; border: none; border-radius: 10px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);" onclick="authorizePsDir()">📁 授权 extracted_images 目录</button>
-                        <div id="psDirStatus" style="font-size: 11px; color: rgba(255,255,255,0.5); margin-top: 6px;">未授权，PS编辑后无法自动保存</div>
-                    </div>
-                </div>
             </div>
 
             <div class="card product-list" id="productList" style="display: none;">
@@ -1778,13 +1748,19 @@ body::after {
 
 <!-- Image Modal -->
 <div class="image-modal" id="imageModal" onclick="closeImageModal()">
-    <button class="image-modal-close">✕</button>
+    <button class="image-modal-close" aria-label="关闭图片预览">✕</button>
     <img id="modalImage" src="" alt="">
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script src="xlsx.full.min.js"></script>
+<script src="chrome_extension/suite/suite-core.js"></script>
+<script src="chrome_extension/suite/suite-postprocess.js"></script>
+<script src="chrome_extension/suite/suite-image-transform.js"></script>
+<script src="chrome_extension/suite/suite-image-sdk.js"></script>
+<script src="chrome_extension/suite/suite-runtime.js"></script>
+<script src="chrome_extension/suite/suite-rembg.js"></script>
 <script>
 if (typeof XLSX === 'undefined') {
     console.error('XLSX库加载失败，请确保xlsx.full.min.js文件与发品助手.html在同一目录下');
@@ -1793,22 +1769,21 @@ if (typeof XLSX === 'undefined') {
 </script>
 <script>
 const PUBLISH_URL = 'https://post.alibaba.com/product/easyListing.htm?spm=a2700.micro_product_manager.0.0.40e03e5fPaTwSu';
-// 扩展 ID：外部页面无法自动获取，从 localStorage 读取用户首次配置的值
-// 用户可在浏览器扩展按钮弹窗里复制 ID，粘贴到本页"扩展设置"输入框
+// 通过扩展“打开发品助手”传入连接ID；旧的本地绑定继续有效。
+// 先移除启动参数，避免它进入后续外部消息的file URL来源校验。
+try {
+    const launch = new URL(location.href);
+    const id = launch.searchParams.get('poloExtension');
+    if (id && /^[a-p]{32}$/.test(id)) {
+        launch.searchParams.delete('poloExtension');
+        history.replaceState(null, '', launch.href);
+        localStorage.setItem('polo_extension_id', id);
+    }
+} catch (error) { console.warn('读取扩展连接参数失败', error); }
 let EXTENSION_ID = localStorage.getItem('polo_extension_id') || '';
 let colorImgBaseDir = '';
 let extensionConfig = {};
 let configSyncInterval = null;
-
-// 保存扩展 ID 并刷新页面使其生效
-function saveExtensionId(id) {
-    const trimmed = (id || '').trim();
-    if (!trimmed) { showToast('⚠️ 扩展 ID 不能为空'); return false; }
-    localStorage.setItem('polo_extension_id', trimmed);
-    EXTENSION_ID = trimmed;
-    showToast('✅ 扩展 ID 已保存');
-    return true;
-}
 
 try {
     const savedDir = localStorage.getItem('polo_color_img_dir');
@@ -1821,12 +1796,10 @@ function syncConfigFromExtension() {
         chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getConfig' }, (response) => {
             if (response && response.ok && response.config) {
                 extensionConfig = response.config;
-                if (response.config.colorImgDir) {
+                if (typeof response.config.colorImgDir === 'string') {
                     const changed = colorImgBaseDir !== response.config.colorImgDir;
                     colorImgBaseDir = response.config.colorImgDir;
                     localStorage.setItem('polo_color_img_dir', colorImgBaseDir);
-                    const input = document.getElementById('colorImgDirInput');
-                    if (input) input.value = colorImgBaseDir;
                     if (changed) {
                         showToast('🔄 已从扩展同步颜色图目录');
                         if (currentProduct) {
@@ -1849,30 +1822,28 @@ function startConfigSync() {
 
 startConfigSync();
 
+function psDirectoryMessage(message) {
+    return new Promise((resolve,reject)=>{
+        try {chrome.runtime.sendMessage(EXTENSION_ID,message,r=>{
+            const error=chrome.runtime.lastError;
+            if(error)reject(new Error(error.message));else if(!r)reject(new Error('扩展没有响应'));else resolve(r);
+        });}catch(e){reject(e);}
+    });
+}
 let psEditDirHandle = null;
 const PS_DIR_IDB_KEY = 'ps_edit_dir_handle';
 
 async function initPsDirHandle() {
     try {
-        if ('indexedDB' in window) {
-            const db = await openIDB();
-            const savedHandle = await getIDBValue(db, PS_DIR_IDB_KEY);
-            if (savedHandle) {
-                if (savedHandle.requestPermission) {
-                    const permission = await savedHandle.requestPermission();
-                    if (permission === 'granted') {
-                        psEditDirHandle = savedHandle;
-                        updatePsDirStatus(true);
-                        return;
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        console.warn('初始化PS目录句柄失败:', e);
-    }
-    updatePsDirStatus(false);
+        if (!('indexedDB' in window)) return;
+        const db = await openIDB();
+        try { psEditDirHandle = await getIDBValue(db, PS_DIR_IDB_KEY) || null; }
+        finally { db.close(); }
+        // prompt句柄也要保留；点击PS编辑时才能恢复授权，初始化不弹权限框。
+    } catch (error) { console.warn('读取助手原图目录失败',error); }
 }
+
+const psPageSaveRows = new Set();
 
 function openIDB() {
     return new Promise((resolve, reject) => {
@@ -1906,57 +1877,19 @@ function setIDBValue(db, key, value) {
     });
 }
 
-async function authorizePsDir() {
-    try {
-        if (!('showDirectoryPicker' in window)) {
-            showToast('❌ 您的浏览器不支持目录授权，请使用最新版 Chrome/Edge');
-            return;
-        }
-        const handle = await window.showDirectoryPicker({
-            id: 'ps-edit-images',
-            mode: 'readwrite'
-        });
-        if (handle.name !== 'extracted_images') {
-            const confirmRes = confirm(`你选择的目录是 "${handle.name}"，不是 "extracted_images"。确定要选这个目录吗？\n\n建议选择 extracted_images 目录，这样 PS 编辑后可以直接覆盖原图。`);
-            if (!confirmRes) return;
-        }
-        psEditDirHandle = handle;
-        if ('indexedDB' in window) {
-            const db = await openIDB();
-            await setIDBValue(db, PS_DIR_IDB_KEY, handle);
-        }
-        updatePsDirStatus(true);
-        showToast('✅ 目录授权成功: ' + handle.name);
-    } catch (e) {
-        if (e.name !== 'AbortError') {
-            console.error('授权失败:', e);
-            showToast('❌ 授权失败: ' + e.message);
-        }
-    }
-}
-
-function updatePsDirStatus(authorized) {
-    const statusEl = document.getElementById('psDirStatus');
-    const btnEl = document.getElementById('authorizePsDirBtn');
-    if (statusEl) {
-        if (authorized) {
-            statusEl.textContent = '✅ 已授权，PS编辑后可自动保存';
-            statusEl.style.color = 'rgba(76, 175, 80, 0.9)';
-        } else {
-            statusEl.textContent = '未授权，PS编辑后无法自动保存';
-            statusEl.style.color = 'rgba(255,255,255,0.5)';
-        }
-    }
-    if (btnEl) {
-        if (authorized) {
-            btnEl.textContent = '📁 重新授权目录';
-        }
-    }
-}
-
 async function savePsEditedImage(fileName, imgDataArray, format) {
-    if (!psEditDirHandle) {
-        showToast('⚠️ 请先授权 extracted_images 目录');
+    try {
+        const status = await psDirectoryMessage({action:'psDirectoryStatus'});
+        const row = Number((/^row(\d+)_main\./.exec(fileName) || [])[1]);
+        if (status.configured && status.permission === 'granted' && !psPageSaveRows.has(row)) {
+            const result = await psDirectoryMessage({action:'writePsImage',fileName,data:imgDataArray,format});
+            if (!result.ok) throw new Error(result.error);
+            return true;
+        }
+    } catch(e) {showToast('❌ PS保存失败: '+e.message);return false;}
+
+    if (!psEditDirHandle || await psEditDirHandle.queryPermission({mode:'readwrite'}) !== 'granted') {
+        showToast('⚠️ 助手原图目录需要确认权限，请重新点击PS编辑');
         return false;
     }
     try {
@@ -1972,97 +1905,6 @@ async function savePsEditedImage(fileName, imgDataArray, format) {
         console.error('保存PS编辑图片失败:', e);
         showToast('❌ 保存失败: ' + e.message);
         return false;
-    }
-}
-
-function moveDirGlider(activeTab) {
-    const glider = document.getElementById('dirGlider');
-    const container = document.querySelector('.dir-tabs');
-    if (glider && container && activeTab) {
-        const tabRect = activeTab.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
-        const left = tabRect.left - containerRect.left;
-        const width = tabRect.width;
-        glider.style.width = width + 'px';
-        glider.style.transform = 'translateX(' + left + 'px)';
-    }
-}
-
-function switchDirTab(tab) {
-    const tabColor = document.getElementById('tabColorDir');
-    const tabPs = document.getElementById('tabPsDir');
-    const panelColor = document.getElementById('colorDirPanel');
-    const panelPs = document.getElementById('psDirPanel');
-
-    if (tab === 'color') {
-        tabColor.classList.add('active');
-        tabPs.classList.remove('active');
-        panelColor.style.display = 'block';
-        panelPs.style.display = 'none';
-        moveDirGlider(tabColor);
-    } else {
-        tabPs.classList.add('active');
-        tabColor.classList.remove('active');
-        panelPs.style.display = 'block';
-        panelColor.style.display = 'none';
-        moveDirGlider(tabPs);
-    }
-}
-
-function saveColorImgDir() {
-    const input = document.getElementById('colorImgDirInput');
-    const dir = input.value.trim();
-    colorImgBaseDir = dir;
-    try {
-        localStorage.setItem('polo_color_img_dir', dir);
-    } catch (e) {}
-    if (chrome && chrome.runtime) {
-        try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'updateConfig', config: { colorImgDir: dir } }, () => {});
-        } catch (e) {}
-    }
-    showToast(dir ? '✅ 颜色图目录已保存: ' + dir : '✅ 颜色图目录已清空');
-    if (currentProduct) {
-        loadColorImagesFromExtension(currentProduct.row);
-    }
-}
-
-function syncToExtension() {
-    if (!chrome || !chrome.runtime) {
-        showToast('❌ 扩展未安装');
-        return;
-    }
-    try {
-        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'updateConfig', config: { colorImgDir: colorImgBaseDir } }, (response) => {
-            if (response && response.ok) {
-                showToast('✅ 配置已同步到扩展');
-            } else {
-                showToast('⚠️ 同步失败，请检查扩展');
-            }
-        });
-    } catch (e) {
-        showToast('❌ 同步失败: ' + e.message);
-    }
-}
-
-function initColorImgDirInput() {
-    const input = document.getElementById('colorImgDirInput');
-    if (input && colorImgBaseDir) {
-        input.value = colorImgBaseDir;
-    }
-    const activeDirTab = document.querySelector('.dir-tab.active');
-    if (activeDirTab) {
-        setTimeout(() => moveDirGlider(activeDirTab), 50);
-    }
-    const dirTabs = document.querySelector('.dir-tabs');
-    if (dirTabs && 'ResizeObserver' in window && !window._dirTabObserved) {
-        window._dirTabObserved = true;
-        const dirObserver = new ResizeObserver(() => {
-            const active = document.querySelector('.dir-tab.active');
-            if (active) moveDirGlider(active);
-        });
-        dirObserver.observe(dirTabs);
-        document.querySelectorAll('.dir-tab').forEach(t => dirObserver.observe(t));
     }
 }
 
@@ -2082,6 +1924,9 @@ let currentActiveTab = 'basic';
 let skippedItems = {};
 let loadedFileName = '';
 let currentColMap = {};
+// 导入时锁定的原始工作表数据（真实表头 + 原始行单元格），供后处理脚本按真实 Excel 列名取当前产品行；
+// startRow 是表头所在的真实 Excel 行号（1 基），用于把产品行号还原成实际行号。
+let currentSheet = null;
 
 const FIELD_DISPLAY_CONFIG = [
     { key: 'material', label: '材质', type: 'bilingual', group: 'grid' },
@@ -2097,6 +1942,8 @@ const FIELD_DISPLAY_CONFIG = [
 ];
 
 function getColorImagePath(rowNum, color) {
+    // 句柄配置交给扩展读取，不把配置标识拼成file URL。
+    if (colorImgBaseDir.startsWith('polo-dir:')) return '';
     if (!loadedFileName) return '';
     let base = colorImgBaseDir;
     if (!base) {
@@ -2200,6 +2047,7 @@ function hideContextMenu() {
 
 // Image Modal Functions
 function openImageModal(src) {
+    if(window.UiPolish)return UiPolish.openImage(src);
     const modal = document.getElementById('imageModal');
     const img = document.getElementById('modalImage');
     img.src = src;
@@ -2208,6 +2056,7 @@ function openImageModal(src) {
 }
 
 function closeImageModal() {
+    if(window.UiPolish)return UiPolish.closeImage();
     const modal = document.getElementById('imageModal');
     modal.classList.remove('show');
     document.body.style.overflow = '';
@@ -2223,6 +2072,36 @@ uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('drag
 uploadArea.addEventListener('drop', (e) => { e.preventDefault(); uploadArea.classList.remove('dragover'); if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });
 excelInput.addEventListener('change', (e) => { if (e.target.files.length) handleFile(e.target.files[0]); });
 
+// 解析工作表范围 "A3:F100" 的起始行号（1 基）；用于把数据数组下标还原成真实 Excel 行号，
+// 表头不在第 1 行时也能得到正确行号（不能写死第 2 行，也不能用界面列表下标冒充 Excel 行号）。
+function sheetRangeStartRow(ref) {
+    const m = /^[A-Z]+\$?(\d+)/.exec(String(ref || ''));
+    return m ? Number(m[1]) : 1;
+}
+
+// 「当前导入 Excel 的当前产品行」快照接口：锁定 文件 / 工作表 / 实际行号 / 原始表头与行值。
+// excelRowSpec 返回**可持久化的纯数据规格**（任务开始时写入任务记录，刷新后仍在）；
+// buildExcelRowSnapshot 由该规格构建冻结快照（ctx.data.excelRow = 该快照），
+// 之后切换产品、调整步骤顺序或另导 Excel 都不会改变已开始任务的数据。保留原始中文列名，数值 0 不丢失。
+function excelRowSpec(rowNumber) {
+    if (!currentSheet) throw new Error('尚未导入 Excel，无法构建行数据快照');
+    const index = Number(rowNumber) - currentSheet.startRow;
+    const values = index >= 0 ? currentSheet.rows[index] : null;
+    if (!values) throw new Error(`工作表「${currentSheet.sheetName}」中不存在第 ${rowNumber} 行`);
+    return {
+        fileName: currentSheet.fileName,
+        sheetName: currentSheet.sheetName,
+        rowNumber: Number(rowNumber),
+        headers: currentSheet.headers.slice(),
+        values: values.slice(),
+    };
+}
+function buildExcelRowSnapshot(rowNumber) {
+    if (!window.ExcelRow) throw new Error('缺少 excel-row.js 模块，无法构建行数据快照');
+    return window.ExcelRow.build(excelRowSpec(rowNumber));
+}
+window.buildExcelRowSnapshot = buildExcelRowSnapshot;
+
 // 读取 Excel 文件：FileReader → XLSX 解析 → 提取产品数据 + 提取图片 + 通知扩展清旧数据
 function handleFile(file) {
     const reader = new FileReader();
@@ -2233,6 +2112,12 @@ function handleFile(file) {
             const sheetName = workbook.SheetNames[0];
             const sheet = workbook.Sheets[sheetName];
             const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+            // 锁定真实表头 + 原始行单元格 + 表头所在实际行号：后处理脚本据此按真实 Excel 列名取「当前产品行」。
+            // 不再读取「属性TXT文件夹」，也不再生成 材质.txt / group.txt 等虚拟键。
+            const sheetStartRow = sheetRangeStartRow(sheet['!ref']);
+            currentSheet = jsonData.length
+                ? { fileName: file.name, sheetName, startRow: sheetStartRow, headers: (jsonData[0] || []).slice(), rows: jsonData }
+                : null;
             const fileName = file.name.replace(/\.[^/.]+$/, '');
             const fileChanged = fileName !== loadedFileName;
             if (fileChanged) {
@@ -2483,6 +2368,8 @@ function parseProducts(data) {
 
     const colMap = buildColumnMap(data[0]);
     currentColMap = colMap;
+    // 表头所在真实 Excel 行号；数据下标 i（1 基）对应实际行 startRow + i，不写死第 2 行。
+    const startRow = currentSheet ? currentSheet.startRow : 1;
     const categoryType = colMap._detectedCategory || 'polo';
     console.log('📊 表头匹配结果:', colMap);
     console.log('📋 原始表头行:', data[0]);
@@ -2510,7 +2397,7 @@ function parseProducts(data) {
         const categoryCol = colMap.category !== undefined ? colMap.category : data[0].length - 2;
 
         const product = {
-            row: i + 1, index: idx || '', title_en: '', title_cn: '',
+            row: startRow + i, index: idx || '', title_en: '', title_cn: '',
             material_en: '', material_cn: '', technics_en: '', technics_cn: '',
             design_en: '', design_cn: '', features_en: '', features_cn: '',
             style_en: '', style_cn: '', printing_en: '', printing_cn: '',
@@ -2660,7 +2547,7 @@ function loadFromLocalStorage() {
             document.getElementById('stats').innerHTML = statsHtml;
             const savedIdx = localStorage.getItem('polo_selected_idx');
             const savedTab = localStorage.getItem('polo_active_tab');
-            if (savedTab) currentActiveTab = savedTab;
+            if (['basic','highlights','faq'].includes(savedTab)) currentActiveTab = savedTab;
             startUploadPolling();
             if (chrome && chrome.runtime && loadedFileName) {
                 try { chrome.runtime.sendMessage(EXTENSION_ID, { action: 'setCurrentFilename', filename: loadedFileName }, () => {}); } catch (e) {}
@@ -2674,6 +2561,7 @@ function loadFromLocalStorage() {
 
 let selectedRows = new Set();
 let skipUploaded = false;
+let uploadedRowsFileKey = null;
 let uploadedRows = {};   // 已核实保存（跳过依据）
 let legacyRows = {};     // 旧 uploaded 标记：历史待核，仅展示
 
@@ -2862,8 +2750,9 @@ function renderProductList() {
 
     function doRender(uploaded, legacy) {
         if (renderFileKey !== currentFileKey() || renderProducts !== products) return;
-        uploaded = uploaded || {};
-        legacy = legacy || {};
+        uploaded = uploaded || (uploadedRowsFileKey === renderFileKey ? uploadedRows : {});
+        legacy = legacy || (uploadedRowsFileKey === renderFileKey ? legacyRows : {});
+        uploadedRowsFileKey = renderFileKey;
         uploadedRows = uploaded;   // 仅「已核实保存」记录（跳过依据）
         legacyRows = legacy;       // 旧 uploaded 标记：历史待核，仅展示
         productCards.innerHTML = products.map((p, idx) => {
@@ -2898,13 +2787,15 @@ function renderProductList() {
         });
         updateBatchBar();
         checkColorGeneratedStatus();
+        checkSuiteGeneratedStatus();
+        renderSuiteAutoControls();
     }
 
     if (chrome && chrome.runtime) {
         try {
             chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getUploadedRows', fileKey: renderFileKey }, (response) => {
-                if (chrome.runtime.lastError) doRender();
-                else doRender(response?.rows, response?.legacy);
+                if (chrome.runtime.lastError || !response?.ok) doRender();
+                else if (response.fileKey === undefined || response.fileKey === renderFileKey) doRender(response.rows, response.legacy);
             });
         } catch (e) { doRender(); }
     } else { doRender(); }
@@ -2916,8 +2807,9 @@ function checkColorGeneratedStatus() {
     const queriedProducts = products;
     products.forEach((p, idx) => {
         try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImagesInfo', rowNum: p.row }, (resp) => {
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImagesInfo', rowNum: p.row, fileKey: queriedFile }, (resp) => {
                 if (queriedFile !== currentFileKey() || products !== queriedProducts) return;
+                if (resp?.fileKey !== undefined && resp.fileKey !== queriedFile) return;
                 if (resp && resp.ok && resp.images && resp.images.length >= 4) {
                     const card = document.querySelector(`.product-card[data-idx="${idx}"]`);
                     if (card && !card.querySelector('.color-generated-badge')) {
@@ -2936,6 +2828,44 @@ function checkColorGeneratedStatus() {
             });
         } catch (e) {}
     });
+}
+
+function addSuiteGeneratedBadge(rowNum) {
+    const productIdx = products.findIndex(p => p.row === rowNum);
+    if (productIdx === -1) return;
+    const card = document.querySelector(`.product-card[data-idx="${productIdx}"]`);
+    if (!card || card.querySelector('.suite-generated-badge')) return;
+    const badge = document.createElement('span');
+    badge.className = 'suite-generated-badge';
+    badge.textContent = '套图';
+    const tags = card.querySelector('.product-tags');
+    if (!tags) return;
+    const colorBadge = tags.querySelector('.color-generated-badge');
+    const firstTag = tags.querySelector('.tag');
+    if (colorBadge) colorBadge.after(badge);
+    else if (firstTag) firstTag.after(badge);
+    else tags.appendChild(badge);
+}
+
+// 「套图」角标只按成品验收：同一 fileKey+rowNum 的 111/222/333/444/666 全部存在
+// 已保存并校验过的后处理成品才显示；跨任务补齐同样计入，单步任务完成不代表整套完成。
+function checkSuiteGeneratedStatus() {
+    if (!extensionInstalled || products.length === 0) return;
+    const queriedFile = currentFileKey();
+    const queriedProducts = products;
+    (async () => {
+        for (let i = 0; i < queriedProducts.length; i++) {
+            if (queriedFile !== currentFileKey() || products !== queriedProducts) return;
+            const rowNum = queriedProducts[i].row;
+            const ready = await suiteBadgeReady(queriedFile, rowNum);
+            if (ready) addSuiteGeneratedBadge(rowNum);
+            else {
+                const card = document.querySelector(`.product-card[data-idx="${i}"]`);
+                const badge = card && card.querySelector('.suite-generated-badge');
+                if (badge) badge.remove();
+            }
+        }
+    })().catch(() => {});
 }
 
 function syncProductToExtension(product) {
@@ -2958,21 +2888,7 @@ function selectProduct(idx) {
     });
     syncProductToExtension(currentProduct);
     const detailPanel = document.getElementById('detailPanel');
-    if (detailPanel && !detailPanel.classList.contains('empty')) {
-        detailPanel.style.transition = 'opacity 0.2s cubic-bezier(0.4, 0, 1, 1), transform 0.2s cubic-bezier(0.4, 0, 1, 1)';
-        detailPanel.style.opacity = '0';
-        detailPanel.style.transform = 'translateX(10px) scale(0.98)';
-        setTimeout(() => {
-            renderDetail();
-            detailPanel.style.transition = 'opacity 0.35s cubic-bezier(0, 0, 0.2, 1), transform 0.35s cubic-bezier(0.16, 1, 0.3, 1)';
-            requestAnimationFrame(() => {
-                detailPanel.style.opacity = '1';
-                detailPanel.style.transform = 'translateX(0) scale(1)';
-            });
-        }, 150);
-    } else {
-        renderDetail();
-    }
+    renderDetail();
 }
 
 function navigateProduct(direction) {
@@ -3068,30 +2984,28 @@ function renderDetail() {
         
         <div class="tabs">
             <div class="glider" id="tabGlider"></div>
-            <div class="tab${currentActiveTab === 'basic' ? ' active' : ''}" data-tab="basic"><span class="tab-text">基础信息</span></div>
-            <div class="tab${currentActiveTab === 'highlights' ? ' active' : ''}" data-tab="highlights"><span class="tab-text">卖点</span></div>
-            <div class="tab${currentActiveTab === 'faq' ? ' active' : ''}" data-tab="faq"><span class="tab-text">FAQ</span></div>
-            <div class="tab${currentActiveTab === 'audit' ? ' active' : ''}" data-tab="audit"><span class="tab-text">路径配置</span></div>
-            <div class="tab${currentActiveTab === 'steps' ? ' active' : ''}" data-tab="steps"><span class="tab-text">自定义步骤</span></div>
+            <button type="button" class="tab${currentActiveTab === 'basic' ? ' active' : ''}" data-tab="basic"><span class="tab-text">基础信息</span></button>
+            <button type="button" class="tab${currentActiveTab === 'highlights' ? ' active' : ''}" data-tab="highlights"><span class="tab-text">卖点</span></button>
+            <button type="button" class="tab${currentActiveTab === 'faq' ? ' active' : ''}" data-tab="faq"><span class="tab-text">FAQ</span></button>
         </div>
         
         <div class="tab-body">
             <div class="tab-content${currentActiveTab === 'basic' ? ' active' : ''}" id="tab-basic">
                 <div class="main-image">
-                    <div style="display: flex; gap: 20px;">
-                        <div style="flex: 1; text-align: center;">
+                    <div class="main-image-layout">
+                        <div class="main-image-preview">
                             <div class="img-label" style="justify-content: flex-start; margin-bottom: 12px;">
                                 <span>主图</span>
                             </div>
-                            <img src="extracted_images/row${p.row}_main.jpg" alt="主图" onclick="openImageModal(this.src)" onerror="if(this.src.endsWith('_main.jpg')){this.src='extracted_images/row${p.row}_main.png';}else{this.style.display='none';this.nextElementSibling.style.display='block';}">
+                            <img src="extracted_images/row${p.row}_main.jpg" alt="主图" width="320" height="320" onclick="openImageModal(this.src)" onerror="if(this.src.endsWith('_main.jpg')){this.src='extracted_images/row${p.row}_main.png';}else{this.style.display='none';this.nextElementSibling.style.display='block';}">
                             <div class="img-missing" style="display:none;">❌ 图片未找到</div>
                         </div>
-                        <div style="display: flex; flex-direction: column; gap: 8px; padding-top: 2px;">
+                        <div class="main-image-actions">
                             <button class="batch-color-btn" onclick="startBatchColorChange()" id="batchColorBtn" style="justify-content: center;">
                                 🚀 一键换色
                             </button>
-                            <button class="batch-color-btn" onclick="startSuiteGeneration()" id="suiteGenBtn" style="justify-content: center; background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);">
-                                🖼️ 生成套图
+                            <button class="batch-color-btn" onclick="startSuiteGeneration()" id="suiteGenBtn" style="justify-content: center;">
+                                🖼️ 一键生成套图
                             </button>
                             <button class="batch-color-btn" onclick="startColorChangeForRows()" id="colorRowsBtn" style="justify-content: center;">
                                 🔁 指定重生成
@@ -3101,6 +3015,10 @@ function renderDetail() {
                             </button>
                             <button class="ai-edit-btn" onclick="startAiEdit(${p.row})" id="aiEditBtn" style="justify-content: center;">
                                 🤖 AI改图
+                            </button>
+                            <!-- 新配置入口：内容按后续设计添加，不连接已删除的旧步骤配置。 -->
+                            <button class="ai-edit-btn" id="customStepsConfigBtn" onclick="CustomStepConfig.open()" style="justify-content: center;">
+                                ⚙️ 自定义步骤配置
                             </button>
                         </div>
                     </div>
@@ -3117,15 +3035,17 @@ function renderDetail() {
                         <div class="color-img-item missing" data-color="navy"><span class="color-name">军蓝色</span></div>
                     </div>
                 </div>
+                <div id="suiteAutoControls" style="display:none;align-items:center;gap:10px;margin:12px 0;font-size:12px;">
+                    <span id="suiteAutoProgress" role="status" aria-live="polite"></span>
+                    <button id="suiteAutoToggle" class="batch-color-btn" onclick="toggleSuiteAuto()">⏸ 暂停</button>
+                </div>
                 <div id="suiteImagesArea" style="margin: 14px 0 10px; display: none;">
                     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
                         <div class="img-label" style="justify-content: flex-start; margin-bottom: 0;">
                             <span>套图（5 张）</span>
                             <span id="suiteStatusText" style="margin-left:8px; font-size:11px; color: rgba(255,255,255,0.55);"></span>
                         </div>
-                        <button class="batch-color-btn" onclick="startSuiteRegenerate()" id="suiteRegenBtn" style="padding:4px 12px; font-size:12px;">
-                            🔁 套图指定重生成
-                        </button>
+
                     </div>
                     <div id="suiteImagesGrid" class="color-images-grid"></div>
                 </div>
@@ -3190,31 +3110,6 @@ function renderDetail() {
                 }).join('')}
             </div>
             
-            <div class="tab-content${currentActiveTab === 'audit' ? ' active' : ''}" id="tab-audit">
-                <div style="padding: 20px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                        <h3 style="font-size: 16px; font-weight: bold; color: var(--text-primary);">📁 路径配置</h3>
-                        <button style="padding: 8px 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer;" onclick="checkPathPermissions()">
-                            🔐 检查目录权限
-                        </button>
-                    </div>
-                    <div id="pathConfigList" style="display:flex; flex-direction:column; gap:10px;"></div>
-                    <div id="pathConfigStatus" style="margin-top:12px; font-size:12px; line-height:1.8; color: rgba(255,255,255,0.6);"></div>
-                </div>
-            </div>
-            <div class="tab-content${currentActiveTab === 'steps' ? ' active' : ''}" id="tab-steps">
-                <div style="padding: 20px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                        <h3 style="font-size: 16px; font-weight: bold; color: var(--text-primary);">🧩 自定义步骤（套图 5 张）</h3>
-                        <div style="display:flex; gap:8px;">
-                            <button style="padding: 8px 16px; background: rgba(255,255,255,0.08); color: white; border: 1px solid rgba(255,255,255,0.16); border-radius: 20px; font-size: 13px; cursor: pointer;" onclick="resetSuiteSteps()">↺ 恢复默认</button>
-                            <button style="padding: 8px 16px; background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; border: none; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer;" onclick="saveSuiteSteps()">💾 保存配置</button>
-                        </div>
-                    </div>
-                    <div id="stepConfigList" style="display:flex; flex-direction:column; gap:12px;"></div>
-                    <div id="stepConfigStatus" style="margin-top:12px; font-size:12px; line-height:1.8; color: rgba(255,255,255,0.6);"></div>
-                </div>
-            </div>
         </div>`;
     
     function moveTabGlider(tab) {
@@ -3257,16 +3152,20 @@ function renderDetail() {
     }
 
     const tabsContainer = document.querySelector('.tabs');
+    window.detailTabsObserver?.disconnect();
     if (tabsContainer && 'ResizeObserver' in window) {
         const tabObserver = new ResizeObserver(() => {
             initTabGlider();
         });
+        window.detailTabsObserver = tabObserver;
         tabObserver.observe(tabsContainer);
         document.querySelectorAll('.tab').forEach(tab => tabObserver.observe(tab));
     }
 
     if (extensionInstalled && currentProduct) loadColorImagesFromExtension(currentProduct.row);
     syncColorResumeButton();
+    renderSuiteImages(currentProduct).catch(e => updateSuiteStatus(e.message));
+    window.UiPolish?.settleDetail(detailPanel);
 }
 
 function copyData() {
@@ -3330,19 +3229,25 @@ function checkExtension() {
         extensionInstalled = false;
         extensionPort = null;
         updateExtensionStatus();
-        console.warn('[发品助手] 扩展 ID 未配置，请点击页面右上角"扩展设置"按钮输入');
+        console.warn('[发品助手] 扩展 ID 未配置，请从浏览器扩展弹窗点击“打开发品助手”自动连接');
         return;
     }
     try {
         chrome.runtime.sendMessage(EXTENSION_ID, { action: 'ping' }, (response) => {
-            if (chrome.runtime.lastError) {
+            if (chrome.runtime.lastError || !response?.ok) {
                 extensionInstalled = false;
                 extensionPort = null;
                 updateExtensionStatus();
                 return;
             }
+            const restoredConnection = !extensionInstalled || !extensionPort;
             extensionInstalled = true;
             updateExtensionStatus();
+            if (restoredConnection && products.length) {
+                renderProductList();
+                startUploadPolling();
+                if(currentProduct)syncProductToExtension(currentProduct);
+            }
             checkExtensionReloaded();
             // 每次（重新）连上扩展都重新拉一次发品任务状态，避免刷新/断线后面板状态丢失
             refreshPublishState();
@@ -3350,6 +3255,11 @@ function checkExtension() {
                 if (!extensionPort) {
                     extensionPort = chrome.runtime.connect(EXTENSION_ID, { name: 'assistant-channel' });
                     extensionPort.onMessage.addListener((msg) => {
+                        if(msg.action==='publicationImagesRequest'){
+                            const replyPort=extensionPort;
+                            PublicationImageSource.read(msg).then(files=>replyPort.postMessage({action:'publicationImagesResponse',requestId:msg.requestId,ok:true,files}))
+                                .catch(error=>{try{replyPort.postMessage({action:'publicationImagesResponse',requestId:msg.requestId,ok:false,error:error.message});}catch(_){};});
+                        }
                         if (msg.action === 'publishSaved') handlePublishSaved(msg);
                         if (msg.action === 'colorTaskAccepted') handleColorTaskAccepted(msg);
                         if (msg.action === 'colorTaskStopped') handleColorTaskStopped(msg);
@@ -3389,7 +3299,8 @@ function checkExtension() {
                     if (chrome.runtime.lastError) return;
                     if (resp && resp.ok && resp.config && resp.config.colorImgDir) {
                         colorImgBaseDir = resp.config.colorImgDir;
-                        initColorImgDirInput();
+                        localStorage.setItem('polo_color_img_dir', colorImgBaseDir);
+                        if(currentProduct)loadColorImagesFromExtension(currentProduct.row);
                     }
                 });
             } catch (e) {}
@@ -3401,17 +3312,6 @@ function checkExtension() {
 }
 function updateExtensionStatus() {
     // 扩展状态变化时的钩子，可在此扩展 UI 提示
-}
-
-// 唤起扩展 ID 输入框（用户从浏览器扩展按钮弹窗复制 ID 后粘贴）
-function promptExtensionId() {
-    const current = EXTENSION_ID || '';
-    const input = window.prompt('请输入扩展 ID（在浏览器扩展按钮弹窗的"扩展 ID"栏可一键复制）：', current);
-    if (input !== null && input.trim() && input.trim() !== current) {
-        if (saveExtensionId(input)) {
-            setTimeout(() => location.reload(), 600);
-        }
-    }
 }
 
 let psEditResultListener = null;
@@ -3679,19 +3579,16 @@ function handlePublishAllFilled(req) {
     refreshPublishState();
 }
 
-function handlePsEditComplete(request) {
+async function handlePsEditComplete(request) {
     const { rowNum, fileName, imgData, format } = request;
-    console.log('🖌️ 收到PS编辑完成消息:', fileName);
-    savePsEditedImage(fileName, imgData, format).then(success => {
-        if (success) {
-            refreshMainImage(rowNum);
-            showToast('✅ PS编辑完成，图片已更新');
-            if (psPollTimer) {
-                clearInterval(psPollTimer);
-                psPollTimer = null;
-            }
-        }
-    });
+    const success = request.savedByExtension || await savePsEditedImage(fileName,imgData,format);
+    if (!success) return false;
+    refreshMainImage(rowNum);
+    showToast('✅ PS编辑完成，图片已更新');
+    if (psPollTimer) {clearInterval(psPollTimer);psPollTimer=null;}
+    if (request.timestamp) lastPsEditTimestamp=request.timestamp;
+    chrome.runtime.sendMessage(EXTENSION_ID,{action:'clearPsEditResult'},()=>{});
+    return true;
 }
 
 function handleColorTaskAccepted(msg) {
@@ -3982,7 +3879,92 @@ const SUITE_OUTPUTS = [['111', '卖点图'], ['222', '袖口图'], ['333', '面�
 
 // 防重复点击：同一时间只允许一个套图任务在预检/创建中
 let suiteTaskRunning = false;
-let suitePendingNumbering = null;   // 待确认的五图编号候选（确认前不执行编号专属后处理/保存）
+const suiteTaskIdentities = new Map();
+let suitePendingNumbering = null;   // 持久化的结果与处理缓存：整套自动继续，单图仍可手动确认
+// 自动流程只保存任务身份与阶段；原图、处理结果和冻结行仍由既有 IndexedDB 保存。
+let suiteAutoState = null;
+function readSuiteAutoState() {
+    if(suiteAutoState)return suiteAutoState;
+    try{const value=JSON.parse(localStorage.getItem('polo_suite_auto_v1')||'null');if(value&&value.taskId&&value.fileKey&&Number.isInteger(value.rowNum))suiteAutoState=value;}catch(_){}
+    return suiteAutoState;
+}
+function saveSuiteAutoState(state) {
+    localStorage.setItem('polo_suite_auto_v1',JSON.stringify(state));suiteAutoState=state;renderSuiteAutoControls();
+}
+function renderSuiteAutoControls() {
+    const state=readSuiteAutoState();
+    let banner=document.getElementById('suiteGlobalProgress');
+    if(!banner){
+        banner=document.createElement('div');banner.id='suiteGlobalProgress';
+        banner.style.cssText='position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9990;display:none;align-items:center;gap:16px;max-width:calc(100vw - 32px);padding:12px 18px;border:1px solid #b5a3db66;border-radius:14px;background:#393249;color:#f5efff;box-shadow:0 8px 30px #17102455;font-size:13px';
+        const label=document.createElement('span');label.setAttribute('role','status');banner.append(label);
+        const button=document.createElement('button');button.textContent='查看任务';
+        button.style.cssText='border:1px solid #cbb8ec66;border-radius:8px;padding:7px 12px;background:#8065b8;color:white;cursor:pointer;white-space:nowrap';
+        button.onclick=()=>{
+            const task=readSuiteAutoState();if(!task)return;
+            if(task.fileKey!==currentFileKey()){showToast('请先导入该任务所属的 Excel，再继续原任务');return;}
+            const index=products.findIndex(p=>p.row===task.rowNum);
+            if(index<0){showToast('当前表格中找不到任务所属行 '+task.rowNum);return;}
+            selectProduct(index);renderSuiteAutoControls();
+            document.getElementById('suiteAutoControls')?.scrollIntoView({block:'center',behavior:'smooth'});
+        };
+        banner.append(button);document.body.append(banner);
+    }
+    const active=state&&state.phase!=='completed';
+    banner.style.display=active?'flex':'none';
+    if(active){
+        const phases={preparing:'准备中',generating:'生成中',processing:'后处理中',saving:'保存中',error:'处理未完成'};
+        banner.firstElementChild.textContent=`套图任务 · 行${state.rowNum} · ${state.paused?'已暂停 · ':''}${phases[state.phase]||'未完成'} · ${state.done||0}/${state.total||5}`;
+    }
+    const box=document.getElementById('suiteAutoControls');if(!box)return;
+    const relevant=state&&currentProduct&&state.fileKey===currentFileKey()&&state.rowNum===currentProduct.row;
+    box.style.display=relevant?'flex':'none';if(!relevant)return;
+    const labels={preparing:'准备中',generating:'生成中',processing:'后处理中',saving:'保存中',completed:'已完成',error:'处理未完成'};
+    const label=labels[state.phase]||'准备中';
+    const total=state.total||5;
+    const text=document.getElementById('suiteAutoProgress');if(text)text.textContent=`${state.phase==='completed'?'✅':state.paused?'⏸':'⏳'} ${state.paused?(suiteTaskRunning?'暂停中 · ':'已暂停 · '):''}${label}${state.currentKey?' · '+state.currentKey:''} · ${state.done||0}/${total}`;
+    const button=document.getElementById('suiteAutoToggle');if(button){button.style.display=state.phase==='completed'?'none':'';button.textContent=state.paused||!suiteTaskRunning?'▶ 继续':'⏸ 暂停';}
+}
+function suiteAutoCheckpoint(taskId,phase,done) {
+    const state=readSuiteAutoState();if(!state||state.taskId!==taskId)return true;
+    saveSuiteAutoState({...state,phase,done,total:SUITE_FIVE_TOTAL});
+    if(state.paused){updateSuiteStatus('⏸ 套图已暂停，结果已保留；点击继续，不会重新生图');return false;}
+    updateSuiteStatus(`⏳ 套图自动处理 · ${done}/${SUITE_FIVE_TOTAL} · ${phase==='processing'?'后处理':'保存'}`);return true;
+}
+async function toggleSuiteAuto() {
+    const state=readSuiteAutoState();if(!state||state.phase==='completed')return;
+    if(!currentProduct||state.fileKey!==currentFileKey()||state.rowNum!==currentProduct.row){showToast('请切回该任务产品后继续');return;}
+    if(!state.paused&&suiteTaskRunning){saveSuiteAutoState({...state,paused:true});updateSuiteStatus('⏸ 已请求暂停；当前生成或处理完成后保留结果，不再进入下一阶段');return;}
+    saveSuiteAutoState({...state,paused:false});
+    if(!suiteTaskRunning)await resumeSuiteAuto();
+}
+async function resumeSuiteAuto() {
+    if(suiteTaskRunning)return;
+    const state=readSuiteAutoState();if(!state||state.paused||state.phase==='completed')return;
+    if(!currentProduct||state.fileKey!==currentFileKey()||state.rowNum!==currentProduct.row)return;
+    // 五步混合流程：只用任务启动时冻结的 Excel 行、步骤配置与产品主图继续，未完成步骤才补；
+    // 已生成过的图片直接从冻结缓存复用，不重新消耗生图额度。
+    const five=await readSuiteFive(state.fileKey,state.rowNum);
+    if(!five||!five.excelRowSpec||!five.main||!five.main.dataUrl){
+        saveSuiteAutoState({...state,paused:true,phase:'error'});
+        updateSuiteStatus('❌ 缺少原任务冻结数据（产品主图 / Excel 行 / 步骤配置），不能恢复，未重新生图；请重新发起套图');
+        return;
+    }
+    await runSuiteFiveJob({ keys: five.keys || SUITE_STEP_KEYS, resume: true });
+}
+async function waitSuiteAutoImages(taskId) {
+    const deadline=Date.now()+900000;
+    while(Date.now()<deadline){
+        const r=await suiteSend('suiteGetTask',{taskId,summary:true});const task=r.task;
+        if(!r.ok||!task)throw Error(r.error||'任务记录丢失');
+        if(task.stage==='acquired'){const full=await suiteSend('suiteGetTask',{taskId});if(!full.ok||!full.task)throw Error('结果读取失败');return full.task;}
+        if(task.stage==='completed')return task;
+        if(task.cancelled||['failed','interrupted'].includes(task.stage))throw Error(task.error||'任务已中断；已有结果可恢复，未重新发送请求');
+        await new Promise(resolve=>setTimeout(resolve,2000));
+    }
+    throw Error('等待生成超时，任务已保留，继续时只读取已有任务');
+}
+
 
 const SuiteQuickFive = (() => {
     function normalizePrompt(resolved) {
@@ -4042,25 +4024,33 @@ const SuiteQuickFive = (() => {
     return { build, validateImages, normalizePrompt };
 })();
 
-function getSuiteSteps() {
-    try {
-        const raw = localStorage.getItem('polo_suite_steps_v1');
-        return raw ? JSON.parse(raw) : null;
-    } catch (_) { return null; }
+
+// 行数据快照解析：传入行快照（含 cell）直接使用；传入产品对象/行号时用当前导入 Excel 现场冻结。
+// 提示词与后处理都走这里拿同一份行数据，避免「提示词读界面行、后处理读任务行」。
+function suiteRowSnapshot(input) {
+    if (input && typeof input.cell === 'function') return input;
+    const row = (input && typeof input === 'object') ? input.row : input;
+    if (row === undefined || row === null || row === '') throw new Error('缺少产品行号，无法读取 Excel 行数据');
+    return buildExcelRowSnapshot(row);
 }
 
-// 变量映射：把产品属性按步骤 mappings 渲染进提示词（支持 {{变量}} 占位）
-function renderSuitePrompt(step, product) {
-    let prompt = String(step.prompt || '');
-    const map = Object.assign({ row: product.row }, product);
-    for (const m of (step.mappings || [])) {
-        const name = m && (m.variable || m.name);
-        const field = m && (m.field || m.key);
-        if (!name) continue;
-        const value = field ? (map[field] === undefined || map[field] === null ? '' : String(map[field])) : '';
-        prompt = prompt.split(new RegExp('\\{\\{\\s*' + name + '\\s*\\}\\}', 'g')).join(value);
-    }
-    return prompt;
+// 提示词变量渲染：与配置面板 CustomStepConfig.renderPrompt 共用【同一实现、同一行快照、同一套真实 Excel 列名】。
+// 页面与面板共用CategoryFieldRules固定字段规则，不再维护第二套可编辑映射。
+function suiteRenderPrompt(step, input) {
+    const api = window.CustomStepConfig;
+    if (!api || typeof api.renderPrompt !== 'function') throw new Error('缺少步骤配置模块（custom-step-config.js），无法渲染提示词');
+    return api.renderPrompt(step, suiteRowSnapshot(input));
+}
+
+function renderSuitePrompt(step, input) {
+    return suiteRenderPrompt(step, input).text;
+}
+
+// 执行用的步骤 = 面板按【该行类目】保存的步骤（唯一真源），与「预览」看到的是同一份配置。
+function suiteFrozenSteps(snapshot) {
+    const api = window.CustomStepConfig;
+    if (!api || typeof api.stepsForCategory !== 'function') throw new Error('缺少步骤配置模块（custom-step-config.js），无法取步骤配置');
+    return api.stepsForCategory(snapshot.category());
 }
 
 function updateSuiteStatus(text) {
@@ -4070,8 +4060,51 @@ function updateSuiteStatus(text) {
     if (area) area.style.display = 'block';
 }
 
-// 点击「生成套图」：一次快速五图请求（不逐张发送）
 // ===== 套图素材预检：发往豆包前必须全部通过（有路径 ≠ 有图片） =====
+// 页面自己的「产品原图目录」句柄（PS 编辑流程保存过，见 psEditDirHandle）。句柄在、但 FSA 授权是
+// 会话级的：页面刷新后会回落为 prompt，且扩展后台没有用户手势、不能代申请，所以必须在点击手势里就地恢复。
+function psDirHandleRef() {
+    try { return (typeof psEditDirHandle !== 'undefined' && psEditDirHandle) ? psEditDirHandle : null; }
+    catch (_) { return null; }
+}
+
+// 只能在用户点击（「生成套图」）的手势窗口内调用；不弹二级界面，只出现浏览器自己的权限确认。
+async function ensurePsDirPermission() {
+    const dir = psDirHandleRef();
+    if (!dir) return { ok: false, reason: '页面没有保存过产品原图目录句柄' };
+    try {
+        const perm = await dir.queryPermission({ mode: 'readwrite' });
+        if (perm === 'granted') return { ok: true, permission: perm };
+        const granted = await dir.requestPermission({ mode: 'readwrite' });
+        return { ok: granted === 'granted', permission: granted };
+    } catch (e) { return { ok: false, reason: (e && e.message) || '申请产品原图目录权限失败' }; }
+}
+
+// 直读当前行原图：file:// 页面既 fetch 不到本地图片（Failed to fetch），也不能把 <img> 画进 canvas
+// （Tainted canvases），所以只能走页面自己已授权的目录句柄，不绕扩展弹窗、不需要重新选择目录。
+async function readSuiteMainImageFromPsDir(rowNum) {
+    const dir = psDirHandleRef();
+    if (!dir) return { ok: false, reason: '页面没有产品原图目录句柄，无法直读原图' };
+    try {
+        if (await dir.queryPermission({ mode: 'readwrite' }) !== 'granted') {
+            return { ok: false, reason: '产品原图目录权限未确认（点击「生成套图」时会自动申请）' };
+        }
+    } catch (e) { return { ok: false, reason: '产品原图目录权限检查失败：' + ((e && e.message) || '') }; }
+    for (const ext2 of ['jpg', 'png', 'jpeg', 'webp']) {
+        try {
+            const fh = await dir.getFileHandle(`row${rowNum}_main.${ext2}`);
+            const f = await fh.getFile();
+            if (!f || !f.size) continue;
+            const dataUrl = await suiteBlobToDataUrl(f);
+            const p = await probeSuiteImage('主图', dataUrl);
+            return p.ok ? { ok: true, dataUrl, probe: p } : { ok: false, reason: p.error };
+        } catch (e) {
+            if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) return { ok: false, reason: '产品原图目录读取被拒绝：' + ((e && e.message) || '') };
+        }
+    }
+    return { ok: false, reason: `产品原图目录里没有 row${rowNum}_main.*` };
+}
+
 async function probeSuiteImage(label, url) {
     if (!url) return { ok: false, error: `${label}：没有可用的图片来源` };
     try {
@@ -4098,14 +4131,38 @@ async function resolveSuiteAssets(product) {
     const assets = {};
     const problems = [];
     let mainUrl = product.imagePath || ('extracted_images/row' + product.row + '_main.jpg');
+    if(typeof SuiteRuntime!=='undefined')mainUrl=SuiteRuntime.imageUrl(mainUrl);
     let probe = await probeSuiteImage('主图', mainUrl);
+    let pageReadReason = '';
+    // 首选：用页面自己的「产品原图目录」句柄直读同一行（在点击手势里已恢复授权，不再需要扩展弹窗授权）。
+    // typeof 守卫：本函数被单测按函数切片隔离运行时，该助手不在切片内，此时走下面的扩展后备路径。
+    if (!probe.ok && typeof readSuiteMainImageFromPsDir === 'function') {
+        const pageRead = await readSuiteMainImageFromPsDir(product.row);
+        if (pageRead.ok) { probe = pageRead.probe; mainUrl = pageRead.dataUrl; }
+        else pageReadReason = pageRead.reason || '';
+    }
+    // 后备：由扩展侧读同一行（仍可用，但需要扩展自己的原图目录授权）。
+    if (!probe.ok && extensionInstalled) {
+        for (const ext of ['jpg', 'png', 'jpeg', 'webp']) {
+            const response = await suiteSend('readPsImage', { fileName: `row${product.row}_main.${ext}` });
+            if (response.ok && (response.dataUrl || response.data)) {
+                const dataUrl = response.dataUrl || await suiteBlobToDataUrl(new Blob([new Uint8Array(response.data)], { type: response.type || 'image/jpeg' }));
+                const candidate = await probeSuiteImage('主图', dataUrl);
+                if (candidate.ok) { probe = candidate; mainUrl = dataUrl; break; }
+            }
+            if (response.error && /权限|授权|未配置/.test(response.error)) {
+                probe = { ok: false, error: `${probe.error}；${response.error}` };
+                break;
+            }
+        }
+    }
     if (!probe.ok && /_main\.jpg$/i.test(mainUrl)) {
         const pngUrl = mainUrl.replace(/_main\.jpg$/i, '_main.png');
         const p2 = await probeSuiteImage('主图', pngUrl);
         if (p2.ok) { probe = p2; mainUrl = pngUrl; }
     }
     if (probe.ok) assets.main = Object.assign({ color: 'main', url: mainUrl, fileKey, row: product.row }, probe);
-    else problems.push(probe.error);
+    else problems.push([probe.error, pageReadReason].filter(Boolean).join('；'));
 
     for (const color of ['white', 'black', 'gray', 'navy']) {
         let url = (typeof getColorImagePath === 'function') ? getColorImagePath(product.row, color) : null;
@@ -4124,17 +4181,69 @@ async function resolveSuiteAssets(product) {
     return { assets, problems, fileKey };
 }
 
-// 变量解析校验：任何未解析的 {{变量}} 都要在发送前失败并指明步骤
-function checkSuiteVariables(steps, product) {
+// 变量解析校验：任何未解析的 {变量} 都要在发送前失败并指明步骤（与面板「预览」同一实现）
+function checkSuiteVariables(steps, input) {
     const problems = [];
+    let snapshot;
+    try { snapshot = suiteRowSnapshot(input); }
+    catch (e) { return [`无法读取当前产品行数据：${e.message}`]; }
     for (const [key, name] of SUITE_OUTPUTS) {
-        const step = (steps || []).find(s => (s.outputKeys || []).some(o => (typeof o === 'string' ? o : o.key).trim() === key));
+        const step = (steps || []).find(s => String(s.key || '') === key
+            || (s.outputKeys || []).some(o => (typeof o === 'string' ? o : o.key).trim() === key));
         if (!step) { problems.push(`${key} ${name}：缺少该编号的步骤配置`); continue; }
-        const rendered = renderSuitePrompt(step, product);
-        const left = rendered.match(/\{\{\s*([^}]+?)\s*\}\}/g);
-        if (left && left.length) problems.push(`${name}：未解析变量 ${[...new Set(left)].join(' ')}`);
+        let rendered;
+        try { rendered = suiteRenderPrompt(step, snapshot); }
+        catch (e) { problems.push(`${name}：提示词渲染失败 ${e.message}`); continue; }
+        if (rendered.missing.length) problems.push(`${name}：未解析变量 ${rendered.missing.join(' ')}`);
     }
     return problems;
+}
+
+async function prepareSuiteAssets(assets) {
+    return Promise.all(Object.values(assets).map(async a => {
+        const response = await fetch(a.url);
+        if (!response.ok) throw new Error('素材读取失败：' + a.color);
+        const blob = await response.blob();
+        const url = await new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(r.error); r.readAsDataURL(blob); });
+        return Object.assign({}, a, { url, filename: `row${a.row}_${a.color}.png` });
+    }));
+}
+async function suiteDecodeSize(blob) {
+    const b = await createImageBitmap(blob);
+    try { return { width: b.width, height: b.height }; } finally { if (b.close) b.close(); }
+}
+async function suiteContentHash(blob) {
+    const bytes = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+    return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
+}
+// 输出目录句柄只存在于扩展源，页面无法直接写盘；图片数据经 base64 交给扩展由其实施写入与回读校验。
+function suiteBlobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = () => reject(r.error || new Error('结果图片读取失败'));
+        r.readAsDataURL(blob);
+    });
+}
+async function suiteProgressChecked(report) {
+    const r = await suiteSend('suiteProgress', { report });
+    if (!r.ok) throw new Error(r.error || '任务状态未保存');
+    return r.task;
+}
+async function assertSuiteTaskActive(taskId, fileKey, rowNum) {
+    const r = await suiteSend('suiteGetTask', { taskId });
+    if (!r.ok || !r.task || r.task.cancelled || ['failed','interrupted','completed'].includes(r.task.stage) || r.task.fileKey !== fileKey || r.task.rowNum !== rowNum) throw new Error('任务已取消、中断或身份不符，停止写入');
+    return r.task;
+}
+async function persistSuitePending(pending) {
+    const candidates = [];
+    for (const c of pending.candidates) {
+        let blob = c.blob;
+        if (!blob) { const r = await fetch(c.url); if (!r.ok) throw new Error('候选图缓存失败'); blob = await r.blob(); c.blob = blob; }
+        await suiteDecodeSize(blob);
+        candidates.push(Object.assign({}, c, { blob }));
+    }
+    await SuiteCore.ResultStore('polo_suite_pending').put({ fileKey: pending.fileKey, rowNum: pending.rowNum, key: 'pending', taskId: pending.taskId, meta: { pending: Object.assign({}, pending, { candidates }) } });
 }
 
 // 统一消息封装：带超时与"扩展上下文失效"的真实提示，不无限重试
@@ -4143,10 +4252,16 @@ function suiteSend(action, payload, timeoutMs = 8000) {
         let done = false;
         const timer = setTimeout(() => { if (!done) { done = true; resolve({ ok: false, error: '扩展未响应（超时）' }); } }, timeoutMs);
         try {
+            if (payload && payload.report) {
+                const identity = suiteTaskIdentities.get(payload.report.taskId);
+                if (identity) payload = Object.assign({}, payload, { report: Object.assign({}, identity, payload.report) });
+            }
             chrome.runtime.sendMessage(EXTENSION_ID, Object.assign({ action }, payload || {}), (resp) => {
                 if (done) return;
                 done = true; clearTimeout(timer);
                 if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
+                if (resp && resp.task) suiteTaskIdentities.set(resp.task.taskId, { fileKey: resp.task.fileKey, rowNum: resp.task.rowNum });
+                if (resp && resp.tasks) resp.tasks.forEach(t => suiteTaskIdentities.set(t.taskId, { fileKey: t.fileKey, rowNum: t.rowNum }));
                 resolve(resp || { ok: false, error: '空响应' });
             });
         } catch (e) {
@@ -4155,107 +4270,524 @@ function suiteSend(action, payload, timeoutMs = 8000) {
     });
 }
 
-// 点击「生成套图」：一次快速五图请求（绝不拆成五次逐张）
+// 整套与单图共用执行入口；整套一次请求五张，单图按指定编号生成。
+// 语义与面板一致：预览 = 未保存草稿；执行 = 任务启动时冻结的配置与行快照。
+// 字段、原图与保存目录共用同一配置，任务开始时冻结。
+const SUITE_WIRED_STEP_KEY = '222';
+
+// 一键生成套图：整套一次请求，按输出顺序自动后处理和保存；继续只读取原任务。
 async function startSuiteGeneration() {
-    if (suiteTaskRunning) { showToast('⚠️ 已有套图任务进行中，请勿重复点击'); return null; }
-    if (!products || products.length === 0) { showToast('⚠️ 请先上传 Excel'); return null; }
-    const product = (typeof currentRowIndex === 'number' && products[currentRowIndex]) ? products[currentRowIndex] : products[0];
-    if (!product) { showToast('⚠️ 请先选择产品'); return null; }
+    if(typeof targetedRegenerationRunning!=='undefined'&&targetedRegenerationRunning)return showToast("指定重生成正在执行，请先等待完成");
+    const existing=readSuiteAutoState();
+    if(existing&&existing.phase!=='completed'){
+        if(existing.fileKey!==currentFileKey()||existing.rowNum!==currentProduct?.row){renderSuiteAutoControls();showToast('已有未完成套图任务，请点击顶部「查看任务」继续');return;}
+        // 有冻结数据就继续原任务：已生成的图片直接复用，不重复消耗生图额度。
+        if(['preparing','generating','processing','saving','error'].includes(existing.phase)){
+            const five=await readSuiteFive(existing.fileKey,existing.rowNum);
+            if(five&&five.main&&five.main.dataUrl){saveSuiteAutoState({...existing,paused:false});return resumeSuiteAuto();}
+        }
+        // 没有冻结数据（例如预检阶段就失败）：只能按新任务重新发起。
+    }
+    // 只有新任务才申请原图读取权限；继续已有任务不重新读原图、不发生成请求。
+    const perm = await ensurePsDirPermission();
+    if (!perm.ok && perm.reason) console.warn('产品原图目录授权未恢复：' + perm.reason);
+    return runSuiteFiveJob({ keys: SUITE_STEP_KEYS });
+}
+
+async function runSuiteSingleStep(key) {
+    const perm = await ensurePsDirPermission();
+    if (!perm.ok && perm.reason) console.warn('产品原图目录授权未恢复：' + perm.reason);
+    return runSuiteFiveJob({ keys: [String(key || '').trim()] });
+}
+
+async function runSuiteJob(keys, {automatic=false,targeted=false} = {}) {
+    if(typeof targetedRegenerationRunning!=='undefined'&&targetedRegenerationRunning&&!targeted)return showToast("指定重生成正在执行");
+    if (suiteTaskRunning) return null;
+    const product = currentProduct;
+    if (!product || !product.row) { showToast('❌ 请先导入 Excel 并选择一个产品'); return null; }
+    if(!Array.isArray(keys)||![1,5].includes(keys.length)||new Set(keys).size!==keys.length||keys.some(k=>!['111','444','222','333','666'].includes(k))){showToast('❌ 输出编号配置无效');return null;}
+    const outKey=keys[0],expectCount=keys.length;
+    const hit = SUITE_OUTPUTS.find(o => o[0] === outKey);
+    const stepName = expectCount===5?'五张产品套图':(hit ? hit[1] : outKey);
+
     const btn = document.getElementById('suiteGenBtn');
     suiteTaskRunning = true;
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 预检中...'; }
     try {
-        const steps = getSuiteSteps();
-        if (!Array.isArray(steps) || steps.length === 0) throw new Error('未配置自定义步骤（请到「自定义步骤」页保存配置）');
+        const fileKey = currentFileKey();
+        const rowNum = product.row;
 
-        // ① 变量解析（未解析即失败并指明步骤）
-        const varProblems = checkSuiteVariables(steps, product);
-        if (varProblems.length) throw new Error('变量解析失败：' + varProblems.join('；'));
+        // ① 行快照 + 步骤（唯一真源：面板按该类目保存的配置）
+        const spec = excelRowSpec(rowNum);
+        const snapshot = window.ExcelRow.build(spec);
+        const steps = suiteFrozenSteps(snapshot);
+        const selected=keys.map(key=>{const step=steps.find(s=>String(s.key)===key);if(!step)throw new Error(key+'：缺少步骤配置');return step;});
+        const step=selected[0];
 
-        // ② 素材真实性与完整性（主图 + 四色，按 fileKey+行号）
-        updateSuiteStatus('⏳ 正在检查素材…');
-        const { assets, problems, fileKey } = await resolveSuiteAssets(product);
-        if (problems.length) throw new Error('素材检查未通过：' + problems.join('；'));
+        // ② 提示词渲染：任何未解析变量都必须在发送前失败（与面板「预览」同一实现）
+        const prompts=selected.map(item=>{const rendered=suiteRenderPrompt(item,snapshot);if(rendered.missing.length)throw new Error(item.key+'：未解析变量 '+rendered.missing.join(' '));const text=SuiteQuickFive.normalizePrompt(rendered.text);if(!text)throw new Error(item.key+'：提示词为空');return text;});
+        const prompt=expectCount===1?prompts[0]:'请按以下顺序分别生成5张独立图片。每项一张，必须输出5张图片，不能拼成一张、不能拼九宫格。五张都使用上传的同一件衣服，保持同色同款。\n'+prompts.map((p,i)=>`第${i+1}张：${selected[i].name}\n${p}`).join('\n\n');
+        if (!prompt) throw new Error(`${outKey} ${stepName}：提示词为空`);
 
-        // ③ 组装一次快速五图（外部/随机素材等冲突会在此抛出，指明步骤）
-        const task = await SuiteQuickFive.build(steps, async (step) => renderSuitePrompt(step, product));
+        // ③ 后处理配置校验：不消耗额度，先于发送；空脚本必须在此明确报错
+        const ppConfig = await SuitePostprocess.checkInputs(steps, keys, snapshot);
+        if (!ppConfig.ok) throw new Error('后处理配置校验未通过：' + ppConfig.problems.join('；'));
 
-        // ③b 后处理可用性预检（尽量避免生成后才发现缺资源/不支持）
-        const avail = SuitePostprocess.checkAvailability(steps, task.outputKeys, (key, decl) => {
-            const meta = getSuiteDirHandles();
-            return decl.type === 'folder' ? !!meta.assets || !!meta.scripts : (!!meta.assets || !!meta.scripts);
-        });
-        if (!avail.ok) throw new Error('后处理配置不可用：' + avail.problems.join('；'));
+        // 输出能力不就绪时不发送生成请求，避免生成后才发现无法保存。
+        // 目录授权是会话级的，扩展重载/浏览器重启都会回落到 prompt；此时不再阻塞：
+        // 权限在 → 用磁盘句柄写盘+回读；权限回落 → 扩展自动改走下载通道落到「下载/<已选目录名>/」。
+        const outputStatus = await suiteSend('suiteOutputStatus', {}, 10000);
+        if (!outputStatus.ok) throw new Error('套图输出检查失败：' + (outputStatus.error || '扩展没有响应') + '；请重新加载扩展后重试，尚未发送生成请求');
+        if (!outputStatus.configured) throw new Error('请在扩展中选择产品套图目录并保存（只需一次）；尚未发送生成请求');
+        if (outputStatus.permission !== 'granted' && !outputStatus.canFallback) {
+            throw new Error(`产品套图目录权限为 ${outputStatus.permission} 且无法降级到下载通道：请在扩展中展开该项并点击保存确认权限；尚未发送生成请求`);
+        }
+        const outputFallback = outputStatus.permission !== 'granted';
 
-        // ④ 创建后台任务（含配置快照与素材对应；运行中改配置/切产品不影响本任务）
+        // ④ 素材预检：只读当前产品原图，取不到真实位图就不发送
+        const resolved = await resolveSuiteAssets(product);
+        if (!resolved.assets.main) throw new Error('原图不可用：' + (resolved.problems[0] || '没有可用原图'));
+        const prepared = await prepareSuiteAssets({ main: resolved.assets.main });
+        const assets = prepared.map(a => ({ color: a.color, filename: a.filename, url: a.url, fileKey: a.fileKey, row: a.row, bytes: a.bytes, width: a.width, height: a.height }));
+
+        // ⑤ 创建任务：单张重生成 → expectCount=1 且只能指定 1 个输出编号
         const created = await suiteSend('suiteCreate', {
             task: {
-                fileKey, rowNum: product.row, productId: product.row,
-                mode: 'quick-five', expectCount: task.expectCount, targetKeys: task.outputKeys.map(o => o.key),
-                prompt: task.prompt,
-                configSnapshot: {
-                    model: task.model, ratio: task.ratio, outputKeys: task.outputKeys, steps: steps.length,
-                    // 后处理配置冻结进快照：运行中改配置不影响本任务
-                    postprocessByKey: task.outputKeys.reduce((acc, o) => {
-                        const k = String(o.key).trim();
-                        const s = steps.find(x => (x.outputKeys || []).some(y => (typeof y === 'string' ? y : (y.key || '')).toString().trim() === k));
-                        acc[k] = (s && s.postprocess) ? JSON.parse(JSON.stringify(s.postprocess)) : { type: 'none' };
-                        return acc;
-                    }, {})
-                },
-                assets: Object.values(assets).map(a => ({ color: a.color, url: a.url, filename: a.url, fileKey: a.fileKey, row: a.row, bytes: a.bytes, width: a.width, height: a.height }))
+                fileKey, rowNum, productId: product.id,
+                mode: expectCount===5?'quick-five':'single-regen', expectCount, targetKeys: keys,
+                prompt,
+                assets,
+                configSnapshot: { model: step.model || '5.0', ratio: step.ratio || '1:1' }
             }
         });
-        if (!created.ok) throw new Error(created.error);
+        if (!created.ok || !created.task) throw new Error(created.error || '任务创建失败');
+        const taskId = created.task.taskId;
+        suiteTaskIdentities.set(taskId, { fileKey, rowNum });
+        // 必须在消耗生成额度之前保存启动时的数据，不能等结果回来后再读当前表格。
+        try {
+            await persistSuiteFreeze({ fileKey, rowNum, taskId }, { spec, snapshot, steps });
+        } catch (error) {
+            await suiteSend('suiteCancel', { taskId, reason: '生成前冻结数据保存失败' });
+            throw new Error('生成前冻结数据保存失败，未发送生成请求：' + error.message);
+        }
+        updateSuiteStatus(`⏳ 任务 ${taskId}｜${outKey} ${stepName}｜已发出一次生成请求，等待结果...${outputFallback ? `｜产品套图目录未授权：完成后将落盘到「下载/${outputStatus.name}/」` : ''}`);
 
-        updateSuiteStatus(`⏳ 任务 ${taskId} 已接收（received），开始执行…`);
-        renderSuiteImages(product);
+        if(automatic)saveSuiteAutoState({taskId,fileKey,rowNum,paused:false,phase:'generating',done:0});
 
-        // ⑤ 真正送入豆包执行（一次快速五图；失败会带回具体阶段）
-        const ran = await suiteSend('suiteRun', { taskId: taskId }, 3600000);
-        if (!ran.ok) {
-            updateSuiteStatus(`❌ 执行失败：${ran.error}`);
-            showToast(`❌ 套图执行失败：${ran.error}`);
-            return created.task;
+        // ⑥ 执行：一次请求；失败只诊断，不自动重发
+        if (btn) btn.textContent = '⏳ 生成中...';
+        let run = await suiteSend('suiteRun', { taskId }, 600000);
+        if (!run.ok) throw new Error(run.error || '套图执行失败');
+        if(run.accepted){
+            const deadline=Date.now()+900000;
+            while(Date.now()<deadline){
+                const {task}=await suiteSend('suiteGetTask',{taskId,summary:true});
+                if(!task)throw new Error('任务记录丢失');
+                if(task.stage==='acquired'){const full=await suiteSend('suiteGetTask',{taskId});run={ok:true,images:full.task.images};break;}
+                if(['failed','interrupted','completed'].includes(task.stage))throw new Error(task.error||'任务已结束');
+                await new Promise(resolve=>setTimeout(resolve,2000));
+            }
+            if(!run.images)throw new Error('等待生成超时，已保留任务；可恢复已有结果');
         }
 
-        // ⑥ 结果识别 → 编号映射（内容指纹在浏览器侧计算）
-        const fpOf = async (it) => {
-            try {
-                const resp = await fetch(it.url, { cache: 'no-store' });
-                const blob = await resp.blob();
-                const bmp = await createImageBitmap(blob);
-                const c = document.createElement('canvas');
-                c.width = 16; c.height = 16;
-                const ctx2 = c.getContext('2d');
-                ctx2.drawImage(bmp, 0, 0, 16, 16);
-                if (typeof bmp.close === 'function') bmp.close();
-                return c.toDataURL('image/png');
-            } catch (_) { return null; }
-        };
-        const rec = await SuiteCore.recognize(ran.images, assigned.map(a => a.key), { expectCount: 5, fingerprint: fpOf });
-        if (!rec.ok) {
-            updateSuiteStatus(`❌ 结果校验未通过：${rec.error}（原始 ${rec.diag.rawCount} 张，去重后 ${rec.diag.afterDedupe} 张）`);
-            showToast(`❌ 结果校验未通过：${rec.error}`);
-            await suiteSend('suiteProgress', { report: { taskId: taskId, final: true, finalStage: 'failed', error: `结果识别：${rec.error}`, diag: rec.diag } });
-            return created.task;
-        }
+        // ⑦ 结果识别：单张重生成必须正好 1 张图片
+        const rec = await SuiteCore.recognize(run.images || [], keys.map(key=>({key})), { expectCount });
+        if (!rec.ok) throw new Error('结果识别失败：' + rec.error);
+        const candidates = rec.results.map((r, i) => ({ key: r.key, index: i, url: r.url, fingerprint: r.fingerprint || null, source: 'appearance-order' }));
 
-        // ⑥b 编号：仅按出现顺序得到【候选】，不作为已确认编号（参考 pipeline.js:1236-1240 亦为下标对应）
-        const cands = SuiteCore.buildNumberingCandidates(ran.images, assigned.map(a => a.key));
-        suitePendingNumbering = { taskId: taskId, fileKey, rowNum: product.row, steps, candidates: cands, signal: created.task };
-        updateSuiteStatus(`⏳ 已获取 ${cands.length} 张原始结果：编号为【候选顺序】（按出现顺序），尚未确认。请在下方核对后点「确认编号」`);
-        showToast('⏳ 5 张已获取，编号待确认（未确认前不执行编号专属后处理/保存）');
-        await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: ['编号来源=appearance-order（候选，未确认）'] } });
+        // ⑧ 先可靠缓存原始结果；自动整套直接继续，单图保留手动确认入口。
+        suitePendingNumbering = { candidates, taskId, fileKey, rowNum, steps, excelRowSpec: spec, restored: false, automatic };
+        await persistSuitePending(suitePendingNumbering);
+        if(automatic){
+            if(!suiteAutoCheckpoint(taskId,'processing',1))return null;
+            const assigned=SuiteCore.applyNumberingAssignment(candidates,Object.fromEntries(candidates.map(c=>[c.key,c.index]))).map(item=>({...item,source:'automatic-order'}));
+            await finishSuiteTask({taskId,fileKey,rowNum,steps,assigned});return null;
+        }
         renderSuitePendingNumbering();
-        return created.task;
+        updateSuiteStatus(`✅ 已获取 ${expectCount} 张结果（任务 ${taskId}）；请确认编号后继续（后处理→保存→完成）`);
+        showToast('✅ 已获取结果，请确认编号');
+        return null;
     } catch (e) {
         updateSuiteStatus(`❌ ${e.message}`);
         showToast(`❌ ${e.message}`);
         return null;
     } finally {
+        const auto=readSuiteAutoState();
+        if(auto&&auto.phase!=='completed')saveSuiteAutoState({...auto,paused:true});
+        suiteTaskRunning = false;renderSuiteAutoControls();
+        if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
+    }
+}
+
+// ===== 五步混合流程：111/444 直接用产品主图，222/333/666 才调用 AI 生成 =====
+// 复用既有 SuitePostprocess 执行器、Excel 行快照注入、脚本顺序与保存通道，不另建后处理实现。
+const SUITE_STEP_KEYS = ['111', '444', '222', '333', '666'];
+const SUITE_FIVE_KEY = 'fivefreeze';
+const SUITE_FIVE_TOTAL = 5;
+
+function suiteSourceOf(step) {
+    if (step && step.imageSource === 'product') return 'product';
+    if (step && step.imageSource === 'generated') return 'generated';
+    return ['111', '444'].includes(String((step && step.key) || '').trim()) ? 'product' : 'generated';
+}
+
+function suiteStepName(key) {
+    const hit = SUITE_OUTPUTS.find(o => o[0] === String(key));
+    return hit ? hit[1] : String(key);
+}
+
+function suiteBlobFromDataUrl(dataUrl) {
+    return fetch(dataUrl).then(r => r.blob());
+}
+
+function suiteDataUrlHeader(dataUrl) {
+    const m = String(dataUrl || '').match(/^data:([^;]+);base64,/);
+    return m ? m[1] : 'image/png';
+}
+
+async function readSuiteFive(fileKey, rowNum) {
+    try {
+        const rec = await SuiteCore.ResultStore('polo_suite_pending').get(fileKey, rowNum, SUITE_FIVE_KEY);
+        const meta = rec && rec.meta;
+        return meta && meta.jobId && meta.fileKey === fileKey && meta.rowNum === rowNum ? meta : null;
+    } catch (_) { return null; }
+}
+
+async function persistSuiteFive(five) {
+    await SuiteCore.ResultStore('polo_suite_pending').put({
+        fileKey: five.fileKey, rowNum: five.rowNum, key: SUITE_FIVE_KEY, taskId: five.jobId, meta: five
+    });
+}
+
+async function clearSuiteFive(fileKey, rowNum) {
+    try { await SuiteCore.ResultStore('polo_suite_pending').remove(fileKey, rowNum, SUITE_FIVE_KEY); } catch (_) {}
+}
+
+// 逐张写盘 + 索引：单张失败不影响已完成步骤，重试只重做失败步骤。
+async function suiteSaveOne({ key, blob, fileKey, rowNum, jobId }) {
+    const filename = SuiteCore.buildFilename(fileKey, rowNum, key + '_' + jobId);
+    // 落盘子目录与颜色图同构：Polo发品_颜色图/<文件名>/rowN/，套图成品与该产品颜色图放同一文件夹，不再平铺根层。
+    const subdir = (loadedFileName ? loadedFileName + '/' : '') + 'row' + rowNum;
+    const resp = await suiteSend('suiteWriteOutput', { subdir, files: [{ key, filename, dataUrl: await suiteBlobToDataUrl(blob) }] }, 60000);
+    if (!resp || !Array.isArray(resp.results) || !resp.ok) {
+        throw new Error(`保存失败：${(resp && resp.error) || '扩展未响应或写盘未通过'}`);
+    }
+    const rec = resp.results.find(r => String(r.key) === String(key)) || resp.results[0] || {};
+    if (rec.saved === false) throw new Error(`保存失败：${rec.error || '写盘校验未通过'}`);
+    await SuiteCore.ResultStore().put({
+        fileKey, rowNum, key: String(key), taskId: jobId, blob,
+        meta: {
+            filename: rec.filename || filename, bytes: rec.bytes, width: rec.width, height: rec.height,
+            verified: rec.saved !== false, contentHash: await suiteContentHash(blob), postprocess: 'customJs',
+            channel: resp.mode || 'filesystem'
+        }
+    });
+    return { filename: rec.filename || filename, bytes: rec.bytes, width: rec.width, height: rec.height, mode: resp.mode || 'filesystem', dirName: resp.dirName || '' };
+}
+
+async function waitSuiteAcquired(taskId, timeoutMs = 600000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const r = await suiteSend('suiteGetTask', { taskId, summary: true });
+        if (!r.ok || !r.task) throw new Error('任务记录丢失');
+        if (r.task.stage === 'acquired') {
+            const full = await suiteSend('suiteGetTask', { taskId });
+            if (!full.ok || !full.task) throw new Error('结果读取失败');
+            return full.task;
+        }
+        if (['failed', 'interrupted', 'completed'].includes(r.task.stage)) throw new Error(r.task.error || '任务已结束');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    throw new Error('等待生成超时，已保留任务；可恢复已有结果');
+}
+
+// 单个 AI 步骤：一次创建 + 一次发送 + 单张识别；不复用旧结果的编号分配逻辑。
+async function suiteGenerateOneStep({ step, prompt, mainDataUrl, fileKey, rowNum, product }) {
+    const key = String(step.key);
+    const assets = [{ color: 'main', filename: `row${rowNum}_main.png`, url: mainDataUrl, fileKey, row: rowNum }];
+    const created = await suiteSend('suiteCreate', {
+        task: {
+            fileKey, rowNum, productId: product && product.id,
+            mode: 'step-gen', expectCount: 1, targetKeys: [key],
+            prompt, assets,
+            configSnapshot: { model: step.model || '5.0', ratio: step.ratio || '1:1' }
+        }
+    });
+    if (!created.ok || !created.task) throw new Error(created.error || '任务创建失败');
+    const taskId = created.task.taskId;
+    suiteTaskIdentities.set(taskId, { fileKey, rowNum });
+    const run = await suiteSend('suiteRun', { taskId }, 600000);
+    if (!run.ok) throw new Error(run.error || '套图执行失败');
+    const task = await waitSuiteAcquired(taskId);
+    const rec = await SuiteCore.recognize(task.images || [], [{ key }], { expectCount: 1 });
+    if (!rec.ok) throw new Error(`${step.name}：结果识别失败 ${rec.error}`);
+    const dataUrl = rec.results[0].url;
+    const blob = await suiteBlobFromDataUrl(dataUrl);
+    if (!blob || !blob.size) throw new Error(`${step.name}：生成结果为空`);
+    return { blob, dataUrl, taskId, bytes: blob.size, type: blob.type || suiteDataUrlHeader(dataUrl) };
+}
+
+// 五张成品索引齐全才判定「套图」成功；支持跨任务补齐。
+async function suiteBadgeReady(fileKey, rowNum) {
+    try {
+        const recs = await SuiteCore.ResultStore().list(fileKey, rowNum);
+        const keys = new Set((recs || [])
+            .filter(r => r.meta && r.meta.verified === true)
+            .map(r => String(r.key)));
+        if (!SUITE_STEP_KEYS.every(k => keys.has(k))) return false;
+        // 跟随磁盘：五张成品全部通过真实磁盘核验才显示「套图」角标（缓存预览不算）
+        const verifySubdir = (loadedFileName ? loadedFileName + '/' : '') + 'row' + rowNum;
+        const verifyRecs = recs.map(r => ({ key: String(r.key), filename: (r.meta && r.meta.filename) || '', bytes: (r.meta && r.meta.bytes) || 0, contentHash: (r.meta && r.meta.contentHash) || '', savedAt: (r.meta && r.meta.savedAt) || r.savedAt || 0 }));
+        const resp = await suiteSend('suiteVerifyOutput', { subdir: verifySubdir, records: verifyRecs }, 30000);
+        const items = (resp && Array.isArray(resp.items)) ? resp.items : [];
+        return items.length === 5 && items.every(i => i.status === 'verified');
+    } catch (_) { return false; }
+}
+
+async function syncSuiteBadge(fileKey, rowNum) {
+    if (await suiteBadgeReady(fileKey, rowNum)) addSuiteGeneratedBadge(rowNum);
+    else {
+        const idx = products.findIndex(p => p.row === rowNum);
+        const card = idx >= 0 ? document.querySelector(`.product-card[data-idx="${idx}"]`) : null;
+        const badge = card && card.querySelector('.suite-generated-badge');
+        if (badge) badge.remove();
+    }
+}
+
+function suiteSetProgress({ jobId, fileKey, rowNum, phase, done, currentKey, paused }) {
+    saveSuiteAutoState({
+        taskId: jobId, jobId, fileKey, rowNum,
+        phase: phase || 'generating', done: done || 0, total: SUITE_FIVE_TOTAL,
+        currentKey: currentKey || '', paused: !!paused
+    });
+}
+
+// 五步主流程：预检 → 冻结 → 按配置顺序执行 → 逐张保存 → 角标。
+// 参数 keys 可只给一个步骤（指定重生成），顺序始终按该类目当前配置顺序。
+async function runSuiteFiveJob({ keys, resume = false, targeted = false } = {}) {
+    if (typeof targetedRegenerationRunning !== 'undefined' && targetedRegenerationRunning && !targeted) return showToast('指定重生成正在执行');
+    if (suiteTaskRunning) return null;
+    const product = currentProduct;
+    if (!product || !product.row) { showToast('❌ 请先导入 Excel 并选择一个产品'); return null; }
+    const fileKey = currentFileKey();
+    const rowNum = product.row;
+    const btn = document.getElementById('suiteGenBtn');
+    suiteTaskRunning = true;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ 预检中...'; }
+    try {
+        // ① 恢复任务一律使用任务启动时冻结的 Excel 行、步骤配置与产品主图，不取当前界面产品替代。
+        const frozen = resume ? await readSuiteFive(fileKey, rowNum) : null;
+        if (resume && (!frozen || !frozen.excelRowSpec || !frozen.main || !frozen.main.dataUrl)) {
+            throw new Error('缺少原任务冻结数据（产品主图 / Excel 行 / 步骤配置），不能恢复，未重新生图；请重新发起套图');
+        }
+        const spec = frozen ? frozen.excelRowSpec : excelRowSpec(rowNum);
+        const snapshot = window.ExcelRow.build(spec);
+        const steps = (frozen && Array.isArray(frozen.steps) && frozen.steps.length) ? frozen.steps : suiteFrozenSteps(snapshot);
+
+        // ② 本次执行的编号：恢复时只补冻结清单中未完成的；步骤顺序始终按该类目配置顺序。
+        const wanted = resume
+            ? (frozen.keys || SUITE_STEP_KEYS).filter(k => !(frozen.done && frozen.done[k]))
+            : (Array.isArray(keys) && keys.length ? keys.map(k => String(k).trim()) : SUITE_STEP_KEYS.slice());
+        if (wanted.some(k => !SUITE_STEP_KEYS.includes(k)) || new Set(wanted).size !== wanted.length) {
+            showToast('❌ 输出编号配置无效'); return null;
+        }
+        const ordered = steps.filter(s => SUITE_STEP_KEYS.includes(String(s.key)));
+        const selected = ordered.filter(s => wanted.includes(String(s.key)));
+        if (selected.length !== wanted.length) {
+            const missing = wanted.filter(k => !selected.some(s => String(s.key) === k));
+            throw new Error(`${missing.join('/')}：缺少步骤配置`);
+        }
+        if (!selected.length) {
+            await clearSuiteFive(fileKey, rowNum);
+            suiteSetProgress({ jobId: frozen.jobId, fileKey, rowNum, phase: 'completed', done: SUITE_FIVE_TOTAL });
+            await syncSuiteBadge(fileKey, rowNum);
+            updateSuiteStatus('✅ 五张成品已齐全，无需重新执行');
+            return null;
+        }
+        const sourceOf = Object.fromEntries(selected.map(s => [String(s.key), suiteSourceOf(s)]));
+
+        // ③ 提示词只对 AI 生成步骤渲染；product 步骤不读提示词，也不触发任何生图。
+        const prompts = {};
+        for (const step of selected) {
+            if (sourceOf[step.key] !== 'generated') continue;
+            const rendered = suiteRenderPrompt(step, snapshot);
+            if (rendered.missing.length) throw new Error(`${step.key} ${step.name}：未解析变量 ${rendered.missing.join(' ')}`);
+            const text = SuiteQuickFive.normalizePrompt(rendered.text);
+            if (!text) throw new Error(`${step.key} ${step.name}：提示词为空`);
+            prompts[step.key] = text;
+        }
+
+        // ④ 五步后处理预检：脚本有内容、字段映射有效、资源已选择（不消耗额度）。
+        const ppConfig = await SuitePostprocess.checkInputs(steps, selected.map(s => String(s.key)), snapshot);
+        if (!ppConfig.ok) throw new Error('后处理配置校验未通过：' + ppConfig.problems.join('；'));
+
+        // ⑤ 输出能力先检查，避免生图后才发现无法保存。
+        const outputStatus = await suiteSend('suiteOutputStatus', {}, 10000);
+        if (!outputStatus.ok) throw new Error('套图输出检查失败：' + (outputStatus.error || '扩展没有响应') + '；尚未发送生成请求');
+        if (!outputStatus.configured) throw new Error('请在扩展中选择产品套图目录并保存（只需一次）；尚未发送生成请求');
+        if (outputStatus.permission !== 'granted' && !outputStatus.canFallback) {
+            throw new Error(`产品套图目录权限为 ${outputStatus.permission} 且无法降级到下载通道：请重新授权；尚未发送生成请求`);
+        }
+        const outputFallback = outputStatus.permission !== 'granted';
+
+        // ⑥ 产品主图：新任务读当前产品；恢复任务必须用冻结的那一份，不能取当前界面产品替换。
+        let mainDataUrl, mainBlob, mainProbe;
+        if (frozen) {
+            mainDataUrl = frozen.main.dataUrl;
+            mainBlob = await suiteBlobFromDataUrl(mainDataUrl);
+            mainProbe = frozen.main;
+        } else {
+            const resolved = await resolveSuiteAssets(product);
+            if (!resolved.assets.main) throw new Error('产品主图不可用：' + (resolved.problems[0] || '没有可用主图'));
+            const mainAsset = (await prepareSuiteAssets({ main: resolved.assets.main }))[0];
+            mainDataUrl = mainAsset.url;
+            mainBlob = await suiteBlobFromDataUrl(mainDataUrl);
+            mainProbe = await probeSuiteImage('主图', mainDataUrl);
+            if (!mainProbe.ok) throw new Error('产品主图不可用：' + (mainProbe.error || '无法解码'));
+        }
+
+        // ⑦ 冻结：任务启动时的 Excel 身份、行、类目、主图、步骤配置与资源绑定。
+        const jobId = frozen ? frozen.jobId : ('suite5_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8));
+        const five = frozen || {
+            jobId, fileKey, rowNum, productId: product.id, category: snapshot.category(),
+            excelRowSpec: spec, steps: ordered, keys: wanted,
+            main: { dataUrl: mainDataUrl, bytes: mainProbe.bytes || mainBlob.size, width: mainProbe.width, height: mainProbe.height, hash: await suiteContentHash(mainBlob) },
+            generated: {}, done: {}, errors: []
+        };
+        if (!five.keys || !five.keys.length) five.keys = wanted;
+        try { await persistSuiteFive(five); }
+        catch (e) { throw new Error('任务冻结数据保存失败，未发送任何生成请求：' + e.message); }
+
+        // 进度按五张最终成品统计（跨任务补齐也计入）。
+        const total = SUITE_FIVE_TOTAL;
+        const indexRecs = await SuiteCore.ResultStore().list(fileKey, rowNum).catch(() => []);
+        const doneSet = new Set((indexRecs || []).map(r => String(r.key)));
+        let doneCount = SUITE_STEP_KEYS.filter(k => doneSet.has(k)).length;
+        suiteSetProgress({ jobId, fileKey, rowNum, phase: 'preparing', done: doneCount });
+
+        const ctxPost = {
+            excelRow: window.ExcelRow.build(five.excelRowSpec),
+            getHandle: async (decl) => {
+                for (const id of ['assets', 'scripts']) {
+                    const h = await loadSuiteDirHandle(id);
+                    if (!h) continue;
+                    if (decl.type === 'folder') return h;
+                    if (decl.name) { try { return await h.getFileHandle(decl.name); } catch (_) {} }
+                }
+                return null;
+            },
+            transform: SuiteImageTransform.apply,
+            createSurface: SuiteImageSdk.createSurface,
+            draw: SuiteImageSdk.draw
+        };
+
+        // 一键整套：所有需要AI的步骤合并成一次请求。指定重生成保持逐步请求。
+        if (!targeted && five.keys.length === SUITE_STEP_KEYS.length) {
+            const aiSteps=selected.filter(s=>sourceOf[s.key]==='generated'&&!five.generated?.[s.key]?.dataUrl);
+            if(aiSteps.length){
+                const targetKeys=aiSteps.map(s=>String(s.key));
+                suiteSetProgress({jobId,fileKey,rowNum,phase:'generating',done:doneCount});
+                if(!five.groupTaskId){
+                    const prompt='根据以下提示词生成 '+aiSteps.length+' 张图片，每个编号对应一张，严格按顺序输出，不要拼图，不要在图片上写编号。\n\n'+aiSteps.map((s,i)=>(i+1)+'、步骤 '+s.key+' '+s.name+'\n'+prompts[s.key]).join('\n\n')+'\n\n请直接生成对应的图片。';
+                    const created=await suiteSend('suiteCreate',{task:{fileKey,rowNum,productId:five.productId,mode:'batch-gen',expectCount:aiSteps.length,targetKeys,prompt,assets:[{color:'main',filename:`row${rowNum}_main.png`,url:mainDataUrl,fileKey,row:rowNum}],configSnapshot:{model:aiSteps[0].model||'5.0',ratio:aiSteps[0].ratio||'1:1'}}});
+                    if(!created.ok||!created.task)throw Error(created.error||'整套生成任务创建失败');
+                    five.groupTaskId=created.task.taskId;five.groupKeys=targetKeys;await persistSuiteFive(five);
+                    suiteTaskIdentities.set(five.groupTaskId,{fileKey,rowNum});
+                    const run=await suiteSend('suiteRun',{taskId:five.groupTaskId},600000);if(!run.ok)throw Error(run.error||'整套生成请求失败');
+                }
+                const task=await waitSuiteAcquired(five.groupTaskId);
+                const recognized=await SuiteCore.recognize(task.images||[],five.groupKeys.map(key=>({key})),{expectCount:five.groupKeys.length});
+                if(!recognized.ok)throw Error('整套生成结果识别失败：'+recognized.error);
+                for(const result of recognized.results){const blob=await suiteBlobFromDataUrl(result.url);if(!blob.size)throw Error(result.key+'生成结果为空');five.generated[result.key]={dataUrl:result.url,bytes:blob.size,taskId:five.groupTaskId};}
+                await persistSuiteFive(five);
+                const closed=await suiteSend('suiteProgress',{report:{taskId:five.groupTaskId,final:true,finalStage:'generated',diag:['整套AI原图已缓存，等待分别后处理保存']}});
+                if(!closed.ok)throw Error(closed.error||'生成任务状态保存失败');
+            }
+        }
+        // 按配置顺序分别后处理和保存；一键整套复用上方合并请求的结果。
+        for (let i = 0; i < selected.length; i++) {
+            const step = selected[i];
+            const key = String(step.key);
+            if (five.done && five.done[key]) { continue; }
+            const source = sourceOf[key];
+            let inputBlob;
+            if (source === 'generated') {
+                suiteSetProgress({ jobId, fileKey, rowNum, phase: 'generating', done: doneCount, currentKey: key });
+                if (btn) btn.textContent = `⏳ 生成中 ${key} ${step.name}（${doneCount}/${total}）`;
+                updateSuiteStatus(`⏳ 套图 ${doneCount}/${total}｜${key} ${step.name}：生成中`);
+                let gen = five.generated && five.generated[key];
+                if (!gen || !gen.dataUrl) {
+                    // 生成步骤只在这里创建一次豆包请求；111/444 永远不会走到这个分支。
+                    gen = await suiteGenerateOneStep({ step, prompt: prompts[key], mainDataUrl, fileKey, rowNum, product: frozen ? { id: five.productId, row: rowNum } : product });
+                    five.generated[key] = { dataUrl: gen.dataUrl, bytes: gen.bytes, width: gen.width, height: gen.height, taskId: gen.taskId };
+                    await persistSuiteFive(five);
+                    // 生成子任务到此结束：这是独立的终态 generated，只表示「原图已获取并缓存」，
+                    // 不代表成品已后处理/已保存（成品语义仍是 saved/completed）；下一生成步骤因此可继续。
+                    try {
+                        await suiteSend('suiteProgress', { report: {
+                            taskId: gen.taskId, final: true, finalStage: 'generated',
+                            results: [{ key, acquired: true, saved: false, cached: true, bytes: gen.bytes }],
+                            diag: [`${key} 原图已缓存进作业冻结记录（未后处理、未保存成品）`]
+                        } });
+                    } catch (_) {}
+                } else {
+                    updateSuiteStatus(`⏳ 套图 ${doneCount}/${total}｜${key} ${step.name}：复用已生成结果（不重新消耗生图额度）`);
+                }
+                inputBlob = await suiteBlobFromDataUrl(gen.dataUrl);
+            } else {
+                // 直接使用产品主图：111、444 各自从冻结的原始主图开始，互不作为输入。
+                suiteSetProgress({ jobId, fileKey, rowNum, phase: 'processing', done: doneCount, currentKey: key });
+                if (btn) btn.textContent = `⏳ 后处理 ${key} ${step.name}（${doneCount}/${total}）`;
+                updateSuiteStatus(`⏳ 套图 ${doneCount}/${total}｜${key} ${step.name}：直接使用产品主图，后处理中`);
+                inputBlob = mainBlob;
+            }
+
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'processing', done: doneCount, currentKey: key });
+            if (btn) btn.textContent = `⏳ 后处理 ${key} ${step.name}（${doneCount}/${total}）`;
+            const post = await SuitePostprocess.runStep(step, key, inputBlob, ctxPost);
+            if (!post.ok) throw new Error(`${key} ${step.name}：后处理失败 ${post.error || ''}`);
+
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'saving', done: doneCount, currentKey: key });
+            if (btn) btn.textContent = `⏳ 保存 ${key} ${step.name}（${doneCount}/${total}）`;
+            const saved = await suiteSaveOne({ key, blob: post.output, fileKey, rowNum, jobId });
+            five.done[key] = { filename: saved.filename, bytes: saved.bytes, width: saved.width, height: saved.height, mode: saved.mode, applied: post.applied || 'none' };
+            doneSet.add(key);
+            doneCount = SUITE_STEP_KEYS.filter(k => doneSet.has(k)).length;
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: doneCount >= total ? 'completed' : 'generating', done: doneCount, currentKey: key });
+            await persistSuiteFive(five);
+            updateSuiteStatus(`✅ 套图 ${doneCount}/${total}｜${key} ${step.name} 已保存：${saved.filename}`);
+        }
+
+        // ⑧ 完成：清冻结、同步角标（同一 fileKey+rowNum 的 111/222/333/444/666 全部存在成品才显示「套图」）
+        await clearSuiteFive(fileKey, rowNum);
+        suitePendingNumbering = null;
+        const savedWhere = outputFallback ? `下载/${outputStatus.name}/（下载记录校验）` : `产品套图目录 ${outputStatus.name}（磁盘回读校验）`;
+        const finalRecs = await SuiteCore.ResultStore().list(fileKey, rowNum).catch(() => []);
+        const haveKeys = new Set((finalRecs || []).map(r => String(r.key)));
+        const missingKeys = SUITE_STEP_KEYS.filter(k => !haveKeys.has(k));
+        if (missingKeys.length) {
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'completed', done: SUITE_STEP_KEYS.filter(k => haveKeys.has(k)).length });
+            await syncSuiteBadge(fileKey, rowNum);
+            updateSuiteStatus(`⚠️ 本任务已保存 ${SUITE_FIVE_TOTAL - missingKeys.length}/${SUITE_FIVE_TOTAL} 张；缺 ${missingKeys.join('/')}，暂不显示「套图」角标`);
+        } else {
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'completed', done: SUITE_FIVE_TOTAL });
+            await syncSuiteBadge(fileKey, rowNum);
+            updateSuiteStatus(`✅ 套图完成：111/222/333/444/666 五张成品已保存并校验｜${savedWhere}`);
+            showToast('✅ 套图完成（五张成品已保存）');
+        }
+        if (currentProduct && currentProduct.row === rowNum && currentFileKey() === fileKey) await renderSuiteImages(currentProduct);
+        return null;
+    } catch (e) {
+        // 失败保留已完成结果与冻结数据；重试只补未完成步骤，不重复消耗生图额度。
+        const state = readSuiteAutoState();
+        if (state && state.jobId) saveSuiteAutoState({ ...state, phase: 'error', paused: true });
+        updateSuiteStatus(`❌ ${e.message}`);
+        showToast(`❌ ${e.message}`);
+        return null;
+    } finally {
         suiteTaskRunning = false;
-        if (btn) { btn.disabled = false; btn.textContent = '🖼️ 生成套图'; }
+        renderSuiteAutoControls();
+        if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
     }
 }
 
@@ -4283,7 +4815,9 @@ function renderSuitePendingNumbering() {
 
 // 确认编号 → 继续后处理/保存/索引（不重新发豆包请求）
 async function confirmSuiteNumbering() {
+    if (suiteTaskRunning) return;
     if (!suitePendingNumbering) { showToast('ℹ️ 没有待确认的编号'); return; }
+    if (!currentProduct || currentProduct.row !== suitePendingNumbering.rowNum || currentFileKey() !== suitePendingNumbering.fileKey) { showToast('请切回该任务产品后确认'); return; }
     const { candidates, taskId, fileKey, rowNum, steps } = suitePendingNumbering;
     const assignment = {};
     for (const c of candidates) {
@@ -4296,14 +4830,95 @@ async function confirmSuiteNumbering() {
     await finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned });
 }
 
+// 任务数据冻结：任务开始后切换产品、重导 Excel、改面板步骤都不改变本任务的数据与步骤配置。
+// 解析顺序（只有第一条会「现场派生」，其余都是复用已冻结的那一份）：
+//   ① 内存里的冻结规格 → ② 已落盘的冻结记录（任务启动时保存的那一份）→ ③ 首次冻结：按当前 Excel 派生一次
+// 若任务是从记录恢复的、却找不到冻结记录 → 明确报错并停止，绝不拿当前导入的 Excel 顶替。
+async function freezeSuiteTaskData(pending, fileKey, rowNum, taskId) {
+    if (pending && pending.excelRowSpec) {
+        return { snapshot: window.ExcelRow.build(pending.excelRowSpec), spec: pending.excelRowSpec, steps: pending.steps || null };
+    }
+    const stored = await readSuiteFreeze(fileKey, rowNum, taskId || (pending && pending.taskId));
+    if (stored) {
+        if (pending) { pending.excelRowSpec = stored.excelRowSpec; pending.steps = pending.steps || stored.steps; }
+        return { snapshot: window.ExcelRow.build(stored.excelRowSpec), spec: stored.excelRowSpec, steps: (pending && pending.steps) || stored.steps };
+    }
+    if (pending && pending.restored) {
+        throw new Error(`无法恢复任务 ${pending.taskId || ''} 的冻结行数据与步骤配置（本地记录缺失或已损坏）；已停止执行，请重新生成该产品后再确认，不会用当前导入的 Excel 替代`);
+    }
+    if (String(fileKey || '') !== currentFileKey()) {
+        throw new Error(`当前导入的 Excel 与任务不符（任务文件 ${fileKey || '未知'}），无法读取该任务的产品行数据；请切回任务对应的 Excel 后重试`);
+    }
+    const spec = excelRowSpec(rowNum);
+    const snapshot = window.ExcelRow.build(spec);
+    const steps = suiteFrozenSteps(snapshot);
+    if (pending) { pending.excelRowSpec = spec; pending.steps = steps; }
+    return { snapshot, spec, steps };
+}
+
+// 读回任务启动时冻结的那一份：按 fileKey+rowNum 定位，并用 taskId 排除「同一行但另一个任务」的复用
+async function readSuiteFreeze(fileKey, rowNum, taskId) {
+    let record = null;
+    try { record = await SuiteCore.ResultStore('polo_suite_pending').get(fileKey, rowNum, 'rowfreeze'); }
+    catch (e) { return null; }
+    const meta = record && record.meta;
+    if (!meta || !meta.excelRowSpec) return null;
+    if (taskId && meta.taskId && meta.taskId !== taskId) return null;
+    return meta;
+}
+
+// 首次冻结后必须在【执行后处理之前】把冻结数据与步骤配置可靠落盘；保存失败由调用方直接停止执行。
+// 已冻结过的任务保持原数据不变（幂等，不覆盖），保证「恢复的任务用的一定是任务启动时那一份」。
+// target 只需带 { fileKey, rowNum, taskId }（可以是待确认状态，也可以是任务身份）。
+async function persistSuiteFreeze(target, frozen) {
+    if (!target || !frozen || !frozen.spec) return;
+    const { fileKey, rowNum, taskId } = target;
+    const store = SuiteCore.ResultStore('polo_suite_pending');
+    const existing = await store.get(fileKey, rowNum, 'rowfreeze');
+    const meta = existing && existing.meta;
+    if (meta && meta.excelRowSpec && (!meta.taskId || meta.taskId === taskId)) return;
+    await store.put({
+        fileKey, rowNum, key: 'rowfreeze', taskId,
+        meta: { taskId, excelRowSpec: frozen.spec, steps: frozen.steps }
+    });
+}
+
 async function finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned }) {
-    const product = (products || []).find(p => p.row === rowNum) || { row: rowNum };
+    const product = { row: rowNum };
     const btn = document.getElementById('suiteGenBtn');
     suiteTaskRunning = true;
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 处理中...'; }
     try {
+        await assertSuiteTaskActive(taskId, fileKey, rowNum);
+        const pending = suitePendingNumbering && suitePendingNumbering.taskId === taskId ? suitePendingNumbering : null;
+        // 任务绑定的行数据与步骤：与提示词渲染同一份快照；冻结后不受切换产品 / 重导 Excel / 改面板影响。
+        const frozen = await freezeSuiteTaskData(pending, fileKey, rowNum, taskId);
+        const taskSteps = frozen.steps || steps;
+        // 冻结数据与步骤配置必须在【执行后处理之前】可靠落盘：保存失败即停止执行，
+        // 否则刷新后无从恢复，只能拿当前导入的 Excel 顶替（明确禁止）。
+        try {
+            await persistSuiteFreeze(pending || { fileKey, rowNum, taskId }, frozen);
+            if (pending) await persistSuitePending(pending);
+        } catch (e) {
+            throw new Error(`任务冻结数据保存失败，已停止执行（不会用当前导入的 Excel 替代）：${e.message}`);
+        }
+        if(!suiteAutoCheckpoint(taskId,'processing',1))return null;
+        // 执行前的后处理配置校验（统一预检）：在任何脚本运行前，逐条检查所有【已选定】步骤的后处理类型与脚本内容。
+        // 报错必须同时给出【输出编号 + 步骤名 + 脚本名】，绝不静默跳过；不要求输出目录授权（否则会遮盖空脚本错误）。
+        // 资源不在此处假通过：执行期按【任务冻结快照 + 真实授权句柄】验证。
+        const keyList = assigned.map(a => a.key);
+        const ppConfig = SuitePostprocess.checkConfig(taskSteps, keyList);
+        if (!ppConfig.ok) {
+            const detail = ppConfig.problems.join('；');
+            updateSuiteStatus(`❌ 后处理配置校验未通过，未执行任何脚本：${detail}（原始图已保留，可「仅重试处理」）`);
+            showToast(`❌ 后处理配置校验未通过：${ppConfig.problems[0] || ''}`);
+            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: [`后处理配置校验未通过：${detail}`] } });
+            return null;
+        }
         // ⑦ 后处理（按【已确认】编号；未配置='none' 直接用原图）—— 必须在写盘前完成
         const ctxPost = {
+            // 行数据只来自任务冻结快照，脚本按真实 Excel 列名读取（与提示词同一份数据）
+            excelRow: frozen.snapshot,
             // 资源只用【真实授权句柄】：优先「后处理脚本目录」等已授权目录
             getHandle: async (decl) => {
                 const ids = decl.type === 'folder' ? ['assets', 'scripts'] : ['assets', 'scripts'];
@@ -4315,89 +4930,126 @@ async function finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned }) {
                 }
                 return null;
             },
-            transform: async (blob, action, options) => {
-                const bmp = await createImageBitmap(blob);
-                const pad = action === 'padSquare' ? Math.max(bmp.width, bmp.height) : bmp.width;
-                const max = action === 'resizeMax' ? (options.max || 1536) : pad;
-                const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
-                const w = Math.max(1, Math.round(bmp.width * scale));
-                const h = Math.max(1, Math.round(bmp.height * scale));
-                const c = document.createElement('canvas');
-                c.width = action === 'padSquare' ? max : w;
-                c.height = action === 'padSquare' ? max : h;
-                const cx = c.getContext('2d');
-                cx.drawImage(bmp, (c.width - w) / 2, (c.height - h) / 2, w, h);
-                if (typeof bmp.close === 'function') bmp.close();
-                return await new Promise(res => c.toBlob(b => res(b), 'image/png'));
-            }
+            transform: SuiteImageTransform.apply,
+            // 图像能力：按输入图尺寸创建画布（原图已绘制）+ 共享绘制函数集（ctx.draw 单一真源）。
+            // 脚本不自己创建 canvas、不自己导出图片，由中枢在脚本结束后导出。
+            createSurface: SuiteImageSdk.createSurface,
+            draw: SuiteImageSdk.draw
         };
-        const blobsByKey = {};
-        for (let i = 0; i < assigned.length; i++) {
-            const resp = await fetch(assigned[i].url, { cache: 'no-store' });
-            blobsByKey[assigned[i].key] = await resp.blob();
+        const signature = JSON.stringify(assigned.map(a => [a.key, a.index]));
+        let post;
+        if (pending && pending.processed && pending.processedAssignment === signature) {
+            post = { ok: true, results: pending.processed };
+        } else {
+            const blobsByKey = {};
+            for (const a of assigned) {
+                const response = await fetch(a.url, { cache: 'no-store' });
+                if (!response.ok) throw new Error('结果图片读取失败');
+                blobsByKey[a.key] = await response.blob();
+            }
+            post = await SuitePostprocess.runAll(taskSteps, assigned.map(a => a.key), blobsByKey, ctxPost);
+            if (post.ok && pending) {
+                pending.processed = post.results;
+                pending.processedAssignment = signature;
+                await persistSuitePending(pending);
+            }
         }
-        const post = await SuitePostprocess.runAll(steps, assigned.map(a => a.key), blobsByKey, ctxPost);
         if (!post.ok) {
-            updateSuiteStatus(`❌ 后处理失败：编号 ${post.failedKeys.join('/')} — ${post.results.filter(r => !r.ok).map(r => r.error).join('；')}（原始图已保留，可「仅重试处理」）`);
-            showToast(`❌ 后处理失败：${post.failedKeys.join('/')}`);
-            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: [`后处理失败：${post.failedKeys.join('/')}`] } });
-            return created.task;
+            // 报错必须同时给出【输出编号 + 步骤显示名】，不能只给编号
+            const failedLabel = post.failedKeys.map(k => {
+                const hit = SUITE_OUTPUTS.find(o => o[0] === String(k));
+                return hit ? `${k} ${hit[1]}` : String(k);
+            }).join('/');
+            updateSuiteStatus(`❌ 后处理失败：${failedLabel} — ${post.results.filter(r => !r.ok).map(r => r.error).join('；')}（原始图已保留，可「仅重试处理」）`);
+            showToast(`❌ 后处理失败：${failedLabel}`);
+            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: [`后处理失败：${failedLabel}`] } });
+            return null;
         }
+        if(!suiteAutoCheckpoint(taskId,'saving',2))return null;
         const items = post.results.map(r => ({ key: r.key, blob: r.output }));
 
-        // ⑧ 写盘 + 重新读取校验（真实目录句柄；五张全成功才 saved）
-        const outHandle = await loadSuiteDirHandle('suiteOut');
-        if (!outHandle) {
-            updateSuiteStatus('❌ 套图输出目录未授权，已获取并处理完成的 5 张结果已保留；请到「路径配置」授权后重试保存');
-            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: ['写盘前：输出目录未授权'] } });
-            return created.task;
+        // ⑧ 写盘 + 重新读取校验：输出目录句柄只存在于扩展源，页面无法直接持有；
+        //    由扩展经受信任消息桥，用既有「🖼️ 产品套图目录」句柄完成「写入 → 回读校验」，再返回结果。
+        //    文件名仍按 fileKey+行号+任务号 生成（既有防跨文件/跨产品覆盖约束不变），不新增任何路径配置。
+        const writeFiles = [];
+        for (const it of items) {
+            writeFiles.push({
+                key: it.key,
+                filename: SuiteCore.buildFilename(fileKey, rowNum, it.key + '_' + taskId),
+                dataUrl: await suiteBlobToDataUrl(it.blob)
+            });
         }
-        const perm = await outHandle.queryPermission({ mode: 'readwrite' });
-        if (perm !== 'granted') {
-            updateSuiteStatus(`❌ 输出目录权限不足（${perm}），结果已保留，请重新授权后重试保存`);
-            return created.task;
+        await assertSuiteTaskActive(taskId, fileKey, rowNum);
+        // 落盘子目录与颜色图同构：Polo发品_颜色图/<文件名>/rowN/，与 suiteSaveOne 一致，不再平铺根层。
+        const saveSubdir = (loadedFileName ? loadedFileName + '/' : '') + 'row' + rowNum;
+        const savedResp = await suiteSend('suiteWriteOutput', { subdir: saveSubdir, files: writeFiles }, 60000);
+        const saved = savedResp && Array.isArray(savedResp.results)
+            ? { ok: !!savedResp.ok, results: savedResp.results, savedCount: savedResp.savedCount || 0, failedKeys: savedResp.failedKeys || [] }
+            : null;
+        // 如实标注落盘通道与校验级别：downloads = 下载通道（按下载记录校验），不等于磁盘回读解码。
+        if (saved && savedResp.mode === 'downloads') {
+            updateSuiteStatus(`ℹ️ 产品套图目录未授权，已改走下载通道落盘到「下载/${savedResp.dirName || ''}/」，按下载记录校验（非磁盘回读解码）`);
         }
-        const saved = await SuiteCore.saveAll(outHandle, items, {
-            fileKey, rowNum: product.row,
-            decodeSize: async (f) => { const b = await createImageBitmap(f); const s = { width: b.width, height: b.height }; if (b.close) b.close(); return s; }
-        });
+        if (!saved) {
+            const reason = (savedResp && savedResp.error) || '扩展未响应';
+            updateSuiteStatus(`❌ 套图输出目录不可用，未写入任何文件：${reason}（已获取并处理完成的 ${items.length} 张结果已保留）`);
+            showToast(`❌ 输出目录不可用：${reason}`);
+            await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', diag: ['写盘前：' + reason] } });
+            return null;
+        }
         if (!saved.ok) {
             updateSuiteStatus(`⚠️ 生成成功、保存失败：已保存 ${saved.savedCount}/5，失败编号 ${saved.failedKeys.join('/')}（结果已保留，可「仅重试保存」）`);
             showToast(`⚠️ 保存失败 ${saved.failedKeys.join('/')}，结果已保留`);
+            const retryGrid = document.getElementById('suiteImagesGrid');
+            if (retryGrid) retryGrid.innerHTML += '<button class="batch-color-btn" onclick="confirmSuiteNumbering()">仅重试保存（不重新生图或后处理）</button>';
             await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'acquired', results: saved.results, diag: [`写盘失败：${saved.failedKeys.join('/')}`] } });
-            return created.task;
+            return null;
         }
 
         // ⑨ 先写索引，成功后才 saved → completed（避免"显示完成但索引写入失败"）
         const store = SuiteCore.ResultStore();
         try {
+            const indexRecords = [];
             for (const it of items) {
+                await assertSuiteTaskActive(taskId, fileKey, rowNum);
                 const rec2 = saved.results.find(x => x.key === it.key);
-                await store.put({
+                indexRecords.push({
                     fileKey, rowNum: product.row, key: it.key, taskId: taskId, blob: it.blob,
-                    meta: { filename: rec2 && rec2.filename, bytes: rec2 && rec2.bytes, width: rec2 && rec2.width, height: rec2 && rec2.height, verified: true, postprocess: (post.results.find(p => p.key === it.key) || {}).applied || 'none' }
+                    meta: { filename: rec2 && rec2.filename, bytes: rec2 && rec2.bytes, width: rec2 && rec2.width, height: rec2 && rec2.height, verified: true, contentHash: await suiteContentHash(it.blob), postprocess: (post.results.find(p => p.key === it.key) || {}).applied || 'none' }
                 });
             }
+            await store.putMany(indexRecords);
         } catch (e) {
             updateSuiteStatus(`⚠️ 文件已保存但索引写入失败：${e.message}（文件在磁盘上可用；请刷新后重试恢复）`);
             showToast('⚠️ 索引写入失败，未标记完成');
             await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'saved', results: saved.results, diag: ['索引写入失败：' + e.message] } });
-            return created.task;
+            return null;
         }
-        await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'saved', results: saved.results } });
-        await suiteSend('suiteProgress', { report: { taskId: taskId, final: true, finalStage: 'completed', results: saved.results } });
+        await suiteProgressChecked({ taskId, fileKey, rowNum, stage: 'saved', results: saved.results });
+        await suiteProgressChecked({ taskId, fileKey, rowNum, final: true, finalStage: 'completed', results: saved.results });
+        await SuiteCore.ResultStore('polo_suite_pending').remove(fileKey, rowNum, 'pending');
+        // 任务已完成 → 冻结记录一并清理，避免同一行后续任务误复用上一任务的冻结数据
+        await SuiteCore.ResultStore('polo_suite_pending').remove(fileKey, rowNum, 'rowfreeze');
+        suitePendingNumbering = null;
+        const auto=readSuiteAutoState();if(auto?.taskId===taskId)saveSuiteAutoState({...auto,paused:false,phase:'completed',done:3});
 
-        updateSuiteStatus(`✅ 套图完成：5 张已后处理、保存、回读校验并写入索引（任务 ${taskId}）`);
-        showToast('✅ 套图完成（5 张已保存并校验）');
-        await renderSuiteImages(product);
-        return created.task;
+        const savedWhere = savedResp.mode === 'downloads'
+            ? `落盘位置：下载/${savedResp.dirName || ''}/（下载记录校验）`
+            : `落盘位置：产品套图目录 ${savedResp.dirName || ''}（磁盘回读校验）`;
+        updateSuiteStatus(`✅ 套图完成：${items.length} 张已后处理、保存、校验并写入索引（任务 ${taskId}）｜${savedWhere}`);
+        showToast(`✅ 套图完成（${items.length} 张已保存并校验）`);
+        addSuiteGeneratedBadge(rowNum);
+        if (currentProduct && currentProduct.row === rowNum && currentFileKey() === fileKey) await renderSuiteImages(currentProduct);
+        return null;
     } catch (e) {
         updateSuiteStatus(`❌ ${e.message}`);
         showToast(`❌ ${e.message}`);
         return null;
     } finally {
-        suiteTaskRunning = false;
-        if (btn) { btn.disabled = false; btn.textContent = '🖼️ 生成套图'; }
+        const auto=readSuiteAutoState();
+        if(auto&&auto.phase!=='completed')saveSuiteAutoState({...auto,paused:true});
+        suiteTaskRunning = false;renderSuiteAutoControls();
+        if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
     }
 }
 
@@ -4417,19 +5069,21 @@ async function renderSuiteImages(product) {
     const area = document.getElementById('suiteImagesArea');
     const grid = document.getElementById('suiteImagesGrid');
     if (!area || !grid) return;
+    renderSuiteAutoControls();
     const row = product ? product.row
-        : ((typeof currentRowIndex === 'number' && products && products[currentRowIndex]) ? products[currentRowIndex].row : null);
+        : (currentProduct ? currentProduct.row : null);
     if (row === null || row === undefined) { area.style.display = 'none'; return; }
     area.style.display = 'block';
 
     const seq = ++suiteRenderSeq;
     const fileKey = currentFileKey();
-    const stale = () => seq !== suiteRenderSeq || fileKey !== currentFileKey();
+    const stale = () => seq !== suiteRenderSeq || fileKey !== currentFileKey() || !currentProduct || currentProduct.row !== row;
 
     const resp = await suiteSend('suiteListTasks', { fileKey, rowNum: row });
     if (stale()) return;                                   // 期间已切产品/重渲染 → 丢弃
     const tasks = (resp && resp.ok && resp.tasks) ? resp.tasks : [];
-    const t = tasks[0];
+    let t = tasks[0];
+    if(t?.stage==='acquired'&&!t.images){const full=await suiteSend('suiteGetTask',{taskId:t.taskId});t=full.task;if(stale())return;}
 
     let recs = [];
     try {
@@ -4438,12 +5092,63 @@ async function renderSuiteImages(product) {
     } catch (e) { recs = []; }
     if (stale()) return;
 
+    const pendingRecord = await SuiteCore.ResultStore('polo_suite_pending').get(fileKey, row, 'pending');
+    if (stale()) return;
+    if (pendingRecord && pendingRecord.meta && pendingRecord.meta.pending) {
+        releaseSuiteObjectUrls();
+        suitePendingNumbering = pendingRecord.meta.pending;
+        // 恢复的任务一律用「任务启动时冻结的那一份」行数据与步骤配置；
+        // 记录缺失时只标记 restored，由确认阶段明确报错，绝不用当前导入的 Excel 顶替。
+        suitePendingNumbering.restored = true;
+        if (!suitePendingNumbering.excelRowSpec) {
+            const freeze = await readSuiteFreeze(fileKey, row, suitePendingNumbering.taskId);
+            if (stale()) return;
+            if (freeze) {
+                suitePendingNumbering.excelRowSpec = freeze.excelRowSpec;
+                suitePendingNumbering.steps = suitePendingNumbering.steps || freeze.steps;
+            }
+        }
+        suitePendingNumbering.candidates = suitePendingNumbering.candidates.map(c => { const url = URL.createObjectURL(c.blob); suiteObjectUrls.push(url); return Object.assign({}, c, { url }); });
+        if(suitePendingNumbering.automatic){renderSuiteAutoControls();if(!suiteTaskRunning)await resumeSuiteAuto();}
+        else renderSuitePendingNumbering();
+        return;
+    }
+    const auto=readSuiteAutoState();
+    if(auto&&auto.taskId===t?.taskId&&auto.fileKey===fileKey&&auto.rowNum===row&&auto.phase!=='completed'){
+        renderSuiteAutoControls();if(!auto.paused&&!suiteTaskRunning)await resumeSuiteAuto();return;
+    }
+    // 图片已获取但识别/待确认写入中断时，从原任务和冻结记录恢复，绝不重新生成。
+    if (t && t.stage === 'acquired' && t.images && t.images.length) {
+        const freeze = await readSuiteFreeze(fileKey,row,t.taskId);
+        if (stale()) return;
+        if (freeze) {
+            const recognized=await SuiteCore.recognize(t.images,(t.targetKeys||[]).map(key=>({key})),{expectCount:t.expectCount});
+            if (recognized.ok) {
+                suitePendingNumbering={taskId:t.taskId,fileKey,rowNum:row,steps:freeze.steps,excelRowSpec:freeze.excelRowSpec,restored:true,
+                    candidates:recognized.results.map((r,index)=>({key:r.key,index,url:r.url,fingerprint:r.fingerprint||null,source:'appearance-order'}))};
+                await persistSuitePending(suitePendingNumbering);
+                if(stale())return;
+                renderSuitePendingNumbering();
+                updateSuiteStatus('✅ 已恢复已有生成结果，请确认编号后继续（不会重新生图）');
+                return;
+            }
+        }
+    }
+    // 磁盘核验同样由扩展在自身源用既有输出目录句柄回读（句柄不可跨源），页面只负责展示结果。
+    // 核验目标目录与写入同构：Polo发品_颜色图/<文件名>/rowN/（与颜色图同一子目录层级）。
+    // savedAt 一并下发：下载通道核验时用它排除「早于本次保存」的旧下载记录（旧记录不能证明文件还在磁盘上）。
+    const verifySubdir = (loadedFileName ? loadedFileName + '/' : '') + 'row' + row;
+    const verifyRecs = recs.map(r => ({ key: String(r.key), filename: (r.meta && r.meta.filename) || '', bytes: (r.meta && r.meta.bytes) || 0, contentHash: (r.meta && r.meta.contentHash) || '', savedAt: (r.meta && r.meta.savedAt) || r.savedAt || 0 }));
+    const verifyResp = await suiteSend('suiteVerifyOutput', { subdir: verifySubdir, records: verifyRecs }, 30000);
+    const health = verifyResp && Array.isArray(verifyResp.items)
+        ? { items: verifyResp.items, unverified: verifyResp.unverified || [] }
+        : { items: recs.map(r => ({ key: String(r.key), status: 'no-permission', detail: (verifyResp && verifyResp.error) || '输出目录不可用，无法核验（不等于文件缺失）' })), unverified: recs.map(r => String(r.key)) };
+    if (stale()) return;
     releaseSuiteObjectUrls();
     const byKey = {};
     for (const r of recs) byKey[String(r.key)] = r;
 
-    const keys = (t && t.targetKeys && t.targetKeys.length) ? t.targetKeys
-        : recs.map(r => String(r.key)).sort();
+    const keys = [...new Set([...SUITE_OUTPUTS.map(o => o[0]), ...recs.map(r => String(r.key))])];
 
     if (!t && recs.length === 0) {
         grid.innerHTML = '<div style="font-size:12px;color:rgba(255,255,255,0.45);padding:8px;">该产品还没有套图结果</div>';
@@ -4460,230 +5165,53 @@ async function renderSuiteImages(product) {
             suiteObjectUrls.push(url);
         }
         const meta = (r && r.meta) || {};
-        const status = r
-            ? `✅ 已保存 ${meta.width ? meta.width + '×' + meta.height : ''}${meta.postprocess && meta.postprocess !== 'none' ? ' · ' + meta.postprocess : ''}`
-            : '⏳ 未完成';
-        const img = url
-            ? `<img src="${url}" style="width:100%;border-radius:8px;cursor:zoom-in;" onclick="openImageModal(this.src)">`
-            : `<div style="height:90px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.04);border-radius:8px;font-size:11px;color:rgba(255,255,255,0.4);">${r ? '文件缺失或已移动' : '未生成'}</div>`;
+        const check = health.items.find(h => h.key === key);
+        // 删除文件后立刻反映缺失：磁盘核验明确缺失/损坏/被替换/读取错误时，
+        // 不显示 IndexedDB 缓存里的图片（缓存只是历史快照，不能冒充磁盘现状）。
+        // no-permission / cache-only 属于「无法核验」，不等于缺失，仍保留显示。
+        const diskBad = check && ['missing', 'corrupt', 'replaced', 'error'].includes(check.status);
+        const img = (url && !diskBad)
+            ? `<img src="${url}" alt="${escapeHtml(key)} 套图" style="width:100%;border-radius:8px;cursor:zoom-in;" onclick="openImageModal(this.src)">`
+            : `<div style="height:90px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.04);border-radius:8px;font-size:11px;color:rgba(255,255,255,0.4);" title="${check ? check.detail : ''}">${diskBad ? '文件缺失或已移动' : (r ? '文件缺失或已移动' : '未生成')}</div>`;
         return `<div class="color-img-item" style="text-align:center;">
             <div class="img-label" style="justify-content:center;"><span>${key}</span></div>
             ${img}
-            <div style="font-size:10px;color:rgba(255,255,255,0.5);margin-top:4px;">${status}</div>
-            <button class="batch-color-btn" style="padding:2px 8px;font-size:11px;margin-top:4px;" onclick="startSuiteRegenerate('${key}')">🔁 重生成</button>
         </div>`;
     }).join('');
 
     const st = document.getElementById('suiteStatusText');
     if (st) st.textContent = t ? `任务 ${t.taskId}｜阶段 ${t.stage}${t.error ? '｜' + t.error : ''}` : `已保存 ${recs.length} 张`;
+    if(t&&['interrupted','failed'].includes(t.stage)&&t.stageAt?.sent&&!t.cancelled)grid.insertAdjacentHTML('beforeend',`<button class="batch-color-btn" style="grid-column:1/-1" onclick="recoverSuiteExistingResults('${t.taskId}')">恢复已有结果（不重新生成）</button>`);
 }
 
-// 指定单图重生成：只执行该编号对应的自定义步骤，成功后只替换该张
-async function startSuiteRegenerate(key) {
-    if (!key) { showToast('ℹ️ 请选择要重生成的编号'); return null; }
-    if (suiteTaskRunning) { showToast('⚠️ 已有套图任务进行中'); return null; }
-    if (!products || products.length === 0) { showToast('⚠️ 请先上传 Excel'); return null; }
-    const product = (typeof currentRowIndex === 'number' && products[currentRowIndex]) ? products[currentRowIndex] : products[0];
-    const steps = getSuiteSteps();
-    const step = (steps || []).find(s => (s.outputKeys || []).some(o => (typeof o === 'string' ? o : (o.key || '')).toString().trim() === String(key).trim()));
-    if (!step) { showToast(`⚠️ 编号 ${key} 没有对应的自定义步骤`); return null; }
-
-    const btn = document.getElementById('suiteGenBtn');
-    suiteTaskRunning = true;
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ 重生成中...'; }
+async function recoverSuiteExistingResults(taskId,recoveryUrl) {
+    if(suiteTaskRunning)return;
+    const fileKey=currentFileKey(),rowNum=currentProduct?.row;
     try {
-        const cur = (typeof currentRowIndex === 'number' && products[currentRowIndex]) ? products[currentRowIndex] : products[0];
-        // 变量校验（只针对该步骤）
-        const rendered = renderSuitePrompt(step, cur);
-        const left = rendered.match(/\{\{\s*([^}]+?)\s*\}\}/g);
-        if (left && left.length) throw new Error(`编号 ${key} 存在未解析变量：${[...new Set(left)].join(' ')}`);
-        // 素材校验（该步骤允许的素材规则；单图复用当前产品素材）
-        const { assets, problems, fileKey } = await resolveSuiteAssets(cur);
-        if (problems.length) throw new Error('素材检查未通过：' + problems.join('；'));
-
-        const created = await suiteSend('suiteCreate', {
-            task: {
-                fileKey, rowNum: cur.row, productId: cur.row,
-                mode: 'single-regen', expectCount: 1, targetKeys: [String(key).trim()],
-                prompt: rendered,
-                configSnapshot: { model: step.model || '5.0', ratio: step.ratio || '1:1', outputKeys: [{ key }], postprocess: step.postprocess || { type: 'none' } },
-                assets: Object.values(assets).map(a => ({ color: a.color, url: a.url, filename: a.url, fileKey: a.fileKey, row: a.row }))
-            }
-        });
-        if (!created.ok) throw new Error(created.error);
-
-        updateSuiteStatus(`⏳ 编号 ${key} 重生成中（任务 ${taskId}）…`);
-        const ran = await suiteSend('suiteRun', { taskId: taskId }, 3600000);
-        if (!ran.ok) throw new Error(ran.error);
-
-        // 单图校验：只认 1 张（不套用五图映射）
-        const fpOf = async (it) => {
-            try {
-                const resp = await fetch(it.url, { cache: 'no-store' });
-                const bmp = await createImageBitmap(await resp.blob());
-                const c = document.createElement('canvas'); c.width = 16; c.height = 16;
-                c.getContext('2d').drawImage(bmp, 0, 0, 16, 16);
-                if (bmp.close) bmp.close();
-                return c.toDataURL('image/png');
-            } catch (_) { return null; }
-        };
-        const recOne = await SuiteCore.recognize(ran.images, [{ key }], { expectCount: 1, fingerprint: fpOf });
-        if (!recOne.ok) throw new Error('单图校验未通过：' + recOne.error);
-
-        // 后处理（仅该步骤）
-        const resp1 = await fetch(recOne.results[0].url, { cache: 'no-store' });
-        const rawBlob = await resp1.blob();
-        const post = await SuitePostprocess.runStep(step, String(key).trim(), rawBlob, {
-            getHandle: async (decl) => {
-                for (const id of ['assets', 'scripts']) {
-                    const h = await loadSuiteDirHandle(id);
-                    if (!h) continue;
-                    if (decl.type === 'folder') return h;
-                    if (decl.name) { try { return await h.getFileHandle(decl.name); } catch (_) {} }
-                }
-                return null;
-            },
-            transform: async (blob, action, options) => {
-                const bmp = await createImageBitmap(blob);
-                const max = action === 'resizeMax' ? (options.max || 1536) : Math.max(bmp.width, bmp.height);
-                const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
-                const c = document.createElement('canvas');
-                c.width = Math.max(1, Math.round(bmp.width * scale));
-                c.height = Math.max(1, Math.round(bmp.height * scale));
-                c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-                if (bmp.close) bmp.close();
-                return await new Promise(res => c.toBlob(b => res(b), 'image/png'));
-            }
-        });
-        if (!post.ok) throw new Error(`后处理失败：${post.error}`);
-
-        const outHandle = await loadSuiteDirHandle('suiteOut');
-        if (!outHandle) throw new Error('套图输出目录未授权');
-        const perm = await outHandle.queryPermission({ mode: 'readwrite' });
-        if (perm !== 'granted') throw new Error(`输出目录权限不足（${perm}）`);
-        const saveOne = await SuiteCore.saveAll(outHandle, [{ key, blob: post.output }], {
-            fileKey, rowNum: cur.row,
-            decodeSize: async (f) => { const b = await createImageBitmap(f); const s = { width: b.width, height: b.height }; if (b.close) b.close(); return s; }
-        });
-        if (!saveOne.ok) throw new Error(`保存失败：${saveOne.failedKeys.join('/')}`);
-
-        // 只更新该编号（其他四张不动），且先写索引再标记完成
-        const store = SuiteCore.ResultStore();
-        await store.put({
-            fileKey, rowNum: cur.row, key, taskId: taskId, blob: post.output,
-            meta: Object.assign({}, (saveOne.results[0] || {}), { verified: true, postprocess: post.applied || 'none', regeneratedAt: Date.now() })
-        });
-        await suiteSend('suiteProgress', { report: { taskId: taskId, stage: 'saved', results: saveOne.results } });
-        await suiteSend('suiteProgress', { report: { taskId: taskId, final: true, finalStage: 'completed', results: saveOne.results } });
-
-        updateSuiteStatus(`✅ 编号 ${key} 已重生成并替换（其余 4 张未改动）`);
-        showToast(`✅ 编号 ${key} 重生成完成`);
-        await renderSuiteImages(cur);
-        return created.task;
-    } catch (e) {
-        updateSuiteStatus(`❌ 编号 ${key} 重生成失败：${e.message}（原图保留，未清空套图）`);
-        showToast(`❌ 编号 ${key} 重生成失败：${e.message}`);
-        return null;
-    } finally {
-        suiteTaskRunning = false;
-        if (btn) { btn.disabled = false; btn.textContent = '🖼️ 生成套图'; }
-    }
+        const frozen=await readSuiteFreeze(fileKey,rowNum,taskId);
+        if(!frozen)throw new Error('缺少原任务冻结数据，不能用当前表格替代');
+        suiteTaskRunning=true;updateSuiteStatus('正在读取原豆包对话中的已有结果，不会重新生图…');
+        const restored=await suiteSend('suiteRecoverResults',{taskId,fileKey,rowNum,recoveryUrl},60000);
+        if(!restored.ok)throw new Error(restored.error||'恢复失败');
+        await renderSuiteImages(currentProduct);
+    } catch(e){updateSuiteStatus('❌ '+e.message);}finally{suiteTaskRunning=false;}
 }
 
-function renderSuiteSteps() {
-    const box = document.getElementById('stepConfigList');
-    if (!box) return;
-    const steps = getSuiteSteps();
-    if (!Array.isArray(steps) || steps.length === 0) {
-        box.innerHTML = '<div style="font-size:13px;color:rgba(255,255,255,0.5);">尚未配置。点击「↺ 恢复默认」生成 5 步默认配置后编辑保存。</div>';
-        return;
-    }
-    box.innerHTML = steps.map((s, i) => {
-        const key = (s.outputKeys && s.outputKeys[0]) ? (s.outputKeys[0].key || s.outputKeys[0]) : '';
-        return `
-        <div style="background: rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:12px;">
-            <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-                <span style="font-size:12px;color:rgba(255,255,255,0.6);">步骤 ${i + 1}</span>
-                <input value="${escapeHtml(s.name || '')}" data-i="${i}" data-k="name" class="suite-input" placeholder="名称" style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">
-                <input value="${escapeHtml(key)}" data-i="${i}" data-k="outputKey" placeholder="编号" style="width:70px;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">
-                <input value="${escapeHtml(s.model || '5.0')}" data-i="${i}" data-k="model" placeholder="模型" style="width:64px;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">
-                <input value="${escapeHtml(s.ratio || '1:1')}" data-i="${i}" data-k="ratio" placeholder="比例" style="width:64px;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">
-            </div>
-            <textarea data-i="${i}" data-k="prompt" rows="3" class="suite-input" placeholder="提示词（可用 {{字段}} 变量）" style="width:100%;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.14);background:rgba(0,0,0,0.25);color:#fff;font-size:12px;">${escapeHtml(s.prompt || '')}</textarea>
-        </div>`;
-    }).join('');
+// 单张重生成入口：与「生成套图」共用同一条单步骤链路（mode=single-regen，一次请求一张）。
+// 传了编号就重生成该编号；未传则用当前接通的编号。
+async function startSuiteRegenerate(key) {
+    return runSuiteSingleStep(String(key || '').trim() || SUITE_WIRED_STEP_KEY);
 }
 
-function resetSuiteSteps() {
-    const def = SUITE_OUTPUTS.map(([key, name]) => ({
-        name, expectCount: 1, outputKeys: [{ key, postprocess: null }],
-        prompt: `【${name}】基于当前套装参考图生成这一张图片（${key}）。`,
-        model: '5.0', ratio: '1:1',
-        uploads: [{ type: 'current_file', filenames: ['main.jpg', 'white.png', 'black.png', 'gray.png', 'navy.png'] }],
-        mappings: []
-    }));
-    localStorage.setItem('polo_suite_steps_v1', JSON.stringify(def));
-    renderSuiteSteps();
-    showToast('↺ 已生成 5 步默认配置（请按需修改后保存）');
-}
 
-function saveSuiteSteps() {
-    const box = document.getElementById('stepConfigList');
-    if (!box) return;
-    const steps = getSuiteSteps() || SUITE_OUTPUTS.map(([key, name]) => ({ name, outputKeys: [{ key }], prompt: '', model: '5.0', ratio: '1:1', uploads: [], mappings: [] }));
-    box.querySelectorAll('.suite-input').forEach(el => {
-        const i = Number(el.dataset.i); const k = el.dataset.k;
-        if (!steps[i]) return;
-        if (k === 'outputKey') steps[i].outputKeys = [{ key: String(el.value).trim(), postprocess: null }];
-        else steps[i][k] = el.value;
-    });
-    localStorage.setItem('polo_suite_steps_v1', JSON.stringify(steps));
-    const st = document.getElementById('stepConfigStatus');
-    if (st) st.textContent = '✅ 已保存（5 步配置将在点击「生成套图」时合并为一次五图请求）';
-    showToast('💾 自定义步骤已保存');
-}
 
-// ===== 路径配置 =====
-const SUITE_DIRS = [
-    { id: 'suiteOut', label: '套图输出目录', required: true, desc: '生成成功的 5 张套图落盘位置' },
-    { id: 'modelRef', label: '模特参考图目录', required: false, desc: '提供模特/姿势参考图' },
-    { id: 'assets', label: '素材目录', required: false, desc: '额外素材（面料、细节等）' },
-    { id: 'scripts', label: '后处理脚本目录', required: false, desc: '自定义 JS 后处理脚本及资源' }
-];
 
-function getSuiteDirHandles() {
-    try { return JSON.parse(localStorage.getItem('polo_suite_dirs_v1') || '{}'); } catch (_) { return {}; }
-}
+// 仅保留历史套图读取所需的目录句柄读取接口。
 
-function renderPathConfig() {
-    const box = document.getElementById('pathConfigList');
-    if (!box) return;
-    const handles = getSuiteDirHandles();
-    box.innerHTML = SUITE_DIRS.map(d => `
-        <div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px;">
-            <div style="flex:1;">
-                <div style="font-size:13px;color:rgba(255,255,255,0.85);">${d.label}${d.required ? ' <span style="color:#ef4444;font-size:11px;">必需</span>' : ''}</div>
-                <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:2px;">${d.desc}</div>
-                <div id="dir-${d.id}" style="font-size:11px;color:rgba(255,255,255,0.55);margin-top:4px;">${handles[d.id] ? handles[d.id].name : '未授权'}</div>
-            </div>
-            <button class="batch-color-btn" style="padding:6px 14px;font-size:12px;" onclick="pickSuiteDir('${d.id}')">📂 选择目录</button>
-        </div>`).join('');
-    checkPathPermissions();
-}
+
+
 
 // 真实目录授权：只存路径字符串不算获得读写能力，必须持有并复查 FileSystemDirectoryHandle
-async function pickSuiteDir(dirId) {
-    try {
-        if (!window.showDirectoryPicker) { showToast('⚠️ 当前浏览器不支持目录授权（需 Chrome）'); return; }
-        const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        await persistSuiteDirHandle(dirId, handle);
-        showToast(`✅ 已授权：${handle.name}`);
-        renderPathConfig();
-    } catch (e) {
-        if (e && e.name === 'AbortError') return;
-        showToast('❌ 目录授权失败：' + (e && e.message));
-    }
-}
 
 const SUITE_DIR_DB = 'polo_suite_dir_handles';
 
@@ -4696,17 +5224,6 @@ function openSuiteDirDB() {
     });
 }
 
-async function persistSuiteDirHandle(dirId, handle) {
-    const db = await openSuiteDirDB();
-    await new Promise((resolve, reject) => {
-        const tx = db.transaction('handles', 'readwrite');
-        tx.objectStore('handles').put(handle, dirId);
-        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
-    });
-    const meta = getSuiteDirHandles();
-    meta[dirId] = { name: handle.name, at: Date.now() };
-    localStorage.setItem('polo_suite_dirs_v1', JSON.stringify(meta));
-}
 
 async function loadSuiteDirHandle(dirId) {
     try {
@@ -4720,38 +5237,12 @@ async function loadSuiteDirHandle(dirId) {
     } catch (_) { return null; }
 }
 
-async function checkPathPermissions() {
-    const meta = getSuiteDirHandles();
-    const problems = [];
-    for (const d of SUITE_DIRS) {
-        const el = document.getElementById('dir-' + d.id);
-        const rec = meta[d.id];
-        if (!rec) { if (el) el.textContent = '未授权'; if (d.required) problems.push(`${d.label}：未授权`); continue; }
-        const handle = await loadSuiteDirHandle(d.id);
-        if (!handle) { if (el) el.textContent = `${rec.name}｜授权丢失，需重新选择`; problems.push(`${d.label}：授权丢失`); continue; }
-        const perm = await handle.queryPermission({ mode: 'readwrite' });
-        if (perm !== 'granted') {
-            if (el) el.textContent = `${rec.name}｜权限 ${perm}，需重新授权`;
-            problems.push(`${d.label}：权限不足（${perm}）`);
-        } else if (el) el.textContent = `${rec.name}｜✅ 读写已授权`;
-    }
-    const st = document.getElementById('pathConfigStatus');
-    if (st) st.textContent = problems.length ? `⚠️ 存在问题：${problems.join('；')}` : '✅ 所有必需目录已授权，可直接生成';
-    return problems;
-}
 
 function escapeHtml(s) {
     return String(s === undefined || s === null ? '' : s)
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// 切到「路径配置 / 自定义步骤」时渲染面板
-document.addEventListener('click', (e) => {
-    const tab = e.target && e.target.closest && e.target.closest('.tab');
-    if (!tab) return;
-    if (tab.dataset.tab === 'audit') renderPathConfig();
-    if (tab.dataset.tab === 'steps') renderSuiteSteps();
-});
 
 const AUDIT_DATA = {
     blacklist: [],
@@ -5130,7 +5621,7 @@ function groupByRow(issues) {
 window.addEventListener('load', () => {
     initPsDirHandle();
     setupPsEditMessageListener();
-    initColorImgDirInput();
+    
     checkExtension();
     setupExtensionReconnect();
     loadAuditData();
@@ -5253,16 +5744,12 @@ function startBatchColorChange() {
         if (startIdx === -1) startIdx = 0;
     }
     const remainingList = targetList.slice(startIdx);
-    const remainingCount = remainingList.length;
-
-    const ok = confirm(`将从 row${remainingList[0].row} 开始，对 ${remainingCount} 款产品依次执行 AI 换色（从当前款到最后一款）。\n\n每款产品处理完后再处理下一款，处理过程中可随时点"停止"按钮中断。\n\n确定开始？`);
-    if (!ok) return;
-
     beginColorBatch(remainingList, '一键换色');
 }
 
 // 批量换色统一启动入口：一键换色与「指定重生成」共用
-function beginColorBatch(queueList, label) {
+function beginColorBatch(queueList, label, targeted=false) {
+    if(typeof targetedRegenerationRunning!=='undefined'&&targetedRegenerationRunning&&!targeted)return showToast("指定重生成正在执行");
     if (batchColorState && (batchColorState.inFlightRow || batchColorState.pendingAckRow)) {
         showToast('当前款尚未结束，未覆盖原换色任务'); return;
     }
@@ -5508,58 +5995,96 @@ function parseRowNumbers(text) {
     return out;
 }
 
-// 指定重生成：输入行号，只跑这些行（复用一键换色的队列/进度/停止/超时逻辑）
-function startColorChangeForRows() {
-    if (!products || products.length === 0) {
-        showToast('⚠️ 请先上传 Excel');
-        return;
-    }
-    if (batchColorState && batchColorState.running) {
-        showToast('⚠️ 换色任务正在进行中');
-        return;
-    }
-    if (!extensionInstalled) {
-        showToast('⚠️ 请确认扩展已安装');
-        return;
-    }
-
-    const lastInput = localStorage.getItem('polo_color_rows_last') || '';
-    const input = prompt(
-        '输入要重新生成的行号\n（空格 / 逗号 / 换行分隔，支持 315-357 区间）\n\n例：32 42 44 48 49 52',
-        lastInput
-    );
-    if (input === null) return;
-
-    const rows = parseRowNumbers(input);
-    if (rows.length === 0) {
-        showToast('⚠️ 没解析到有效行号');
-        return;
-    }
-
-    const byRow = new Map(products.map(p => [p.row, p]));
-    const queue = [];
-    const missing = [];
-    for (const r of rows) {
-        const p = byRow.get(r);
-        if (p) queue.push(p); else missing.push(r);
-    }
-    if (queue.length === 0) {
-        showToast(`⚠️ 这些行号都不在当前 Excel：${missing.slice(0, 8).join(' ')}${missing.length > 8 ? ' ...' : ''}`);
-        return;
-    }
-
-    // 确认框逐条显示身份（行号 · 序号 · 标题），防止误填「序号」命中错款
-    const previewLines = buildRowPreviewLines(queue);
-    const missMsg = missing.length
-        ? `\n\n⚠️ 不在当前 Excel 中，将跳过 ${missing.length} 个：\n${missing.slice(0, 30).join(' ')}${missing.length > 30 ? ' ...' : ''}`
-        : '';
-    const ok = confirm(
-        `将对指定的 ${queue.length} 款产品依次执行 AI 换色：\n\n${previewLines.join('\n')}${missMsg}\n\n确定开始？`
-    );
-    if (!ok) return;
-
-    localStorage.setItem('polo_color_rows_last', input.trim());
-    beginColorBatch(queue, '指定重生成');
+// 指定重生成与既有换色/套图管线串行协作；失败不自动重发。
+function openTargetedRegenerationPanel() {
+    const existing=document.getElementById('targetedRegenerationPanel');
+    if(existing){existing.querySelector('input').focus();return Promise.resolve(null);}
+    return new Promise(resolve=>{
+        const priorFocus=document.activeElement;
+        const panel=document.createElement('div');
+        panel.id='targetedRegenerationPanel';
+        panel.className='targeted-panel-backdrop';
+        panel.innerHTML=`<form class="targeted-panel" role="dialog" aria-modal="true" aria-labelledby="targetedPanelTitle">
+          <header><h3 id="targetedPanelTitle">指定重生成</h3><button type="button" data-close aria-label="关闭">×</button></header>
+          <label for="targetedRowsInput">行号与步骤</label>
+          <p id="targetedRowsHelp">0 = 颜色图；1、2、3… = 当前类目配置中的步骤顺序。只填行号则全部重新生成。</p>
+          <input id="targetedRowsInput" autocomplete="off" placeholder="例如：4(0,3) 7(2) 9" aria-describedby="targetedRowsHelp" />
+          <p class="targeted-example">支持多行和范围，例如 4-6(0,3)</p>
+          <div class="targeted-plan" role="status" aria-live="polite"></div>
+          <footer><button type="button" data-close>取消</button><button type="submit" class="targeted-submit" disabled>开始生成</button></footer>
+        </form>`;
+        document.body.append(panel);
+        const field=panel.querySelector('input'), plan=panel.querySelector('.targeted-plan'), submit=panel.querySelector('[type=submit]');
+        field.value=localStorage.getItem('polo_color_rows_last')||'';
+        let jobs=null;
+        const refresh=()=>{
+            jobs=null;submit.disabled=true;plan.replaceChildren();
+            if(!field.value.trim())return;
+            try{
+                jobs=TargetedRegeneration.plan(TargetedRegeneration.parse(field.value),products,p=>suiteFrozenSteps(ExcelRow.build(excelRowSpec(p.row))));
+                for(const job of jobs.slice(0,20)){
+                    const line=document.createElement('div');
+                    line.textContent=buildRowPreviewLines([job.product])[0]+'：'+[job.color?'颜色图':'',...job.labels].filter(Boolean).join('、');
+                    plan.append(line);
+                }
+                const note=document.createElement('p');note.textContent='共 '+jobs.length+' 行，按顺序执行；失败或暂停后停止后续任务。';plan.append(note);
+                submit.disabled=false;
+            }catch(e){plan.textContent=e.message;}
+        };
+        const close=value=>{panel.remove();priorFocus?.focus();resolve(value);};
+        panel.querySelectorAll('[data-close]').forEach(button=>button.onclick=()=>close(null));
+        field.oninput=refresh;
+        panel.querySelector('form').onsubmit=e=>{e.preventDefault();refresh();if(jobs)close({input:field.value,jobs});};
+        panel.onkeydown=e=>{
+            if(e.key==='Escape'){e.preventDefault();close(null);}
+            if(e.key==='Tab'){
+                const controls=[...panel.querySelectorAll('button:not(:disabled),input')];
+                if(e.shiftKey&&document.activeElement===controls[0]){e.preventDefault();controls.at(-1).focus();}
+                else if(!e.shiftKey&&document.activeElement===controls.at(-1)){e.preventDefault();controls[0].focus();}
+            }
+        };
+        refresh();field.focus();
+    });
+}
+var targetedRegenerationRunning = false;
+async function startColorChangeForRows() {
+    if (!products?.length) return showToast('⚠️ 请先上传 Excel');
+    if (targetedRegenerationRunning || suiteTaskRunning || batchColorState?.running || batchColorState?.inFlightRow || batchColorState?.pendingAckRow) return showToast('⚠️ 请先完成或暂停当前任务');
+    const previous=readSuiteAutoState();
+    if(previous&&previous.phase!=='completed'){renderSuiteAutoControls();return showToast('已有未完成套图任务，请点击顶部「查看任务」继续');}
+    if (!extensionInstalled) return showToast('⚠️ 请确认扩展已安装');
+    const selection=await openTargetedRegenerationPanel();
+    if(!selection)return;
+    const {input,jobs}=selection;
+    localStorage.setItem('polo_color_rows_last',input.trim());
+    const fileKey=currentFileKey();targetedRegenerationRunning=true;
+    try{
+        await TargetedRegeneration.run(jobs,{
+            check(){if(currentFileKey()!==fileKey)throw Error('Excel 已切换，已停止后续任务');},
+            select(product){selectProduct(products.indexOf(product));},
+            async color(product){
+                beginColorBatch([product],'指定重生成',true);
+                const state=batchColorState;
+                if(!state?.running)throw Error('颜色图任务未启动');
+                while(state.running){
+                    if(currentFileKey()!==fileKey||batchColorState!==state)throw Error('任务已切换，已停止后续任务');
+                    await new Promise(resolve=>setTimeout(resolve,500));
+                }
+                if(state.successCount!==1||state.failCount||state.inFlightRow||state.pendingAckRow||state.stopRequested||state.pausedReason)throw Error('颜色图未完成或已暂停，已停止后续任务');
+            },
+            async suite(keys,product){
+                const previousJobId=readSuiteAutoState()?.jobId;
+                selectProduct(products.indexOf(product));
+                // 111/444 只重跑主图后处理，222/333/666 才重新生成；分流由执行层按步骤 imageSource 决定。
+                await runSuiteFiveJob({keys,resume:false,targeted:true});
+                const state=readSuiteAutoState();
+                if(!state||state.fileKey!==fileKey||state.rowNum!==product.row||state.phase!=='completed')throw Error('步骤图未完成或已暂停，已停止后续任务');
+                if(state.jobId===previousJobId)throw Error('步骤图任务未执行，已停止后续任务');
+            }
+        });
+        showToast('✅ 指定重生成全部完成');
+    }catch(e){showToast('⚠️ '+e.message);}
+    finally{targetedRegenerationRunning=false;}
 }
 
 // 轮询兜底：网页通过消息查询扩展存储；不依赖网页中不存在的 chrome.storage API
@@ -5883,11 +6408,28 @@ function openPhotopea(rowNum) {
     const isFileProtocol = location.protocol === 'file:';
 
     const tryFsAccessWay = async (fileName = imgFileName) => {
+        try {
+            const status=await psDirectoryMessage({action:'psDirectoryStatus'});
+            if(status.configured && status.permission === 'granted'){
+                let r=await psDirectoryMessage({action:'readPsImage',fileName});
+                if(!r.ok && !/权限|授权/.test(r.error || '') && fileName===imgFileName){fileName=pngFileName;r=await psDirectoryMessage({action:'readPsImage',fileName});}
+                if(!r.ok)throw new Error(r.error);
+                const reader=new FileReader();reader.onload=()=>openPhotopeaWithExtension(reader.result,fileName,rowNum);
+                reader.readAsDataURL(new Blob([new Uint8Array(r.data)],{type:r.type}));return;
+            }
+        }catch(e){
+            if (!psEditDirHandle) {showToast('❌ PS图片读取失败: '+e.message);return;}
+        }
+
         if (!psEditDirHandle) {
-            showToast('❌ 请先授权 extracted_images 目录');
+            showToast('❌ 请在扩展中展开产品原图目录，点击保存确认权限');
             return;
         }
         try {
+            // 在PS编辑的点击流程内恢复助手页面自己的授权，不再依赖短命扩展弹窗。
+            let permission = await psEditDirHandle.queryPermission({mode:'readwrite'});
+            if (permission !== 'granted') permission = await psEditDirHandle.requestPermission({mode:'readwrite'});
+            if (permission !== 'granted') throw new Error('尚未允许助手读取和保存原图');
             let fileHandle;
             try {
                 fileHandle = await psEditDirHandle.getFileHandle(fileName);
@@ -5900,6 +6442,7 @@ function openPhotopea(rowNum) {
                 }
             }
             const file = await fileHandle.getFile();
+            psPageSaveRows.add(rowNum);
             const reader = new FileReader();
             reader.onload = () => {
                 openPhotopeaWithExtension(reader.result, fileName, rowNum);
@@ -5979,18 +6522,14 @@ function openPhotopeaWithExtension(dataUrl, imgFileName, rowNum) {
     try {
         chrome.runtime.sendMessage(EXTENSION_ID, {
             action: 'startPsEdit',
-            task: { imageDataUrl: dataUrl, fileName: imgFileName, rowNum }
+            task: { imageDataUrl: dataUrl, fileName: imgFileName, rowNum, saveViaAssistant:psPageSaveRows.has(rowNum) }
         }, (response) => {
             if (chrome.runtime.lastError) {
                 showToast('⚠️ 请确认扩展已安装');
                 return;
             }
             if (response && response.ok) {
-                if (!psEditDirHandle) {
-                    showToast('⚠️ 请先授权 extracted_images 目录，否则无法保存');
-                } else {
-                    showToast('✅ 已打开 Photopea，编辑完点 File → Save 保存');
-                }
+                showToast('✅ 已打开 Photopea，编辑完点 File → Save 保存');
                 startPsEditPolling(rowNum);
             } else {
                 showToast('❌ 启动PS编辑失败: ' + (response?.error || '未知错误'));
@@ -6029,9 +6568,7 @@ function startPsEditPolling(rowNum) {
                 const psResult = response?.result;
                 console.log('[PS轮询] 检查结果:', psResult ? `有数据 rowNum=${psResult.rowNum}, timestamp=${psResult.timestamp}` : '无数据', '当前 rowNum:', rowNum, 'lastTimestamp:', lastPsEditTimestamp);
                 if (psResult && psResult.timestamp > lastPsEditTimestamp && psResult.rowNum === rowNum) {
-                    lastPsEditTimestamp = psResult.timestamp;
                     handlePsEditComplete(psResult);
-                    chrome.runtime.sendMessage(EXTENSION_ID, { action: 'clearPsEditResult' }, () => {});
                     return;
                 }
             });
@@ -6118,15 +6655,18 @@ function loadColorImagesFromExtension(rowNum) {
             };
             img.onerror = () => {
                 if (!stillCurrent()) return;
-                if (!extensionInstalled) return;
+                if (!extensionInstalled) { clearColorImage(rowNum, color); return; }
                 try {
                     chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
                         if (!stillCurrent()) return;
                         if (resp && resp.ok && resp.dataUrl) {
                             setColorImage(rowNum, color, resp.dataUrl);
+                        } else {
+                            // 磁盘与缓存都没有 → 清 DOM 残留，不显示旧图
+                            clearColorImage(rowNum, color);
                         }
                     });
-                } catch (e) {}
+                } catch (e) { clearColorImage(rowNum, color); }
             };
             img.src = localPath;
         } else if (extensionInstalled) {
@@ -6135,15 +6675,37 @@ function loadColorImagesFromExtension(rowNum) {
                     if (!stillCurrent()) return;
                     if (resp && resp.ok && resp.dataUrl) {
                         setColorImage(rowNum, color, resp.dataUrl);
+                    } else {
+                        clearColorImage(rowNum, color);
                     }
                 });
-            } catch (e) {}
+            } catch (e) { clearColorImage(rowNum, color); }
+        } else {
+            clearColorImage(rowNum, color);
         }
     });
 }
 
-function setColorImage(rowNum, color, dataUrl) {
+// 删除后清 DOM 残留：移除图片、恢复 missing 样式、移除该产品的颜色图角标
+function clearColorImage(rowNum, color) {
     if (!currentProduct || currentProduct.row !== rowNum) return;
+    const grid = document.getElementById('colorImagesGrid');
+    if (!grid) return;
+    const item = grid.querySelector(`[data-color="${color}"]`);
+    if (!item) return;
+    const img = item.querySelector('img');
+    if (img) img.remove();
+    item.classList.add('missing');
+    // 任一缺失即移除角标（不只是不新增，已有角标也要移除）
+    const productIdx = products.findIndex(p => p.row === rowNum);
+    if (productIdx !== -1) {
+        const card = document.querySelector(`.product-card[data-idx="${productIdx}"]`);
+        const badge = card && card.querySelector('.color-generated-badge');
+        if (badge) badge.remove();
+    }
+}
+
+function setColorImage(rowNum, color, dataUrl) {    if (!currentProduct || currentProduct.row !== rowNum) return;
     const grid = document.getElementById('colorImagesGrid');
     if (!grid) return;
     const item = grid.querySelector(`[data-color="${color}"]`);
@@ -6178,6 +6740,7 @@ function setColorImage(rowNum, color, dataUrl) {
 }
 
 function showToast(msg) {
+    if(window.UiPolish)return UiPolish.toast(msg);
     const toast = document.getElementById('toast');
     toast.textContent = msg;
     toast.classList.add('show');
@@ -6621,6 +7184,7 @@ function startUploadPolling() {
                 if (queriedFile !== currentFileKey()) return;
                 if (!chrome.runtime.lastError && response?.rows) {
                     if (response.fileKey !== undefined && response.fileKey !== queriedFile) return;
+                    uploadedRowsFileKey = queriedFile;
                     uploadedRows = response.rows;
                     legacyRows = response.legacy || {};
                     const productCards = document.getElementById('productCards');
@@ -6653,7 +7217,7 @@ function startUploadPolling() {
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeImageModal(); });
 
 function navigateTab(direction) {
-    const tabOrder = ['basic', 'highlights', 'faq', 'audit'];
+    const tabOrder = ['basic', 'highlights', 'faq'];
     const currentIdx = tabOrder.indexOf(currentActiveTab);
     if (currentIdx === -1) return;
     let newIdx;
@@ -6686,58 +7250,19 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-// FPS 监测器
-(function() {
-    const fpsEl = document.createElement('div');
-    fpsEl.className = 'fps-monitor';
-    fpsEl.textContent = 'FPS: --';
-    fpsEl.title = '点击切换显示/隐藏详细信息';
-    document.body.appendChild(fpsEl);
-
-    let frameCount = 0;
-    let lastTime = performance.now();
-    let fps = 0;
-    let minFps = 60;
-    let showDetail = false;
-
-    function update() {
-        frameCount++;
-        const now = performance.now();
-        const elapsed = now - lastTime;
-
-        if (elapsed >= 500) {
-            fps = Math.round((frameCount * 1000) / elapsed);
-            if (fps < minFps) minFps = fps;
-            
-            fpsEl.classList.remove('low', 'critical');
-            if (fps < 30) {
-                fpsEl.classList.add('critical');
-            } else if (fps < 50) {
-                fpsEl.classList.add('low');
-            }
-
-            if (showDetail) {
-                fpsEl.textContent = `FPS: ${fps} (min: ${minFps})`;
-            } else {
-                fpsEl.textContent = `${fps} FPS`;
-            }
-
-            frameCount = 0;
-            lastTime = now;
-        }
-
-        requestAnimationFrame(update);
-    }
-
-    fpsEl.addEventListener('click', () => {
-        showDetail = !showDetail;
-        if (showDetail) {
-            minFps = 60;
-        }
-    });
-
-    requestAnimationFrame(update);
-})();
 </script>
+<script src="progress-panel-resize.js"></script>
+<script src="script-contract-parser.js"></script>
+<script src="category-field-rules.js"></script>
+<script src="excel-row.js"></script>
+<script src="custom-js-data.js"></script>
+<script src="publication-image-source.js"></script>
+<script src="custom-step-defaults.js"></script>
+<script src="custom-step-builtin-scripts.js"></script>
+<script src="custom-step-config.js"></script>
+<script src="targeted-regeneration.js"></script>
+<script src="ui-polish.js"></script>
+<script src="suite-batch.js"></script>
+<script src="unified-task-progress.js"></script>
 </body>
 </html>
