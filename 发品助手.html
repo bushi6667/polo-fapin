@@ -1419,6 +1419,7 @@ body::after {
     position: relative;
     z-index: 0;
 }
+.suite-grid { grid-template-columns: repeat(5, 1fr); }
 .color-img-item {
     position: relative;
     background: rgba(255, 255, 255, 0.08);
@@ -3039,15 +3040,15 @@ function renderDetail() {
                     <span id="suiteAutoProgress" role="status" aria-live="polite"></span>
                     <button id="suiteAutoToggle" class="batch-color-btn" onclick="toggleSuiteAuto()">⏸ 暂停</button>
                 </div>
-                <div id="suiteImagesArea" style="margin: 14px 0 10px; display: none;">
-                    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
-                        <div class="img-label" style="justify-content: flex-start; margin-bottom: 0;">
-                            <span>套图（5 张）</span>
-                            <span id="suiteStatusText" style="margin-left:8px; font-size:11px; color: rgba(255,255,255,0.55);"></span>
-                        </div>
-
+                <div class="color-images" id="suiteImagesArea" style="display: none; margin: 14px 0 10px;">
+                    <div class="color-images-label">
+                        <span>套图（5 张）</span>
+                        <span class="color-hint" id="suiteStatusText"></span>
                     </div>
-                    <div id="suiteImagesGrid" class="color-images-grid"></div>
+                    <div class="progress-bar" id="suiteProgressWrap" style="margin-bottom: 12px; display: none;">
+                        <div class="progress-fill" id="suiteFill" style="width: 0%;"></div>
+                    </div>
+                    <div id="suiteImagesGrid" class="color-images-grid suite-grid"></div>
                 </div>
                 <button class="copy-all-btn" onclick="copyData()">📋 复制产品数据</button>
                 
@@ -4068,13 +4069,19 @@ function updateSuiteStatus(text) {
     const grid = document.getElementById('suiteImagesGrid');
     const hasCells = !!(grid && grid.children && grid.children.length);
     if (area) area.style.display = (hasCells || suiteTaskRunning) ? 'block' : 'none';
+    const pw = document.getElementById('suiteProgressWrap');
+    if (pw) pw.style.display = suiteTaskRunning ? 'block' : 'none';
 }
 
 // 任务收尾后：没有任何图片格子就把整个套图区隐藏（标题/状态一并消失）
 function hideSuiteAreaIfEmpty() {
     const grid = document.getElementById('suiteImagesGrid');
     const area = document.getElementById('suiteImagesArea');
-    if (area && grid && !(grid.children && grid.children.length)) area.style.display = 'none';
+    if (area && grid && !(grid.children && grid.children.length)) {
+        area.style.display = 'none';
+        const pw = document.getElementById('suiteProgressWrap');
+        if (pw) pw.style.display = 'none';
+    }
 }
 
 // ===== 套图素材预检：发往豆包前必须全部通过（有路径 ≠ 有图片） =====
@@ -4575,6 +4582,16 @@ async function syncSuiteBadge(fileKey, rowNum) {
 }
 
 function suiteSetProgress({ jobId, fileKey, rowNum, phase, done, currentKey, paused }) {
+    // 与颜色图一致的进度条（done/5）
+    try {
+        const wrap = document.getElementById('suiteProgressWrap');
+        const fill = document.getElementById('suiteFill');
+        if (wrap && fill) {
+            wrap.style.display = 'block';
+            const pct = Math.max(0, Math.min(100, Math.round(((done || 0) / SUITE_FIVE_TOTAL) * 100)));
+            fill.style.width = pct + '%';
+        }
+    } catch (_) {}
     saveSuiteAutoState({
         taskId: jobId, jobId, fileKey, rowNum,
         phase: phase || 'generating', done: done || 0, total: SUITE_FIVE_TOTAL,
@@ -4823,12 +4840,14 @@ function renderSuitePendingNumbering() {
     const { candidates } = suitePendingNumbering;
     const opts = candidates.map((c, i) => `<option value="${i}">候选 ${i + 1}</option>`).join('');
     grid.innerHTML = candidates.map((c, i) => `
-        <div class="color-img-item" style="text-align:center;">
-            <div class="img-label" style="justify-content:center;"><span>${c.key}</span></div>
-            <img src="${c.url || ''}" style="width:100%;border-radius:8px;" onclick="openImageModal(this.src)">
-            <div style="font-size:10px;color:#ffb020;margin-top:4px;">候选顺序 ${i + 1}（未确认）</div>
-            <select id="suiteMap_${c.key}" style="margin-top:4px;width:100%;font-size:11px;background:rgba(0,0,0,0.3);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:6px;">${opts}</select>
+        <div class="color-img-item">
+            <img src="${c.url || ''}" style="cursor:zoom-in;" onclick="openImageModal(this.src)">
+            <span class="color-name">${c.key} · 候选 ${i + 1}（未确认）</span>
         </div>`).join('') + `
+        <div style="grid-column:1/-1;display:flex;gap:8px;justify-content:center;align-items:center;flex-wrap:wrap;margin-top:12px;">
+            ${candidates.map(c => `<label style="font-size:11px;color:rgba(255,255,255,0.6);display:flex;gap:4px;align-items:center;">${c.key}
+                <select id="suiteMap_${c.key}" style="font-size:11px;background:rgba(0,0,0,0.3);color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:6px;">${opts}</select></label>`).join('')}
+        </div>
         <div style="grid-column:1/-1;display:flex;gap:8px;justify-content:center;margin-top:8px;">
             <button class="batch-color-btn" style="padding:6px 16px;" onclick="confirmSuiteNumbering()">✅ 确认编号并继续（后处理→保存→完成）</button>
         </div>`;
@@ -5197,9 +5216,9 @@ async function renderSuiteImages(product) {
         const diskBad = check && ['missing', 'corrupt', 'replaced', 'error'].includes(check.status);
         // 没有可显示的图（未生成 / 磁盘缺失等）→ 该项不渲染，不占位置
         if (!(url && !diskBad)) return '';
-        return `<div class="color-img-item" style="text-align:center;">
-            <div class="img-label" style="justify-content:center;"><span>${key}</span></div>
-            <img src="${url}" alt="${escapeHtml(key)} 套图" style="width:100%;border-radius:8px;cursor:zoom-in;" onclick="openImageModal(this.src)">
+        return `<div class="color-img-item">
+            <img src="${url}" alt="${escapeHtml(key)} 套图" style="cursor:zoom-in;" onclick="openImageModal(this.src)">
+            <span class="color-name">${key}</span>
         </div>`;
     }).filter(Boolean);
     grid.innerHTML = cells.join('');

@@ -296,7 +296,7 @@ function seedPending(taskId, rowNum = 7, fileKey = 'test.xlsx') {
     /* ---------- (C) 渲染：磁盘核验 / 缺失 / 无权限（真实路径，非字符串匹配） ---------- */
     await browser.renderSuiteImages(browser.currentProduct);
     assert(!node('suiteImagesGrid').innerHTML.includes('suite-image-status'),'cards omit internal disk diagnostics');
-    for(const k of keys)assert(node('suiteImagesGrid').innerHTML.includes('<span>'+k+'</span>'),'all five still rendered');
+    for(const k of keys)assert(node('suiteImagesGrid').innerHTML.includes('class="color-name">'+k+'<'),'all five still rendered（底部编号条与颜色图同款）');
     const suiteDirC = dir.subdirs.get('test.xlsx/row7');
     const firstSuiteFile = saved[0].meta.filename;
     if (suiteDirC && suiteDirC.has(firstSuiteFile)) suiteDirC.delete(firstSuiteFile);
