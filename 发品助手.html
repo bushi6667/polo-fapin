@@ -6714,7 +6714,7 @@ function loadColorImagesFromExtension(rowNum) {
                             clearColorImage(rowNum, color);
                             // 只有「令牌目录」才有授权概念；路径/默认模式静默清空（探测本身就是磁盘真相）
                             if (__mode === 'token' && ((resp && resp.fromDisk === false) || (resp && !resp.ok && /授权|permission|authoriz|denied/i.test(String(resp.error || ''))))) {
-                                noteColorDirUnauthorized();
+                                noteColorDirUnauthorized(resp && resp.error);
                             }
                         }
                     });
@@ -6733,10 +6733,11 @@ function loadColorImagesFromExtension(rowNum) {
                     //（通常是目录授权失效），此时清空并提示重新授权，而不是继续显示。
                     if (resp && resp.ok && resp.dataUrl && resp.fromDisk === true) {
                         setColorImage(rowNum, color, resp.dataUrl);
+                        clearColorDirFixButton();
                     } else {
                         clearColorImage(rowNum, color);
                         if (__mode === 'token' && ((resp && resp.fromDisk === false) || (resp && !resp.ok && /授权|permission|authoriz|denied/i.test(String(resp.error || ''))))) {
-                            noteColorDirUnauthorized();
+                            noteColorDirUnauthorized(resp && resp.error);
                         }
                     }
                 });
@@ -6750,10 +6751,40 @@ function loadColorImagesFromExtension(rowNum) {
 let colorDirUnauthorizedNoted = false;
 let colorLogStamp = '';   // 诊断日志限流（同一行/同一模式只打一次）
 // 目录授权失效时只提示一次：说明为什么之前能看到的图现在不显示了（不是误判为删除）
-function noteColorDirUnauthorized() {
-    if (typeof colorDirUnauthorizedNoted !== 'undefined' && colorDirUnauthorizedNoted) return;
-    colorDirUnauthorizedNoted = true;
-    showToast('⚠️ 颜色图目录授权已失效：未核验的缓存图不再显示，请在扩展里重新授权颜色图目录');
+function noteColorDirUnauthorized(err) {
+    const msg = String(err || '');
+    const recordLost = /授权不存在|重新选择目录/.test(msg);
+    if (!(typeof colorDirUnauthorizedNoted !== 'undefined' && colorDirUnauthorizedNoted)) {
+        colorDirUnauthorizedNoted = true;
+        showToast(recordLost
+            ? '⚠️ 颜色图目录记录已失效：点击颜色图右侧「🔐 重新选择目录」重新选一次即可'
+            : '⚠️ 颜色图目录授权已失效：点击颜色图右侧「🔐 重新授权」即可');
+    }
+    showColorDirFixButton(recordLost);
+}
+
+// 颜色图面板右上角给一个一键入口：Chrome 的文件系统授权必须由用户手势触发，页面无法直接申请
+function showColorDirFixButton(recordLost) {
+    const label = document.querySelector('#colorImagesSection .color-images-label');
+    if (!label || label.querySelector('.color-dir-fix')) return;
+    const b = document.createElement('button');
+    b.className = 'color-dir-fix';
+    b.textContent = recordLost ? '🔐 重新选择目录' : '🔐 重新授权';
+    b.style.cssText = 'margin-left:auto;padding:2px 8px;font-size:11px;border-radius:10px;border:1px solid rgba(255,255,255,0.22);background:rgba(255,255,255,0.06);color:#ffb020;cursor:pointer;';
+    b.onclick = () => {
+        try {
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'openExtensionPopup' }, (r) => {
+                if (chrome.runtime.lastError || !r || !r.ok) showToast('⚠️ 请点击浏览器工具栏里的扩展图标，重新选择颜色图目录');
+            });
+        } catch (_) { showToast('⚠️ 请点击浏览器工具栏里的扩展图标，重新选择颜色图目录'); }
+    };
+    label.appendChild(b);
+}
+
+// 授权恢复后移除「重新授权」按钮
+function clearColorDirFixButton() {
+    const b = document.querySelector('#colorImagesSection .color-dir-fix');
+    if (b) b.remove();
 }
 
 // 删除后清 DOM 残留：移除图片、恢复 missing 样式、移除该产品的颜色图角标

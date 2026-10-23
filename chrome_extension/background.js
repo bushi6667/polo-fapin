@@ -1937,6 +1937,16 @@ async function handleSharedAction(request, sendResponse, sender) {
         })();
         return true;
     }
+    // 打开扩展弹窗（用于重新选择/授权颜色图目录：FSA 授权必须有用户手势，页面无法直接请求）
+    if (request.action === 'openExtensionPopup') {
+        try {
+            chrome.tabs.create({ url: chrome.runtime.getURL('popup.html') }, () => {
+                if (chrome.runtime.lastError) { sendResponse({ ok: false, error: chrome.runtime.lastError.message }); return; }
+                sendResponse({ ok: true });
+            });
+        } catch (e) { sendResponse({ ok: false, error: e.message }); }
+        return true;
+    }
     // 兼容尚未刷新的助手页：内存保护已按用户要求移除，不发起监测请求。
     if (request.action === 'getMemoryGate') {        sendResponse({ ok: true, allowed: true, disabled: true, reasons: [], reasonText: '' });
         return true;
@@ -2669,7 +2679,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun'];
+    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;

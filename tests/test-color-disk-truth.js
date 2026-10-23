@@ -100,7 +100,9 @@ function makeEnv({ mode, localPath, resp }) {
         extractFn('loadColorImagesFromExtension'),
         extractFn('clearColorImage'),
         extractFn('setColorImage'),
-        extractFn('noteColorDirUnauthorized')
+        extractFn('noteColorDirUnauthorized'),
+        extractFn('showColorDirFixButton'),
+        extractFn('clearColorDirFixButton')
     ].join('\n\n'), cx, { filename: 'page:color' });
     return { cx, grid, toasts, sent, sandbox };
 }
