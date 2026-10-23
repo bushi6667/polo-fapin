@@ -5193,7 +5193,7 @@ async function renderSuiteImages(product) {
 
     const st = document.getElementById('suiteStatusText');
     if (st) st.textContent = t ? `任务 ${t.taskId}｜阶段 ${t.stage}${t.error ? '｜' + t.error : ''}` : `已保存 ${recs.length} 张`;
-    if(t&&['interrupted','failed'].includes(t.stage)&&t.stageAt?.sent&&!t.cancelled)grid.insertAdjacentHTML('beforeend',`<div style="grid-column:1/-1;display:flex;justify-content:center;margin-top:8px;"><button class="batch-color-btn" style="padding:6px 16px;" onclick="recoverSuiteExistingResults('${t.taskId}')">♻️ 恢复已有结果（不重新生成）</button></div>`);
+    // 「恢复已有结果」按钮已按用户要求移除：结果缺失时直接重新生成即可
 }
 
 async function recoverSuiteExistingResults(taskId,recoveryUrl) {
