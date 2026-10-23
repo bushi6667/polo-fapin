@@ -132,7 +132,8 @@ async function makeEnv(opts = {}) {
     vm.runInContext([
         extractFn('renderSuiteImages'),
         extractFn('clearColorImage'),
-        extractFn('setColorImage')
+        extractFn('setColorImage'),
+        extractFn('updateSuiteStatus')
     ].join('\n\n'), cx, { filename: 'page:suite-delete' });
     return { ctx: cx, dom, colorItems, suiteSendLog, recs };
 }
@@ -183,7 +184,32 @@ function makeFakeIDB(initial) {
         ok(!/文件缺失或已移动/.test(html), '不显示缺失文案');
     }
 
+    // ---------- ④ 完全无结果时整个套图区隐藏（不占位置） ----------
+    console.log('\n【④】无任务且无结果记录 → 整个套图区隐藏');
+    {
+        const env = await makeEnv({ suiteRecs: [] });
+        await vm.runInContext('renderSuiteImages(products[0])', env.ctx);
+        await new Promise(r => setTimeout(r, 60));
+        ok(env.dom.byId.suiteImagesArea.style.display === 'none', '空态时 area 隐藏（display:none）');
+    }
+
     // ---------- ② 颜色图缺失 → 清 DOM + 移除角标 ----------
+    // ---------- ⑤ 跨产品状态更新不得唤醒当前空态套图区 ----------
+    console.log('\n【⑤】updateSuiteStatus 跨产品门控');
+    {
+        const env = await makeEnv({ suiteRecs: [] });
+        await vm.runInContext('renderSuiteImages(products[0])', env.ctx);
+        await new Promise(r => setTimeout(r, 40));
+        env.ctx.suiteStatusOwner = 'A__::9';
+        await vm.runInContext('updateSuiteStatus("其它行任务状态")', env.ctx);
+        ok(env.dom.byId.suiteImagesArea.style.display === 'none', '跨产品任务状态不弹出空态区（仍 display:none）');
+        ok(env.dom.byId.suiteStatusText.textContent !== '其它行任务状态', '跨产品状态文本不覆盖当前产品');
+        env.ctx.suiteStatusOwner = 'A__::412';
+        await vm.runInContext('updateSuiteStatus("本行任务状态")', env.ctx);
+        ok(env.dom.byId.suiteImagesArea.style.display === 'block', '本行任务状态正常显示区域');
+        ok(env.dom.byId.suiteStatusText.textContent === '本行任务状态', '本行状态文本正常写入');
+    }
+
     console.log('\n【②】磁盘 missing 时颜色图报缺失且清 DOM');
     {
         const env = await makeEnv();

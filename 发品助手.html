@@ -3879,6 +3879,9 @@ const SUITE_OUTPUTS = [['111', '卖点图'], ['222', '袖口图'], ['333', '面�
 
 // 防重复点击：同一时间只允许一个套图任务在预检/创建中
 let suiteTaskRunning = false;
+// 状态栏归属：运行中任务的身份（fileKey::rowNum）。跨产品时任务状态不得唤醒
+// 当前产品的空态套图区（updateSuiteStatus 据此门控显示）。
+let suiteStatusOwner = null;
 const suiteTaskIdentities = new Map();
 let suitePendingNumbering = null;   // 持久化的结果与处理缓存：整套自动继续，单图仍可手动确认
 // 自动流程只保存任务身份与阶段；原图、处理结果和冻结行仍由既有 IndexedDB 保存。
@@ -4054,6 +4057,10 @@ function suiteFrozenSteps(snapshot) {
 }
 
 function updateSuiteStatus(text) {
+    // 跨产品门控：运行中任务属于其它行时，不更新/不弹出当前产品的套图区
+    const owner = (typeof suiteStatusOwner !== 'undefined') ? suiteStatusOwner : null;
+    const cur = currentFileKey() + '::' + ((currentProduct && currentProduct.row) || '');
+    if (owner && owner !== cur) return;
     const el = document.getElementById('suiteStatusText');
     if (el) el.textContent = text || '';
     const area = document.getElementById('suiteImagesArea');
@@ -4306,6 +4313,7 @@ async function runSuiteJob(keys, {automatic=false,targeted=false} = {}) {
     const product = currentProduct;
     if (!product || !product.row) { showToast('❌ 请先导入 Excel 并选择一个产品'); return null; }
     if(!Array.isArray(keys)||![1,5].includes(keys.length)||new Set(keys).size!==keys.length||keys.some(k=>!['111','444','222','333','666'].includes(k))){showToast('❌ 输出编号配置无效');return null;}
+    suiteStatusOwner = currentFileKey() + '::' + product.row;
     const outKey=keys[0],expectCount=keys.length;
     const hit = SUITE_OUTPUTS.find(o => o[0] === outKey);
     const stepName = expectCount===5?'五张产品套图':(hit ? hit[1] : outKey);
@@ -4414,6 +4422,7 @@ async function runSuiteJob(keys, {automatic=false,targeted=false} = {}) {
     } finally {
         const auto=readSuiteAutoState();
         if(auto&&auto.phase!=='completed')saveSuiteAutoState({...auto,paused:true});
+        suiteStatusOwner = null;
         suiteTaskRunning = false;renderSuiteAutoControls();
         if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
     }
@@ -4571,6 +4580,7 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false } = {}) 
     if (!product || !product.row) { showToast('❌ 请先导入 Excel 并选择一个产品'); return null; }
     const fileKey = currentFileKey();
     const rowNum = product.row;
+    suiteStatusOwner = fileKey + '::' + rowNum;
     const btn = document.getElementById('suiteGenBtn');
     suiteTaskRunning = true;
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 预检中...'; }
@@ -4785,6 +4795,7 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false } = {}) 
         showToast(`❌ ${e.message}`);
         return null;
     } finally {
+        suiteStatusOwner = null;
         suiteTaskRunning = false;
         renderSuiteAutoControls();
         if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
@@ -4875,6 +4886,7 @@ async function persistSuiteFreeze(target, frozen) {
     const { fileKey, rowNum, taskId } = target;
     const store = SuiteCore.ResultStore('polo_suite_pending');
     const existing = await store.get(fileKey, rowNum, 'rowfreeze');
+    suiteStatusOwner = fileKey + '::' + rowNum;
     const meta = existing && existing.meta;
     if (meta && meta.excelRowSpec && (!meta.taskId || meta.taskId === taskId)) return;
     await store.put({
@@ -4884,6 +4896,7 @@ async function persistSuiteFreeze(target, frozen) {
 }
 
 async function finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned }) {
+    suiteStatusOwner = fileKey + '::' + rowNum;
     const product = { row: rowNum };
     const btn = document.getElementById('suiteGenBtn');
     suiteTaskRunning = true;
@@ -5048,6 +5061,7 @@ async function finishSuiteTask({ taskId, fileKey, rowNum, steps, assigned }) {
     } finally {
         const auto=readSuiteAutoState();
         if(auto&&auto.phase!=='completed')saveSuiteAutoState({...auto,paused:true});
+        suiteStatusOwner = null;
         suiteTaskRunning = false;renderSuiteAutoControls();
         if (btn) { btn.disabled = false; btn.textContent = '🖼️ 一键生成套图'; }
     }
@@ -5151,9 +5165,8 @@ async function renderSuiteImages(product) {
     const keys = [...new Set([...SUITE_OUTPUTS.map(o => o[0]), ...recs.map(r => String(r.key))])];
 
     if (!t && recs.length === 0) {
-        grid.innerHTML = '<div style="font-size:12px;color:rgba(255,255,255,0.45);padding:8px;">该产品还没有套图结果</div>';
-        const st0 = document.getElementById('suiteStatusText');
-        if (st0) st0.textContent = '';
+        // 完全没结果 → 整个套图区隐藏（和颜色图区一致：没有就不占位置）
+        area.style.display = 'none';
         return;
     }
 
@@ -5170,19 +5183,17 @@ async function renderSuiteImages(product) {
         // 不显示 IndexedDB 缓存里的图片（缓存只是历史快照，不能冒充磁盘现状）。
         // no-permission / cache-only 属于「无法核验」，不等于缺失，仍保留显示。
         const diskBad = check && ['missing', 'corrupt', 'replaced', 'error'].includes(check.status);
-        // 没有可显示的图（未生成 / 磁盘缺失等）→ 只显示编号，不放占位框和提示文案
-        const img = (url && !diskBad)
-            ? `<img src="${url}" alt="${escapeHtml(key)} 套图" style="width:100%;border-radius:8px;cursor:zoom-in;" onclick="openImageModal(this.src)">`
-            : '';
+        // 没有可显示的图（未生成 / 磁盘缺失等）→ 该项不渲染，不占位置
+        if (!(url && !diskBad)) return '';
         return `<div class="color-img-item" style="text-align:center;">
             <div class="img-label" style="justify-content:center;"><span>${key}</span></div>
-            ${img}
+            <img src="${url}" alt="${escapeHtml(key)} 套图" style="width:100%;border-radius:8px;cursor:zoom-in;" onclick="openImageModal(this.src)">
         </div>`;
-    }).join('');
+    }).filter(Boolean).join('');
 
     const st = document.getElementById('suiteStatusText');
     if (st) st.textContent = t ? `任务 ${t.taskId}｜阶段 ${t.stage}${t.error ? '｜' + t.error : ''}` : `已保存 ${recs.length} 张`;
-    if(t&&['interrupted','failed'].includes(t.stage)&&t.stageAt?.sent&&!t.cancelled)grid.insertAdjacentHTML('beforeend',`<button class="batch-color-btn" style="grid-column:1/-1" onclick="recoverSuiteExistingResults('${t.taskId}')">恢复已有结果（不重新生成）</button>`);
+    if(t&&['interrupted','failed'].includes(t.stage)&&t.stageAt?.sent&&!t.cancelled)grid.insertAdjacentHTML('beforeend',`<div style="grid-column:1/-1;display:flex;justify-content:center;margin-top:8px;"><button class="batch-color-btn" style="padding:6px 16px;" onclick="recoverSuiteExistingResults('${t.taskId}')">♻️ 恢复已有结果（不重新生成）</button></div>`);
 }
 
 async function recoverSuiteExistingResults(taskId,recoveryUrl) {
@@ -5191,11 +5202,11 @@ async function recoverSuiteExistingResults(taskId,recoveryUrl) {
     try {
         const frozen=await readSuiteFreeze(fileKey,rowNum,taskId);
         if(!frozen)throw new Error('缺少原任务冻结数据，不能用当前表格替代');
-        suiteTaskRunning=true;updateSuiteStatus('正在读取原豆包对话中的已有结果，不会重新生图…');
+        suiteTaskRunning=true;suiteStatusOwner = fileKey + '::' + rowNum;updateSuiteStatus('正在读取原豆包对话中的已有结果，不会重新生图…');
         const restored=await suiteSend('suiteRecoverResults',{taskId,fileKey,rowNum,recoveryUrl},60000);
         if(!restored.ok)throw new Error(restored.error||'恢复失败');
         await renderSuiteImages(currentProduct);
-    } catch(e){updateSuiteStatus('❌ '+e.message);}finally{suiteTaskRunning=false;}
+    } catch(e){updateSuiteStatus('❌ '+e.message);}finally{suiteStatusOwner=null;suiteTaskRunning=false;}
 }
 
 // 单张重生成入口：与「生成套图」共用同一条单步骤链路（mode=single-regen，一次请求一张）。
@@ -6669,7 +6680,9 @@ function loadColorImagesFromExtension(rowNum) {
                     });
                 } catch (e) { clearColorImage(rowNum, color); }
             };
-            img.src = localPath;
+            // 缓存破坏：file:// 图片在 Chrome 会话内有内存缓存，文件删除后刷新仍可能命中旧图。
+            // 加时间戳参数强制重新请求，删图后才能反映缺失（与 refreshMainImage 同策略）。
+            img.src = localPath + (localPath.includes('?') ? '&' : '?') + 't=' + Date.now();
         } else if (extensionInstalled) {
             try {
                 chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
