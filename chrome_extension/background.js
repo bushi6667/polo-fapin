@@ -1964,6 +1964,39 @@ async function handleSharedAction(request, sendResponse, sender) {
         })();
         return true;
     }
+    // AI 标题精简（后处理脚本调用）：走后台 fetch，避免页面 file:// 源的跨域限制
+    if (request.action === 'aiSimplifyTitle') {
+        (async () => {
+            try {
+                const cfgResp = await fetch(chrome.runtime.getURL('js代码/api_config.json'));
+                const cfg = await cfgResp.json();
+                const ds = (cfg && cfg.deepseek) || {};
+                if (!ds.apiKey) { sendResponse({ ok: false, error: '未配置 DeepSeek API Key' }); return; }
+                const maxChars = Number(request.maxChars || ds.maxChars || 60);
+                const prompt = String(ds.prompt || '把英文电商标题压缩到不超过 {maxChars} 个字符，保留核心卖点与材质规格，只输出标题本身。').replace(/\{maxChars\}/g, String(maxChars));
+                const r = await fetch(ds.url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ds.apiKey },
+                    body: JSON.stringify({
+                        model: ds.model || 'deepseek-chat',
+                        temperature: 0.3,
+                        max_tokens: 120,
+                        messages: [
+                            { role: 'system', content: prompt },
+                            { role: 'user', content: String(request.title || '') }
+                        ]
+                    })
+                });
+                if (!r.ok) { sendResponse({ ok: false, error: 'HTTP ' + r.status }); return; }
+                const data = await r.json();
+                const text = String((((data.choices || [])[0] || {}).message || {}).content || '').trim().replace(/^["'“”]+|["'“”]+$/g, '');
+                if (!text) { sendResponse({ ok: false, error: '模型未返回标题' }); return; }
+                sendResponse({ ok: true, title: text });
+            } catch (e) { sendResponse({ ok: false, error: (e && e.message) || 'AI 精简失败' }); }
+        })();
+        return true;
+    }
+
     // 打开扩展弹窗（用于重新选择/授权颜色图目录：FSA 授权必须有用户手势，页面无法直接请求）
     if (request.action === 'openExtensionPopup') {
         try {
@@ -2706,7 +2739,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup'];
+    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;

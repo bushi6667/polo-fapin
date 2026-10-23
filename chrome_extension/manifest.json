@@ -14,6 +14,7 @@
     "alarms"
   ],
   "host_permissions": [
+    "https://api.deepseek.com/*",
     "*://post.alibaba.com/*",
     "*://*.alibaba.com/*",
     "*://www.doubao.com/*",
@@ -112,7 +113,9 @@
       "file:///*",
       "*://post.alibaba.com/*",
       "*://www.doubao.com/*",
-      "*://doubao.com/*"
+      "*://doubao.com/*",
+      "http://localhost/*",
+      "http://127.0.0.1/*"
     ]
   }
 }
