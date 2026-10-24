@@ -999,6 +999,10 @@ body::after {
     border-radius: 3px;
     transition: width 0.3s ease;
 }
+
+/* 进度条全局样式：换色、发品、套图共用（此前只定义在 .task-progress 下，导致条高为 0 看不见） */
+.progress-bar { width: 100%; height: 8px; background: rgba(255,255,255,0.10); border-radius: 4px; overflow: hidden; }
+.progress-fill { height: 100%; width: 0%; border-radius: 4px; background: linear-gradient(90deg,#a58ade,#c5a8eb); transition: width .25s ease; }
 .task-progress .progress-text {
     font-size: 11px;
     color: rgba(255, 255, 255, 0.55);
@@ -1487,12 +1491,10 @@ body::after {
 }
 
 /* 套图卡片独立纵向布局，避免沿用颜色卡片的横向 flex 挤压图片。 */
-#suiteImagesGrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-#suiteImagesGrid .color-img-item { display: flex; flex-direction: column; aspect-ratio: auto; min-width: 0; padding: 8px; gap: 6px; }
-#suiteImagesGrid .img-label { width: 100%; flex-shrink: 0; margin: 0; }
-#suiteImagesGrid .color-img-item > img { display: block; width: 100%; height: auto; aspect-ratio: 1; object-fit: contain; flex-shrink: 0; }
-#suiteImagesGrid .suite-image-status { width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: rgba(255,255,255,.5); }
-#suiteImagesGrid .batch-color-btn { flex-shrink: 0; }
+/* 套图卡片：与颜色图完全同款（图片铺满整格 + 底部编号条），不再有内框留白 */
+#suiteImagesGrid .color-img-item { padding: 0; aspect-ratio: 1; min-width: 0; }
+#suiteImagesGrid .color-img-item > img { width: 100%; height: 100%; object-fit: cover; }
+#suiteImagesGrid .color-name { pointer-events: none; }
 
 /* Field Group */
 .field-group { margin-bottom: 16px; }
@@ -6729,6 +6731,14 @@ function refreshMainImage(rowNum) {
     });
 }
 
+// 绝对路径 → file:// URL（C:.png → file:///C:/a/b.png），带时间戳强制回源
+function toFileUrl(absPath) {
+    // 反斜杠统一成斜杠（用 split/join 避免正则转义问题）
+    const p = String(absPath || '').split(String.fromCharCode(92)).join('/');
+    const url = p.startsWith('/') ? 'file://' + p : 'file:///' + p;
+    return url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
+}
+
 function loadColorImagesFromExtension(rowNum) {
     const imageFileKey = currentFileKey();
     const imageProduct = currentProduct;
@@ -6738,45 +6748,25 @@ function loadColorImagesFromExtension(rowNum) {
     const folder = (typeof loadedFileName === 'string' ? loadedFileName : '');
     const hasPathMode = !!(cfg.colorImgDir && folder);
 
-    // 路径模式：首次进入先探活本地服务（未知 → ping 后重跑一次）
-    if (hasPathMode && hasPC && window.PathConfig.serverState() === 'unknown') {
-        window.PathConfig.pingServer().then(() => loadColorImagesFromExtension(rowNum));
-        return;
-    }
-    if (hasPathMode && hasPC && !window.PathConfig.serverUp()) {
-        // 本地服务未启动：明确提示，不回退 file://、不显示旧缓存
-        ['white', 'black', 'gray', 'navy'].forEach(c => clearColorImage(rowNum, c));
-        noteColorServerDown();
-        return;
-    }
 
     ['white', 'black', 'gray', 'navy'].forEach(color => {
         if (hasPathMode) {
             const abs = window.PathConfig.colorImagePath(rowNum, color, folder);
             if (!abs) { clearColorImage(rowNum, color); return; }
-            // 用 fetch 取状态码，才能区分「无访问权限 403」「文件不存在 404」「服务未启动」
-            fetch(window.PathConfig.imageUrl(abs, true), { cache: 'no-store' })
-                .then(r => {
-                    if (r.status === 200) return r.blob().then(b => ({ kind: 'ok', blob: b }));
-                    if (r.status === 403) return { kind: 'forbidden' };
-                    if (r.status === 404) return { kind: 'missing' };
-                    return { kind: 'error', status: r.status };
-                })
-                .then(res => {
-                    if (!stillCurrent()) return;
-                    if (res.kind === 'ok' && res.blob && res.blob.size) {
-                        setColorImage(rowNum, color, URL.createObjectURL(res.blob));
-                        clearColorDirFixButton();
-                        return;
-                    }
-                    clearColorImage(rowNum, color);
-                    noteColorFetchError(res, rowNum, color, abs);
-                })
-                .catch(() => {
-                    if (!stillCurrent()) return;
-                    clearColorImage(rowNum, color);
-                    noteColorServerDown();
-                });
+            // file:// 页面直接读本地磁盘图片：不需要本地服务，删文件即消失
+            const url = toFileUrl(abs);
+            const img = new Image();
+            img.onload = () => {
+                if (!stillCurrent()) return;
+                setColorImage(rowNum, color, url);
+                clearColorDirFixButton();
+            };
+            img.onerror = () => {
+                if (!stillCurrent()) return;
+                clearColorImage(rowNum, color);
+                noteColorFileMissing(rowNum, color, abs);
+            };
+            img.src = url;
             return;
         }
 
@@ -6842,19 +6832,27 @@ function clearColorDirFixButton() {
     if (b) b.remove();
 }
 
-let colorServerDownNoted = false;
-function noteColorServerDown() {
-    if (colorServerDownNoted) return;
-    colorServerDownNoted = true;
-    showToast('⚠️ 本地服务未启动：在项目目录执行 node _server.js，颜色图才能从磁盘读取');
-}
-
 let colorPathMissingNoted = false;
+// 未配置颜色图目录：提示去「路径配置」填完整路径
 function noteColorPathMissing() {
     if (colorPathMissingNoted) return;
     colorPathMissingNoted = true;
     showToast('⚠️ 颜色图目录未配置：打开「📁 路径配置」填写完整绝对路径');
 }
+
+let colorFileMissingNoted = '';
+// file:// 直读失败 = 磁盘上确实没有这张图（不是授权问题）
+function noteColorFileMissing(rowNum, color, abs) {
+    const sig = rowNum + '|' + color + '|' + abs;
+    if (colorFileMissingNoted === sig) return;
+    colorFileMissingNoted = sig;
+    const safe = (typeof __mask === 'function') ? __mask(abs) : String(abs || '');
+    console.info('[颜色图] 磁盘上没有这张图：', safe);
+}
+
+// 颜色图目录授权入口（路径模式下基本不再需要；保留给旧句柄链路）
+
+
 
 let colorFetchNoted = '';
 // 三种失败原因必须分开，不能都当成「文件不存在」
