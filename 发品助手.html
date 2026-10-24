@@ -1420,6 +1420,21 @@ body::after {
     z-index: 0;
 }
 .suite-grid { grid-template-columns: repeat(5, 1fr); }
+/* 路径配置：复用「自定义步骤配置」的 .step-config-* 外壳，这里只补列表行样式 */
+.path-config-list { display: flex; flex-direction: column; gap: 14px; padding: 4px 2px 8px; }
+.path-config-row { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: center; }
+.path-config-meta { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: rgba(255,255,255,0.72); }
+.path-config-meta span { font-size: 11px; color: rgba(255,255,255,0.45); }
+.path-config-row input { width: 100%; padding: 8px 10px; border-radius: 8px; font-size: 12px;
+  background: rgba(0,0,0,0.28); border: 1px solid rgba(255,255,255,0.14); color: #e9e1ff; font-family: ui-monospace, Consolas, monospace; }
+.path-config-row input:focus { outline: none; border-color: rgba(165,138,222,0.7); }
+.path-chip { display: inline-block; padding: 2px 8px; font-size: 11px; border-radius: 10px; white-space: nowrap; }
+.path-chip-ok { color: #8ee6a8; background: rgba(80,200,120,0.12); border: 1px solid rgba(80,200,120,0.3); }
+.path-chip-bad { color: #ffd08a; background: rgba(255,176,32,0.12); border: 1px solid rgba(255,176,32,0.32); }
+.path-chip-unset { color: rgba(255,255,255,0.5); background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); }
+.path-config-message { min-height: 18px; font-size: 12px; color: rgba(255,255,255,0.6); }
+.path-config-message.is-ok { color: #8ee6a8; }
+.path-config-message.is-error { color: #ffb020; }
 /* 套图进度条：.progress-bar 只在 .task-progress 下定义，这里给出独立样式，避免高度为 0 */
 #suiteProgressWrap { height: 8px; background: rgba(255,255,255,0.10); border-radius: 4px; overflow: hidden; }
 #suiteFill { height: 100%; border-radius: 4px; background: linear-gradient(90deg,#a58ade,#c5a8eb); transition: width .25s ease; }
@@ -1767,6 +1782,7 @@ body::after {
 <script src="chrome_extension/suite/suite-image-sdk.js"></script>
 <script src="chrome_extension/suite/suite-runtime.js"></script>
 <script src="chrome_extension/suite/suite-rembg.js"></script>
+<script src="path-config.js"></script>
 <script>
 if (typeof XLSX === 'undefined') {
     console.error('XLSX库加载失败，请确保xlsx.full.min.js文件与发品助手.html在同一目录下');
@@ -2695,6 +2711,7 @@ function batchPublish() {
         return;
     }
 
+    window.UnifiedPublishProgress?.({phase:'preparing',done:0,total:selectedProducts.length,fileKey:currentFileKey()});
     const batchData = selectedProducts.map(p => {
         const filtered = { ...p };
         const highlights = parseHighlights(p.highlights || '');
@@ -2734,13 +2751,15 @@ function batchPublish() {
             fileKey: currentFileKey(),
             imageDir: baseDir ? baseDir + '/extracted_images' : '', colorImgDir
         }, (resp) => {
-            if (chrome.runtime.lastError || !resp) { showToast('❌ 无法启动发品任务'); return; }
+            window.UnifiedPublishProgress?.({phase:'idle'});
+            if (chrome.runtime.lastError || !resp) { showToast('❌ 无法启动发品任务'); refreshPublishState(); return; }
             if (!resp.ok) { showToast('❌ ' + (resp.error || '无法启动发品任务')); refreshPublishState(); return; }
             showToast(`🚀 发品任务已启动：共 ${selectedProducts.length} 款，每批 50 款`);
             refreshPublishState();
         });
     } catch (e) {
         showToast('❌ 批量发品失败: ' + e.message);
+        window.UnifiedPublishProgress?.({phase:'idle'});
     }
 }
 
@@ -3026,6 +3045,9 @@ function renderDetail() {
                             <button class="ai-edit-btn" id="customStepsConfigBtn" onclick="CustomStepConfig.open()" style="justify-content: center;">
                                 ⚙️ 自定义步骤配置
                             </button>
+                            <button class="ai-edit-btn" id="pathConfigBtn" onclick="PathConfig.open()" style="justify-content: center;">
+                                📁 路径配置
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -3275,6 +3297,7 @@ function checkExtension() {
                         if (msg.action === 'colorFileSwitched') {
                             handleColorFileSwitched(msg);
                         }
+                        if (msg.action === 'publishImageProgress') window.UnifiedPublishProgress?.(msg);
                         if (msg.action === 'publishState') {
                             handlePublishState(msg);
                         }
@@ -3334,6 +3357,7 @@ function setupPsEditMessageListener() {
                     sendResponse({ ok: true });
                     return true;
                 }
+                if (request.action === 'publishImageProgress') {window.UnifiedPublishProgress?.(request);sendResponse({ok:true});return true;}
                 if (request.action === 'publishState') {
                     handlePublishState(request);
                     sendResponse({ ok: true });
@@ -4606,7 +4630,7 @@ function suiteSetProgress({ jobId, fileKey, rowNum, phase, done, currentKey, pau
 
 // 五步主流程：预检 → 冻结 → 按配置顺序执行 → 逐张保存 → 角标。
 // 参数 keys 可只给一个步骤（指定重生成），顺序始终按该类目当前配置顺序。
-async function runSuiteFiveJob({ keys, resume = false, targeted = false } = {}) {
+async function runSuiteFiveJob({ keys, resume = false, targeted = false, stepsOverride = null } = {}) {
     if (typeof targetedRegenerationRunning !== 'undefined' && targetedRegenerationRunning && !targeted) return showToast('指定重生成正在执行');
     if (suiteTaskRunning) return null;
     const product = currentProduct;
@@ -4625,7 +4649,7 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false } = {}) 
         }
         const spec = frozen ? frozen.excelRowSpec : excelRowSpec(rowNum);
         const snapshot = window.ExcelRow.build(spec);
-        const steps = (frozen && Array.isArray(frozen.steps) && frozen.steps.length) ? frozen.steps : suiteFrozenSteps(snapshot);
+        const steps = (frozen && Array.isArray(frozen.steps) && frozen.steps.length) ? frozen.steps : stepsOverride ? JSON.parse(JSON.stringify(stepsOverride)) : suiteFrozenSteps(snapshot);
 
         // ② 本次执行的编号：恢复时只补冻结清单中未完成的；步骤顺序始终按该类目配置顺序。
         const wanted = resume
@@ -6709,68 +6733,66 @@ function loadColorImagesFromExtension(rowNum) {
     const imageFileKey = currentFileKey();
     const imageProduct = currentProduct;
     const stillCurrent = () => imageFileKey === currentFileKey() && currentProduct === imageProduct && currentProduct && currentProduct.row === rowNum;
-    // 诊断用：把每张颜色图的实际来源记到控制台，排查「删了还显示」时一眼定位
-    // 诊断：仅在「行号或目录模式变化」时打印，并脱敏用户目录（避免日志泄露用户名）
-    const __dirRaw = (typeof colorImgBaseDir !== 'undefined') ? String(colorImgBaseDir || '') : '';
-    const __mode = __dirRaw.startsWith('polo-dir:') ? 'token' : (__dirRaw ? 'path' : 'default');
-    // 脱敏：C:\Users\<用户名> → C:\Users\***（旧正则把 \U 当字面量，实际从未命中）
-    const __mask = (t) => String(t || '').replace(/([A-Za-z]:[\\/]Users[\\/])[^\\/]+/gi, '$1***');
-    const __stamp = __mode + '|row' + rowNum + '|' + (typeof loadedFileName !== 'undefined' ? loadedFileName : '');
-    const __prev = (typeof colorLogStamp === 'undefined') ? null : colorLogStamp;
-    if (__prev !== __stamp) {
-        colorLogStamp = __stamp;
-        console.debug(`[颜色图] 模式=${__mode} row${rowNum} file=${__mask(typeof loadedFileName !== 'undefined' ? loadedFileName : '')} dir=${__mask(__dirRaw)}`);
+    const hasPC = (typeof window !== 'undefined') && !!window.PathConfig;
+    const cfg = hasPC ? window.PathConfig.read() : {};
+    const folder = (typeof loadedFileName === 'string' ? loadedFileName : '');
+    const hasPathMode = !!(cfg.colorImgDir && folder);
+
+    // 路径模式：首次进入先探活本地服务（未知 → ping 后重跑一次）
+    if (hasPathMode && hasPC && window.PathConfig.serverState() === 'unknown') {
+        window.PathConfig.pingServer().then(() => loadColorImagesFromExtension(rowNum));
+        return;
     }
+    if (hasPathMode && hasPC && !window.PathConfig.serverUp()) {
+        // 本地服务未启动：明确提示，不回退 file://、不显示旧缓存
+        ['white', 'black', 'gray', 'navy'].forEach(c => clearColorImage(rowNum, c));
+        noteColorServerDown();
+        return;
+    }
+
     ['white', 'black', 'gray', 'navy'].forEach(color => {
-        const localPath = getColorImagePath(rowNum, color);
-        if (localPath) {
+        if (hasPathMode) {
+            const abs = window.PathConfig.colorImagePath(rowNum, color, folder);
+            if (!abs) { clearColorImage(rowNum, color); return; }
             const img = new Image();
+            const url = window.PathConfig.imageUrl(abs, true);   // 带 v= 时间戳，每次真实回源
             img.onload = () => {
                 if (!stillCurrent()) return;
-                console.info(`[颜色图] ${color} ← 本地路径直读 OK：${__mask(localPath)}`);
-                setColorImage(rowNum, color, localPath);
+                setColorImage(rowNum, color, url);
+                clearColorDirFixButton();
             };
             img.onerror = () => {
                 if (!stillCurrent()) return;
-                if (!extensionInstalled) { console.info(`[颜色图] ${color} ← 本地失败且无扩展 → 清空`); clearColorImage(rowNum, color); return; }
+                clearColorImage(rowNum, color);
+                noteColorFileMissing(rowNum, color, abs);
+            };
+            img.src = url;
+            return;
+        }
+
+        // 未配置路径：旧链路（扩展句柄）保底，同时提示去「路径配置」补完整路径
+        const localPath = getColorImagePath(rowNum, color);
+        if (localPath) {
+            const img = new Image();
+            img.onload = () => { if (stillCurrent()) setColorImage(rowNum, color, localPath); };
+            img.onerror = () => {
+                if (!stillCurrent()) return;
+                if (!extensionInstalled) { clearColorImage(rowNum, color); return; }
                 try {
                     chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
                         if (!stillCurrent()) return;
-                        console.info(`[颜色图] ${color} ← 本地失败，扩展应答：`, resp && { ok: resp.ok, fromDisk: resp.fromDisk, error: resp.error });
-                        // 本地路径已探测失败：只有扩展【真实读盘】的结果才可信；
-                        // 纯 IndexedDB 缓存（fromDisk!==true）不能证明磁盘上还有这张图。
-                        if (resp && resp.ok && resp.dataUrl && resp.fromDisk === true) {
-                            setColorImage(rowNum, color, resp.dataUrl);
-                        } else {
-                            clearColorImage(rowNum, color);
-                            // 只有「令牌目录」才有授权概念；路径/默认模式静默清空（探测本身就是磁盘真相）
-                            if (__mode === 'token' && ((resp && resp.fromDisk === false) || (resp && !resp.ok && /授权|permission|authoriz|denied/i.test(String(resp.error || ''))))) {
-                                noteColorDirUnauthorized(resp && resp.error);
-                            }
-                        }
+                        if (resp && resp.ok && resp.dataUrl && resp.fromDisk === true) setColorImage(rowNum, color, resp.dataUrl);
+                        else clearColorImage(rowNum, color);
                     });
                 } catch (e) { clearColorImage(rowNum, color); }
             };
-            // 缓存破坏：file:// 图片在 Chrome 会话内有内存缓存，文件删除后刷新仍可能命中旧图。
-            // 加时间戳参数强制重新请求，删图后才能反映缺失（与 refreshMainImage 同策略）。
             img.src = localPath + (localPath.includes('?') ? '&' : '?') + 't=' + Date.now();
         } else if (extensionInstalled) {
             try {
                 chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImage', rowNum, color, fileKey: imageFileKey }, (resp) => {
                     if (!stillCurrent()) return;
-                    console.info(`[颜色图] ${color} ← 无本地路径，扩展应答：`, resp && { ok: resp.ok, fromDisk: resp.fromDisk, error: resp.error });
-                    // 令牌目录模式：同样只认【真实读盘】。缓存图不能证明磁盘还在，
-                    // 否则删了文件仍会显示旧图。fromDisk===false 表示扩展只拿到缓存
-                    //（通常是目录授权失效），此时清空并提示重新授权，而不是继续显示。
-                    if (resp && resp.ok && resp.dataUrl && resp.fromDisk === true) {
-                        setColorImage(rowNum, color, resp.dataUrl);
-                        clearColorDirFixButton();
-                    } else {
-                        clearColorImage(rowNum, color);
-                        if (__mode === 'token' && ((resp && resp.fromDisk === false) || (resp && !resp.ok && /授权|permission|authoriz|denied/i.test(String(resp.error || ''))))) {
-                            noteColorDirUnauthorized(resp && resp.error);
-                        }
-                    }
+                    if (resp && resp.ok && resp.dataUrl && resp.fromDisk === true) setColorImage(rowNum, color, resp.dataUrl);
+                    else { clearColorImage(rowNum, color); noteColorPathMissing(); }
                 });
             } catch (e) { clearColorImage(rowNum, color); }
         } else {
@@ -6779,43 +6801,58 @@ function loadColorImagesFromExtension(rowNum) {
     });
 }
 
+// 颜色图目录授权入口（路径模式下基本不再需要；保留给旧句柄链路）
 let colorDirUnauthorizedNoted = false;
-let colorLogStamp = '';   // 诊断日志限流（同一行/同一模式只打一次）
-// 目录授权失效时只提示一次：说明为什么之前能看到的图现在不显示了（不是误判为删除）
+let colorLogStamp = '';
 function noteColorDirUnauthorized(err) {
     const msg = String(err || '');
     const recordLost = /授权不存在|重新选择目录/.test(msg);
     if (!(typeof colorDirUnauthorizedNoted !== 'undefined' && colorDirUnauthorizedNoted)) {
         colorDirUnauthorizedNoted = true;
         showToast(recordLost
-            ? '⚠️ 颜色图目录记录已失效：点「🔐 重新选择目录」；或改用路径模式（弹窗里粘贴文件夹绝对路径，无需授权）'
-            : '⚠️ 颜色图目录授权已失效：点「🔐 重新授权」；或改用路径模式（弹窗里粘贴文件夹绝对路径，永不失效）');
+            ? '⚠️ 颜色图目录记录已失效：打开「📁 路径配置」填写完整绝对路径'
+            : '⚠️ 颜色图目录授权已失效：打开「📁 路径配置」填写完整绝对路径');
     }
     showColorDirFixButton(recordLost);
 }
 
-// 颜色图面板右上角给一个一键入口：Chrome 的文件系统授权必须由用户手势触发，页面无法直接申请
 function showColorDirFixButton(recordLost) {
     const label = document.querySelector('#colorImagesSection .color-images-label');
     if (!label || label.querySelector('.color-dir-fix')) return;
     const b = document.createElement('button');
     b.className = 'color-dir-fix';
-    b.textContent = recordLost ? '🔐 重新选择目录' : '🔐 重新授权';
+    b.textContent = '📁 路径配置';
     b.style.cssText = 'margin-left:auto;padding:2px 8px;font-size:11px;border-radius:10px;border:1px solid rgba(255,255,255,0.22);background:rgba(255,255,255,0.06);color:#ffb020;cursor:pointer;';
-    b.onclick = () => {
-        try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'openExtensionPopup' }, (r) => {
-                if (chrome.runtime.lastError || !r || !r.ok) showToast('⚠️ 请点击浏览器工具栏里的扩展图标，重新选择颜色图目录');
-            });
-        } catch (_) { showToast('⚠️ 请点击浏览器工具栏里的扩展图标，重新选择颜色图目录'); }
-    };
+    b.onclick = () => { try { window.PathConfig.open(); } catch (_) {} };
     label.appendChild(b);
 }
 
-// 授权恢复后移除「重新授权」按钮
 function clearColorDirFixButton() {
     const b = document.querySelector('#colorImagesSection .color-dir-fix');
     if (b) b.remove();
+}
+
+let colorServerDownNoted = false;
+function noteColorServerDown() {
+    if (colorServerDownNoted) return;
+    colorServerDownNoted = true;
+    showToast('⚠️ 本地服务未启动：在项目目录执行 node _server.js，颜色图才能从磁盘读取');
+}
+
+let colorPathMissingNoted = false;
+function noteColorPathMissing() {
+    if (colorPathMissingNoted) return;
+    colorPathMissingNoted = true;
+    showToast('⚠️ 颜色图目录未配置：打开「📁 路径配置」填写完整绝对路径');
+}
+
+let colorFileMissingNoted = '';
+// 文件不存在 ≠ 授权问题：只报"这张图磁盘上没有"
+function noteColorFileMissing(rowNum, color, abs) {
+    const sig = rowNum + '|' + abs;
+    if (colorFileMissingNoted === sig) return;
+    colorFileMissingNoted = sig;
+    console.info('[颜色图] 磁盘上没有这张图：', (typeof __mask === 'function' ? __mask(abs) : abs));
 }
 
 // 删除后清 DOM 残留：移除图片、恢复 missing 样式、移除该产品的颜色图角标
