@@ -46,7 +46,7 @@ function resolveCorsOrigin(req) {
   if (!origin) return null; // 同源/curl：无跨源语义
   if (ALLOWED_ORIGINS.has(origin)) return origin;
   // 本地解包扩展需要通过本机服务读取用户明确配置的图片目录。
-  if (/^chrome-extension:\/\/[a-p]{32}$/.test(origin)) return origin;
+  if (/^chrome-extension:\/\/[a-zA-Z]{32}$/.test(origin)) return origin;
   return false;
 }
 
@@ -125,6 +125,9 @@ function isTrustedWriteSource(req) {
   const sameOrigin = 'http://127.0.0.1:' + PORT;
   const sameOrigin2 = 'http://localhost:' + PORT;
   if (origin === sameOrigin || origin === sameOrigin2) return true;
+  // 扩展页面转发的写入：file:// 页面无法证明身份，改由扩展（Origin 为 chrome-extension://自身ID）代发。
+  // 任意网页与沙箱 iframe 的 Origin 只能是 https://… 或 'null'，无法伪造成扩展来源。
+  if (/^chrome-extension:\/\/[a-zA-Z]{32}$/.test(origin)) return true;
   if (!origin) return true; // 本机进程 / curl（无跨源语义）
   return false;             // 'null'（file:// 与沙箱 iframe）与任何外部站点一律拒绝
 }

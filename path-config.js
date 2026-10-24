@@ -97,6 +97,21 @@
         return 'bad';
     }
 
+    // file:// 页面保存配置：由扩展代发（扩展 Origin 为 chrome-extension://自身ID，服务端放行）
+    function saveViaExtension(cfg) {
+        return new Promise(resolve => {
+            try {
+                if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) { resolve(null); return; }
+                const extId = (typeof EXTENSION_ID === 'string' && EXTENSION_ID) || localStorage.getItem('polo_extension_id') || '';
+                if (!extId) { resolve({ ok: false, error: '未配置扩展 ID，无法通过扩展保存' }); return; }
+                chrome.runtime.sendMessage(extId, { action: 'savePathConfig', config: cfg }, r => {
+                    if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
+                    resolve(r || null);
+                });
+            } catch (e) { resolve({ ok: false, error: (e && e.message) || '扩展调用失败' }); }
+        });
+    }
+
     async function saveFromInputs(view) {
         const cfg = {};
         view.querySelectorAll('[data-path-key]').forEach(input => {
@@ -120,12 +135,22 @@
         }
         let items = [];
         try {
-            const r = await fetch(SERVER + '/path-config', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(cfg)
-            });
-            const data = await r.json();
+            let data = null;
+            // ① 页面经 http://127.0.0.1:8765 打开：同源直连
+            try {
+                const r = await fetch(SERVER + '/path-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cfg)
+                });
+                data = await r.json().catch(() => null);
+                if (r.status === 403) data = null;   // file:// 页面会被同源鉴权拒绝 → 走扩展
+            } catch (_) { data = null; }
+
+            // ② file:// 页面（Origin 为 null，服务端无法鉴别）：由扩展代发，服务端只放行扩展来源
+            if (!data || !data.ok) {
+                data = await saveViaExtension(cfg);
+            }
             if (!data || !data.ok) throw new Error((data && data.error) || '保存失败');
             items = data.items || [];
             writeLocal(data.config || cfg);

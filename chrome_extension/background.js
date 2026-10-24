@@ -84,8 +84,8 @@ async function isTrustedSender(sender) {
         }
         return false;
     }
-    // 未配置 helperPath 时兜底：文件名包含"发品助手"
-    return path.includes('发品助手');
+    // 没有精确配置时只允许标准助手文件名，不能以目录或文件名子串放行。
+    return path.split('\\').pop().toLowerCase() === '发品助手.html';
 }
 
 // M3：目录配置值校验
@@ -1974,17 +1974,37 @@ async function handleSharedAction(request, sendResponse, sender) {
         })();
         return true;
     }
+    // 路径配置保存的扩展转发：file:// 页面 Origin 是 null，服务端无法鉴别；
+    // 由扩展（Origin 为 chrome-extension://自身ID）代发，服务端只放行扩展来源。
+    if (request.action === 'savePathConfig') {
+        (async () => {
+            try {
+                const r = await fetch('http://127.0.0.1:8765/path-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(request.config || {})
+                });
+                const data = await r.json();
+                sendResponse(data || { ok: false, error: '保存失败' });
+            } catch (e) {
+                sendResponse({ ok: false, error: (e && e.message) || '本地服务未启动' });
+            }
+        })();
+        return true;
+    }
+
     // AI 标题精简（后处理脚本调用）：走后台 fetch，避免页面 file:// 源的跨域限制
     if (request.action === 'aiSimplifyTitle') {
         (async () => {
             try {
-                const cfgResp = await fetch(chrome.runtime.getURL('js代码/api_config.json'));
-                const cfg = await cfgResp.json();
-                const ds = (cfg && cfg.deepseek) || {};
+                const stored=await chrome.storage.local.get('polo_deepseek_config');
+                const cfg = stored.polo_deepseek_config ? {deepseek:stored.polo_deepseek_config} : await (await fetch(chrome.runtime.getURL('js代码/api_config.json'),{signal:AbortSignal.timeout(10000)})).json();
+                const ds = { ...((cfg && cfg.deepseek) || {}), ...Object.fromEntries(Object.entries(request.apiConfig||{}).filter(([key,value])=>['url','model','apiKey'].includes(key)&&typeof value==='string'&&value.trim())) };
                 if (!ds.apiKey) { sendResponse({ ok: false, error: '未配置 DeepSeek API Key' }); return; }
                 const maxChars = Number(request.maxChars || ds.maxChars || 60);
                 const prompt = String(ds.prompt || '把英文电商标题压缩到不超过 {maxChars} 个字符，保留核心卖点与材质规格，只输出标题本身。').replace(/\{maxChars\}/g, String(maxChars));
                 const r = await fetch(ds.url, {
+                    signal: AbortSignal.timeout(30000),
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + ds.apiKey },
                     body: JSON.stringify({
@@ -2749,16 +2769,23 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle'];
+    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle', 'savePathConfig'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
 
+    if(request.action==='publishImageProgress'){
+        if(sender.tab?.id&&publicationUploadLocks.has(sender.tab.id))notifyAssistant('publishImageProgress',{phase:request.phase,done:request.done,total:request.total,fileKey:getFilePrefix(),rowNum:request.rowNum});
+        sendResponse({ok:true});return true;
+    }
     if(request.action==='uploadPublicationImages'){
         const tabId=sender.tab?.id;
         if(!tabId){sendResponse({ok:false,error:'缺少上传目标页面'});return false;}
-        if(!/^https:\/\/post\.alibaba\.com\/product\/publish/.test(sender.tab?.url||sender.url||'')){
+        let uploadPage;try{uploadPage=new URL(sender.tab?.url||sender.url||'');}catch(_){}
+        const page2=uploadPage?.pathname==='/product/easyListing.htm';
+        const allowed=uploadPage?.protocol==='https:'&&uploadPage.hostname==='post.alibaba.com'&&(uploadPage.pathname.startsWith('/product/publish')||(page2&&request.kind==='main'));
+        if(!allowed){
             sendResponse({ok:false,error:'只能在阿里商品发布编辑页上传图片'});return false;
         }
         if(publicationUploadLocks.has(tabId)){sendResponse({ok:false,error:'该页面正在上传图片，请等待完成'});return false;}
@@ -3638,6 +3665,25 @@ async function fetchColorImageAsBase64(rowNum, color, expectedFileKey) {
     const fileKey = getFilePrefix(), fileName = CURRENT_FILENAME;
     if (expectedFileKey !== undefined && expectedFileKey !== fileKey) return {ok:false,error:'颜色图所属文件已切换'};
     let directoryError = null;
+    if(COLOR_IMG_DIR && !PoloDirectories.isColorSelection(COLOR_IMG_DIR)) {
+        const context={fileKey,fileFolder:fileName||DEFAULT_FILE_FOLDER,colorImgDir:COLOR_IMG_DIR};
+        const diskPath=buildColorImagePath(rowNum,color,context);
+        try{
+            const response=await fetch('http://127.0.0.1:8765/local-image',{
+                method:'POST',
+                cache:'no-store',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({root:COLOR_IMG_DIR,path:diskPath})
+            });
+            if(!response.ok)throw Error('本地颜色图读取失败：'+response.status);
+            const blob=await response.blob();
+            if(!blob.size||!isRasterImageType(blob.type))throw Error('本地颜色图文件无效');
+            const bytes=new Uint8Array(await blob.arrayBuffer());let binary='';
+            for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode(...bytes.subarray(i,i+32768));
+            if(expectedFileKey!==undefined&&expectedFileKey!==getFilePrefix())return {ok:false,error:'颜色图所属文件已切换'};
+            return {ok:true,fromDisk:true,dataUrl:'data:'+blob.type+';base64,'+btoa(binary)};
+        }catch(error){return {ok:false,fromDisk:false,error:'本地颜色图无法读取：'+error.message};}
+    }
     if (typeof PoloDirectories !== 'undefined' && PoloDirectories.isColorSelection(COLOR_IMG_DIR)) {
         try { return {ok:true,fromDisk:true,dataUrl:await PoloDirectories.colorImage(COLOR_IMG_DIR,fileName||DEFAULT_FILE_FOLDER,rowNum,color)}; }
         catch(error) {
