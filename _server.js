@@ -99,6 +99,36 @@ function allowedRoots() {
   return PATH_KEYS.map(k => cfg[k]).filter(v => v && path.isAbsolute(v));
 }
 
+// 静态服务白名单：只放行页面真正需要的资源类型，敏感文件（API Key / 路径配置 / .git / ADS）一律 403
+const STATIC_ALLOWED_EXT = new Set(['.html', '.htm', '.js', '.css', '.json', '.png', '.jpg', '.jpeg', '.webp', '.svg', '.wasm', '.onnx', '.txt', '.ico', '.woff2']);
+const STATIC_DENY_BASENAME = new Set(['api_config.json', '_path_config.json', '_path_config.json.tmp', '_server.js']);
+
+function isStaticAllowed(filePath, rawUrl) {
+  const url = String(rawUrl || '');
+  // NTFS 备用数据流（file.json::$DATA）与任何冒号写法
+  if (url.includes(':') || /%3a/i.test(url)) return false;
+  const rel = path.relative(BASE_DIR, filePath);
+  if (!rel || rel.startsWith('..')) return false;
+  // 任意以 . 开头的路径段（.git / .trae / .env …）
+  if (rel.split(/[\/]/).some(seg => seg.startsWith('.'))) return false;
+  const base = path.basename(filePath).toLowerCase();
+  if (STATIC_DENY_BASENAME.has(base) || base.endsWith('.key')) return false;
+  const ext = path.extname(filePath).toLowerCase();
+  return STATIC_ALLOWED_EXT.has(ext);
+}
+
+// 写接口鉴权：只接受「本地服务自身的同源页面」或「本机无 Origin 的本机进程」。
+// 关键：沙箱 iframe（Origin: null）与任意网页都无法伪装成 http://127.0.0.1:PORT 同源，
+// 因此这里不用 'null'，也不依赖 Host 校验来区分。
+function isTrustedWriteSource(req) {
+  const origin = String(req.headers.origin || '');
+  const sameOrigin = 'http://127.0.0.1:' + PORT;
+  const sameOrigin2 = 'http://localhost:' + PORT;
+  if (origin === sameOrigin || origin === sameOrigin2) return true;
+  if (!origin) return true; // 本机进程 / curl（无跨源语义）
+  return false;             // 'null'（file:// 与沙箱 iframe）与任何外部站点一律拒绝
+}
+
 function isInsideAnyAllowedRoot(target) {
   return allowedRoots().some(root => isPathInside(root, target));
 }
@@ -215,6 +245,11 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: true, config: loadPathConfig(), roots: allowedRoots() }));
       return;
     }
+    if (!isTrustedWriteSource(req)) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8', ...corsHeaders });
+      res.end(JSON.stringify({ ok: false, error: '写入被拒绝：只有通过 http://127.0.0.1:' + PORT + '/发品助手.html 打开的页面可以保存路径配置' }));
+      return;
+    }
     let body = '';
     req.on('data', c => { body += c; if (body.length > 8192) body = body.slice(0, 8192); });
     req.on('end', () => {
@@ -305,7 +340,8 @@ const server = http.createServer((req, res) => {
   let rawPath = req.url.split('?')[0];
   if (rawPath === '/') rawPath = '/index.html';
   const filePath = buildSafeFilePath(rawPath);
-  if (filePath && /(?:api_config\.json|\.key)$/i.test(filePath)) {
+  if (filePath && !isStaticAllowed(filePath, rawPath)) {
+    // 拒绝：api_config.json / _path_config.json / .key / .git / 任意点开头段 / NTFS 数据流(::) / 非白名单扩展名
     res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });res.end('Forbidden');return;
   }
   if (!filePath) {

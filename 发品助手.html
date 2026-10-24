@@ -6754,19 +6754,29 @@ function loadColorImagesFromExtension(rowNum) {
         if (hasPathMode) {
             const abs = window.PathConfig.colorImagePath(rowNum, color, folder);
             if (!abs) { clearColorImage(rowNum, color); return; }
-            const img = new Image();
-            const url = window.PathConfig.imageUrl(abs, true);   // 带 v= 时间戳，每次真实回源
-            img.onload = () => {
-                if (!stillCurrent()) return;
-                setColorImage(rowNum, color, url);
-                clearColorDirFixButton();
-            };
-            img.onerror = () => {
-                if (!stillCurrent()) return;
-                clearColorImage(rowNum, color);
-                noteColorFileMissing(rowNum, color, abs);
-            };
-            img.src = url;
+            // 用 fetch 取状态码，才能区分「无访问权限 403」「文件不存在 404」「服务未启动」
+            fetch(window.PathConfig.imageUrl(abs, true), { cache: 'no-store' })
+                .then(r => {
+                    if (r.status === 200) return r.blob().then(b => ({ kind: 'ok', blob: b }));
+                    if (r.status === 403) return { kind: 'forbidden' };
+                    if (r.status === 404) return { kind: 'missing' };
+                    return { kind: 'error', status: r.status };
+                })
+                .then(res => {
+                    if (!stillCurrent()) return;
+                    if (res.kind === 'ok' && res.blob && res.blob.size) {
+                        setColorImage(rowNum, color, URL.createObjectURL(res.blob));
+                        clearColorDirFixButton();
+                        return;
+                    }
+                    clearColorImage(rowNum, color);
+                    noteColorFetchError(res, rowNum, color, abs);
+                })
+                .catch(() => {
+                    if (!stillCurrent()) return;
+                    clearColorImage(rowNum, color);
+                    noteColorServerDown();
+                });
             return;
         }
 
@@ -6846,13 +6856,18 @@ function noteColorPathMissing() {
     showToast('⚠️ 颜色图目录未配置：打开「📁 路径配置」填写完整绝对路径');
 }
 
-let colorFileMissingNoted = '';
-// 文件不存在 ≠ 授权问题：只报"这张图磁盘上没有"
-function noteColorFileMissing(rowNum, color, abs) {
-    const sig = rowNum + '|' + abs;
-    if (colorFileMissingNoted === sig) return;
-    colorFileMissingNoted = sig;
-    console.info('[颜色图] 磁盘上没有这张图：', (typeof __mask === 'function' ? __mask(abs) : abs));
+let colorFetchNoted = '';
+// 三种失败原因必须分开，不能都当成「文件不存在」
+function noteColorFetchError(res, rowNum, color, abs) {
+    const kind = (res && res.kind) || 'error';
+    const sig = rowNum + '|' + color + '|' + kind;
+    const safeAbs = (typeof __mask === 'function') ? __mask(abs) : String(abs || '');
+    console.info('[颜色图] ' + color + ' 读取失败(' + kind + ')：', safeAbs);
+    if (colorFetchNoted === sig) return;
+    colorFetchNoted = sig;
+    if (kind === 'forbidden') showToast('⚠️ 颜色图无访问权限：该目录不在路径配置的白名单里，请到「📁 路径配置」确认产品套图目录');
+    else if (kind === 'missing') showToast('⚠️ 颜色图文件不存在（磁盘上确实没有这张图）');
+    else showToast('⚠️ 颜色图读取失败' + (res && res.status ? '（HTTP ' + res.status + '）' : ''));
 }
 
 // 删除后清 DOM 残留：移除图片、恢复 missing 样式、移除该产品的颜色图角标

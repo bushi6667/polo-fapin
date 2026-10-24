@@ -12,3 +12,5 @@ node_modules/
 # 本地密钥/未跟踪资源
 chrome_extension/js代码/api_config.json
 *.key
+_path_config.json
+_path_config.json.tmp

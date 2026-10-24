@@ -264,7 +264,14 @@
             });
             const dir = resp && resp.config && resp.config.colorImgDir;
             if (!dir || /^polo-dir:/.test(dir) || !/^[A-Za-z]:[\\/]|^\\\\/.test(dir)) return;
-            writeLocal({ ...cfg, colorImgDir: dir });
+            const merged = { ...cfg, colorImgDir: dir };
+            writeLocal(merged);
+            // 迁移后立即同步服务端白名单，否则首次读图会 403；页面已有值不参与迁移，不会被覆盖
+            try {
+                await fetch(SERVER + '/path-config', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(merged)
+                });
+            } catch (_) {}
         } catch (_) {}
     }
 
