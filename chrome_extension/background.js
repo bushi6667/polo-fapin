@@ -1882,32 +1882,43 @@ async function handleSharedAction(request, sendResponse, sender) {
                     tab = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
                     await new Promise(r => setTimeout(r, 4000));
                 }
-                const tabId = tab.id;
+                let tabId = tab.id;   // 页面失联时可能换成新标签
                 await chrome.tabs.update(tabId,{active:true});
                 await chrome.windows.update(tab.windowId,{focused:true});
                 globalThis.__suiteExecLock.tabId = tabId;
                 const toTab = async (action, payload) => {
-                    const live = await SuiteTaskStore.get(taskId);
-                    if (!live || live.cancelled || SuiteTaskStore.isTerminal(live.stage)) throw new Error('套图任务已取消或结束');
                     const msg = Object.assign({ action, binding: { taskId, fileKey: t.fileKey, rowNum: t.rowNum } }, payload || {});
                     const send = () => chrome.tabs.sendMessage(tabId, msg);
-                    try {
-                        return await send();
-                    } catch (e) {
-                        const m = String((e && e.message) || '');
-                        // 扩展重载后，旧的豆包标签页里没有内容脚本 → 注入后重试一次
-                        if (!/Receiving end does not exist|Could not establish connection/i.test(m)) throw e;
+                    // 与「一键换色」同一策略：豆包页尚未就绪（Receiving end does not exist）不算任务失败，
+                    // 等页面挂上内容脚本后再发；只有页面明确返回错误才抛给用户。
+                    for (let attempt = 0; attempt < 30; attempt++) {
+                        const live = await SuiteTaskStore.get(taskId);
+                        if (!live || live.cancelled || SuiteTaskStore.isTerminal(live.stage)) throw new Error('套图任务已取消或结束');
                         try {
-                            await chrome.scripting.executeScript({ target: { tabId }, files: ['content/common.js', 'suite/suite-doubao.js'] });
-                            await new Promise(r => setTimeout(r, 300));
                             return await send();
-                        } catch (_) {
-                            // 注入也失败：刷新标签页让 manifest 重新注入，再试最后一次
-                            await chrome.tabs.reload(tabId).catch(() => {});
-                            await new Promise(r => setTimeout(r, 4000));
-                            return await send();
+                        } catch (e) {
+                            const m = String((e && e.message) || '');
+                            if (!/Receiving end does not exist|Could not establish connection|No tab with id/i.test(m)) throw e;
+                            // 第 3 次：扩展重载后旧标签没有内容脚本 → 主动注入
+                            if (attempt === 3) {
+                                try { await chrome.scripting.executeScript({ target: { tabId }, files: ['content/common.js', 'suite/suite-doubao.js'] }); } catch (_) {}
+                            }
+                            // 第 8 次：刷新该标签，让 manifest 重新注入
+                            if (attempt === 8) {
+                                try { await chrome.tabs.reload(tabId); } catch (_) {}
+                            }
+                            // 第 14 次：这个标签确实坏了 → 新开一个豆包页（不关闭用户原标签）
+                            if (attempt === 14) {
+                                try {
+                                    const fresh = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
+                                    tabId = fresh.id;
+                                    globalThis.__suiteExecLock.tabId = tabId;
+                                } catch (_) {}
+                            }
+                            await new Promise(r => setTimeout(r, 1000));
                         }
                     }
+                    throw new Error('豆包页面在 30 秒内未就绪：请打开一个能正常输入的豆包标签页后重试');
                 };
 
                 // ① 探测就绪 / 登录
