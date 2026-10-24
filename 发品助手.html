@@ -3190,7 +3190,7 @@ function renderDetail() {
         document.querySelectorAll('.tab').forEach(tab => tabObserver.observe(tab));
     }
 
-    if (extensionInstalled && currentProduct) loadColorImagesFromExtension(currentProduct.row);
+    if (currentProduct) loadColorImagesFromExtension(currentProduct.row);
     syncColorResumeButton();
     renderSuiteImages(currentProduct).catch(e => updateSuiteStatus(e.message));
     window.UiPolish?.settleDetail(detailPanel);

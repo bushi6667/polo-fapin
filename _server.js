@@ -33,8 +33,12 @@ const MIME_TYPES = {
   '.svg': 'image/svg+xml',
 };
 
-// CORS 来源白名单：photopea.com（在线 PS 保存请求）与 'null'（file:// 本地页面）
-const ALLOWED_ORIGINS = new Set(['https://www.photopea.com', 'null']);
+const ALLOWED_ORIGINS = new Set([
+  'https://www.photopea.com',
+  'null',                        // file:// 页面（<img> 读图不需要 CORS，但保存配置需要）
+  'http://127.0.0.1:' + PORT,    // 页面经本地服务打开时同源，仍会带 Origin
+  'http://localhost:' + PORT
+]);
 
 // 解析请求来源：返回 允许的 Origin 字符串 / null（无 Origin，无需 CORS 头）/ false（拒绝）
 function resolveCorsOrigin(req) {
@@ -155,11 +159,11 @@ const server = http.createServer((req, res) => {
         res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders });
         res.end('Invalid request'); return;
       }
-      const root = path.resolve(String(payload?.root || ''));
+      // 白名单只认服务端已保存的路径配置：客户端不能自报 root（否则等于读整盘图片）
       const target = path.resolve(String(payload?.path || ''));
       const ext = path.extname(target).toLowerCase();
-      if (!path.isAbsolute(String(payload?.root || '')) || !path.isAbsolute(String(payload?.path || '')) ||
-          !isPathInside(root, target) || !['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+      if (!path.isAbsolute(String(payload?.path || '')) || !isInsideAnyAllowedRoot(target) ||
+          !['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
         res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', ...corsHeaders });
         res.end('Forbidden'); return;
       }

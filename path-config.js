@@ -228,10 +228,7 @@
             }
         } catch (_) {}
         if (view) {
-            // 让服务端按当前输入重新判定：空跑一次保存前的校验
-            await fetch(SERVER + '/path-config', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg)
-            }).then(r => r.json()).then(d => { if (d && d.items) items = d.items; }).catch(() => {});
+            // 刷新只读：绝不在这里 POST，否则会用（可能为空的）页面值覆盖服务端白名单
             renderStatuses(view, read(), null, items);
             if (message && !message.textContent) {
                 message.textContent = '本地服务已连接。';
