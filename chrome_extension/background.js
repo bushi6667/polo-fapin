@@ -1352,7 +1352,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 // 因此由扩展在自身源使用既有「🖼️ 产品套图目录」句柄执行套图【写入 + 回读校验】，再经既有受信任消息桥返回结果。
 // 不新增任何路径配置：唯一配置就是扩展里已有的那个目录入口。
 const SUITE_OUTPUT_SEGMENT_RE = /^[^\\/:*?"<>|\u0000]{1,40}$/;                 // 子目录路径段：不含分隔符与非法字符
-const SUITE_OUTPUT_FILE_RE = /^suite_[a-zA-Z0-9\u4e00-\u9fff._-]{1,140}\.(png|jpg|jpeg|webp)$/i; // 只允许套图输出命名，杜绝路径穿越
+// 允许两种命名：① 输出编号（111/222/333/444/666.png，当前约定）；② 旧 suite_ 前缀（兼容历史成品）
+const SUITE_OUTPUT_FILE_RE = /^(?:suite_[a-zA-Z0-9\u4e00-\u9fff._-]{1,140}|(?:111|222|333|444|666))\.(png|jpg|jpeg|webp)$/i;
 
 function suiteOutputRec() {
     return PoloDirectories.pickerRecord('color-img-dir');
@@ -1434,7 +1435,16 @@ async function suiteSwContentHash(blobOrFile) {
 // 只要目录已配置（有句柄记录），就一定能落盘：权限在 → 磁盘句柄；权限回落 → 下载通道降级。
 async function suiteOutputStatus() {
     const rec = await suiteOutputRec();
-    if (!rec || !rec.handle) return { configured: false, name: '', permission: 'none', canFallback: false, mode: 'none', message: '套图输出目录未配置：请在扩展的「🖼️ 产品套图目录」选择文件夹并保存' };
+    if (!rec || !rec.handle) {
+        // 统一路径模式：没有句柄时用颜色图目录（绝对路径）的目录名作为下载根，
+        // 套图与颜色图同目录（下载/<颜色图目录名>/<文件名>/rowN/），无需任何授权。
+        const dirPath = String(COLOR_IMG_DIR || '');
+        const base = dirPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+        if (dirPath && !dirPath.startsWith('polo-dir:') && base && SUITE_OUTPUT_SEGMENT_RE.test(base)) {
+            return { configured: true, name: base, permission: 'none', canFallback: true, fallbackTarget: '下载/' + base, mode: 'downloads' };
+        }
+        return { configured: false, name: '', permission: 'none', canFallback: false, mode: 'none', message: '套图输出目录未配置：请把颜色图目录填成绝对路径（套图会写入同一目录）' };
+    }
     let perm = 'unknown';
     try { perm = await rec.handle.queryPermission({ mode: 'readwrite' }); } catch (_) { perm = 'denied'; }
     const canFallback = perm !== 'granted' && !!String(rec.name || '').trim() && SUITE_OUTPUT_SEGMENT_RE.test(String(rec.name).trim());

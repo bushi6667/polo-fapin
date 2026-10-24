@@ -1420,6 +1420,11 @@ body::after {
     z-index: 0;
 }
 .suite-grid { grid-template-columns: repeat(5, 1fr); }
+/* 套图进度条：.progress-bar 只在 .task-progress 下定义，这里给出独立样式，避免高度为 0 */
+#suiteProgressWrap { height: 8px; background: rgba(255,255,255,0.10); border-radius: 4px; overflow: hidden; }
+#suiteFill { height: 100%; border-radius: 4px; background: linear-gradient(90deg,#a58ade,#c5a8eb); transition: width .25s ease; }
+/* 5 列：ID 规则优先级高于 .suite-grid，必须在这里覆盖 */
+#suiteImagesGrid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .color-img-item {
     position: relative;
     background: rgba(255, 255, 255, 0.08);
@@ -5234,7 +5239,12 @@ async function renderSuiteImages(product) {
     }
 
     const st = document.getElementById('suiteStatusText');
-    if (st) st.textContent = t ? `任务 ${t.taskId}｜阶段 ${t.stage}${t.error ? '｜' + t.error : ''}` : `已保存 ${recs.length} 张`;
+    // 状态数字改用「磁盘核验通过数」，不再用缓存条数（避免显示 5 张但只有 3 格）
+    const okCount = keys.filter(k => {
+        const h = health.items.find(x => x.key === k);
+        return h && h.status === 'verified';
+    }).length;
+    if (st) st.textContent = t ? `${t.stage}${t.error ? '｜' + t.error : ''} · 已核验 ${okCount}/${SUITE_OUTPUTS.length}` : `已核验 ${okCount}/${SUITE_OUTPUTS.length}`;
     // 「恢复已有结果」按钮已按用户要求移除：结果缺失时直接重新生成即可
 }
 
@@ -6703,7 +6713,8 @@ function loadColorImagesFromExtension(rowNum) {
     // 诊断：仅在「行号或目录模式变化」时打印，并脱敏用户目录（避免日志泄露用户名）
     const __dirRaw = (typeof colorImgBaseDir !== 'undefined') ? String(colorImgBaseDir || '') : '';
     const __mode = __dirRaw.startsWith('polo-dir:') ? 'token' : (__dirRaw ? 'path' : 'default');
-    const __mask = (t) => String(t || '').replace(/C:\Users\[^\/]+/i, 'C:\Users\***');
+    // 脱敏：C:\Users\<用户名> → C:\Users\***（旧正则把 \U 当字面量，实际从未命中）
+    const __mask = (t) => String(t || '').replace(/([A-Za-z]:[\\/]Users[\\/])[^\\/]+/gi, '$1***');
     const __stamp = __mode + '|row' + rowNum + '|' + (typeof loadedFileName !== 'undefined' ? loadedFileName : '');
     const __prev = (typeof colorLogStamp === 'undefined') ? null : colorLogStamp;
     if (__prev !== __stamp) {
@@ -6716,7 +6727,7 @@ function loadColorImagesFromExtension(rowNum) {
             const img = new Image();
             img.onload = () => {
                 if (!stillCurrent()) return;
-                console.info(`[颜色图] ${color} ← 本地路径直读 OK：${localPath}`);
+                console.info(`[颜色图] ${color} ← 本地路径直读 OK：${__mask(localPath)}`);
                 setColorImage(rowNum, color, localPath);
             };
             img.onerror = () => {

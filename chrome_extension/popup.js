@@ -213,22 +213,22 @@ async function saveExtensionColorDirectory(dir) {
 document.getElementById('save-color-dir').addEventListener('click', async () => {
     if (window.PoloPathPickers?.['color-img-dir']?.validate() === false) return;
     try {
-    const dir = window.PoloPathPickers?.['color-img-dir']
-        ? await window.PoloPathPickers['color-img-dir'].configurationValue()
-        : document.getElementById('color-img-dir').value.trim();
+    // 输入框里直接是绝对路径时，以输入为准（避免选择器 pending 状态把路径顶成句柄令牌）
+    const __input = document.getElementById('color-img-dir');
+    const __typed = (__input && __input.value || '').trim();
+    const __looksPath = /^[A-Za-z]:[\/]|^\\/.test(__typed);
+    const dir = __looksPath
+        ? __typed
+        : (window.PoloPathPickers?.['color-img-dir']
+            ? await window.PoloPathPickers['color-img-dir'].configurationValue()
+            : __typed);
     // 统一路径模式：颜色图目录只接受绝对路径（纯字符串，永不失效、无需授权）。
     // 句柄令牌（polo-dir:）每次重载/重启都会退回 prompt，已废弃。
     if (typeof dir === 'string' && dir.startsWith('polo-dir:')) {
         alert('请改为填写文件夹绝对路径，例如 C:\\Users\\你\\Downloads\\Polo发品_颜色图。路径模式无需授权、不会失效，套图也写入同一目录。');
         return;
     }
-    // 套图写入/回读需要读写权限：保存句柄时就地申请，避免「已保存但权限仍为 prompt」。
-    const record = await PoloDirectories.pickerRecord('color-img-dir');
-    if (record?.handle) {
-        let permission = await record.handle.queryPermission({mode:'readwrite'});
-        if (permission !== 'granted') permission = await record.handle.requestPermission({mode:'readwrite'});
-        if (permission !== 'granted') throw new Error('未取得读写权限，原目录未更改');
-    }
+    // 路径模式不需要任何权限：不再对历史句柄申请 readwrite（会把纯路径保存卡在授权弹窗）
     await saveExtensionColorDirectory(dir);await window.PoloPathPickers?.['color-img-dir']?.committed();alert(dir?'✅ 颜色图目录已保存':'目录已清空');}
     catch(e){alert('保存失败：'+e.message);}
 });
