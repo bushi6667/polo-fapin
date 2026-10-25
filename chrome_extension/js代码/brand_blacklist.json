@@ -1,0 +1,12 @@
+{
+  "brands": [
+    "Nike", "Adidas", "Puma", "Reebok", "Under Armour", "New Balance", "Converse", "Vans",
+    "Champion", "Levi's", "Gap", "Tommy Hilfiger", "Ralph Lauren", "Calvin Klein",
+    "Armani", "Gucci", "Louis Vuitton", "Prada", "Dior", "Chanel", "Burberry",
+    "Zara", "H&M", "Uniqlo", "Supreme", "Balenciaga", "Yeezy", "Off-White",
+    "Stussy", "Carhartt", "Patagonia", "The North Face", "Columbia",
+    "Air Max", "Air Jordan", "Jordan", "Boost", "Ultraboost", "Dunk", "Air Force",
+    "Gore-Tex", "Flyknit", "Primeknit", "Climacool", "Polartec", "Thinsulate", "Primaloft", "Coolmax", "Cordura", "Kevlar", "Lycra",
+    "Collab", "Collaboration", "Limited Edition", "联名", "限定", "特别版"
+  ]
+}

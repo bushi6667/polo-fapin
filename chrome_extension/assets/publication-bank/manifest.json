@@ -1,0 +1,152 @@
+{
+  "shirt": [
+    {
+      "file": "1.jpg",
+      "sourceArchive": "shirt.zip",
+      "sourceEntry": "shirt/产线.jpg",
+      "sha256": "6335220f0fdb91c4ebef657925ed47a5136ad0d9b2528c9d3be04712e0ac0e6b",
+      "bytes": 540598
+    },
+    {
+      "file": "2.jpg",
+      "sourceArchive": "shirt.zip",
+      "sourceEntry": "shirt/刺绣.jpg",
+      "sha256": "8048b916f691a17125c0699e310358a4f7fb50fd0be2e270d0c381a30f1b0538",
+      "bytes": 446367
+    },
+    {
+      "file": "3.jpg",
+      "sourceArchive": "shirt.zip",
+      "sourceEntry": "shirt/LOGO.jpg",
+      "sha256": "b9dc080119f0cc1bbf1547775ee18f3a5da732a80d4c0dd38f1eaaef33b05930",
+      "bytes": 418607
+    },
+    {
+      "file": "4.jpg",
+      "sourceArchive": "shirt.zip",
+      "sourceEntry": "shirt/颜色.jpg",
+      "sha256": "8573fad8dc56eea1afa6bd177306a8fc1954f6ba58c941025fb487d262b13fea",
+      "bytes": 243443
+    }
+  ],
+  "t-shirt": [
+    {
+      "file": "1.jpg",
+      "sourceArchive": "T-shirt.zip",
+      "sourceEntry": "T-shirt/产线.jpg",
+      "sha256": "6335220f0fdb91c4ebef657925ed47a5136ad0d9b2528c9d3be04712e0ac0e6b",
+      "bytes": 540598
+    },
+    {
+      "file": "2.jpg",
+      "sourceArchive": "T-shirt.zip",
+      "sourceEntry": "T-shirt/印花.jpg",
+      "sha256": "ea0997171529d9d513ba29c2a17acdb652c36bc9b6b26249d3389290d4e02902",
+      "bytes": 331681
+    },
+    {
+      "file": "3.jpg",
+      "sourceArchive": "T-shirt.zip",
+      "sourceEntry": "T-shirt/LOGO.jpg",
+      "sha256": "4c2106a35d907419609c9b12c95f001a3dd28bad008d80df40db02ea7facda34",
+      "bytes": 144979
+    },
+    {
+      "file": "4.jpg",
+      "sourceArchive": "T-shirt.zip",
+      "sourceEntry": "T-shirt/面料.jpg",
+      "sha256": "b7d4533c8eda0b73a07acbc8654cbce3bc423defb0e32d7472c2244a8b643446",
+      "bytes": 289210
+    }
+  ],
+  "polo": [
+    {
+      "file": "1.jpg",
+      "sourceArchive": "polo shirt.zip",
+      "sourceEntry": "polo shirt/产线.jpg",
+      "sha256": "6335220f0fdb91c4ebef657925ed47a5136ad0d9b2528c9d3be04712e0ac0e6b",
+      "bytes": 540598
+    },
+    {
+      "file": "2.jpg",
+      "sourceArchive": "polo shirt.zip",
+      "sourceEntry": "polo shirt/刺绣.jpg",
+      "sha256": "8048b916f691a17125c0699e310358a4f7fb50fd0be2e270d0c381a30f1b0538",
+      "bytes": 446367
+    },
+    {
+      "file": "3.jpg",
+      "sourceArchive": "polo shirt.zip",
+      "sourceEntry": "polo shirt/LOGO.jpg",
+      "sha256": "59c42b58e0629259774da698d004cdd5b8ad1f347ae32b455122b48acb0c6ded",
+      "bytes": 144991
+    },
+    {
+      "file": "4.jpg",
+      "sourceArchive": "polo shirt.zip",
+      "sourceEntry": "polo shirt/颜色.jpg",
+      "sha256": "8573fad8dc56eea1afa6bd177306a8fc1954f6ba58c941025fb487d262b13fea",
+      "bytes": 243443
+    }
+  ],
+  "hooded-sweatshirt": [
+    {
+      "file": "1.jpg",
+      "sourceArchive": "Hooded sweatshirt.zip",
+      "sourceEntry": "Hooded sweatshirt/1.jpg",
+      "sha256": "ea0997171529d9d513ba29c2a17acdb652c36bc9b6b26249d3389290d4e02902",
+      "bytes": 331681
+    },
+    {
+      "file": "2.jpg",
+      "sourceArchive": "Hooded sweatshirt.zip",
+      "sourceEntry": "Hooded sweatshirt/2-2.jpg",
+      "sha256": "138be0c282c7b4126ea181c188a2ffb30faa61127b67d01bcca6148c1b7ed4b9",
+      "bytes": 587639
+    },
+    {
+      "file": "3.jpg",
+      "sourceArchive": "Hooded sweatshirt.zip",
+      "sourceEntry": "Hooded sweatshirt/3.jpg",
+      "sha256": "b7d4533c8eda0b73a07acbc8654cbce3bc423defb0e32d7472c2244a8b643446",
+      "bytes": 289210
+    },
+    {
+      "file": "4.jpg",
+      "sourceArchive": "Hooded sweatshirt.zip",
+      "sourceEntry": "Hooded sweatshirt/4.jpg",
+      "sha256": "8573fad8dc56eea1afa6bd177306a8fc1954f6ba58c941025fb487d262b13fea",
+      "bytes": 243443
+    }
+  ],
+  "non-hooded-sweatshirt": [
+    {
+      "file": "1.jpg",
+      "sourceArchive": "Non-hooded sweatshirt.zip",
+      "sourceEntry": "Non-hooded sweatshirt/1.jpg",
+      "sha256": "ea0997171529d9d513ba29c2a17acdb652c36bc9b6b26249d3389290d4e02902",
+      "bytes": 331681
+    },
+    {
+      "file": "2.jpg",
+      "sourceArchive": "Non-hooded sweatshirt.zip",
+      "sourceEntry": "Non-hooded sweatshirt/2-1.jpg",
+      "sha256": "ab5033c6ad08891b69eb97e577e33d96ab235e9f8054df2ebd31a65aaa421266",
+      "bytes": 152924
+    },
+    {
+      "file": "3.jpg",
+      "sourceArchive": "Non-hooded sweatshirt.zip",
+      "sourceEntry": "Non-hooded sweatshirt/3.jpg",
+      "sha256": "b7d4533c8eda0b73a07acbc8654cbce3bc423defb0e32d7472c2244a8b643446",
+      "bytes": 289210
+    },
+    {
+      "file": "4.jpg",
+      "sourceArchive": "Non-hooded sweatshirt.zip",
+      "sourceEntry": "Non-hooded sweatshirt/4.jpg",
+      "sha256": "8573fad8dc56eea1afa6bd177306a8fc1954f6ba58c941025fb487d262b13fea",
+      "bytes": 243443
+    }
+  ]
+}

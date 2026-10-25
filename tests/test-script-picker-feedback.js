@@ -1,0 +1,4 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+let reply={ok:false,error:'未知消息动作：listScriptDirectory'},calls=0;
+const ctx={window:{},document:{addEventListener(){}},psDirectoryMessage:async()=>{calls++;return reply;},setTimeout,clearTimeout};vm.createContext(ctx);vm.runInContext(fs.readFileSync('custom-step-config.js','utf8'),ctx);
+(async()=>{await assert.rejects(()=>ctx.window.CustomStepConfig.requestScripts({action:'listScriptDirectory'}),/chrome:\/\/extensions.*重新加载/);reply={ok:false,error:'请在扩展JS脚本目录点击保存同步一次脚本'};await assert.rejects(()=>ctx.window.CustomStepConfig.requestScripts({action:'listScriptDirectory'}),/同步一次/);reply={ok:true,files:[{name:'111扩图.js',path:'111扩图.js'}]};const r=await ctx.window.CustomStepConfig.requestScripts({action:'listScriptDirectory'});assert.equal(r.files[0].name,'111扩图.js');assert.equal(calls,3);console.log('PASS 旧版扩展明确提示重新加载、目录同步错误保留、正常目录响应不被误报');})().catch(e=>{console.error(e);process.exitCode=1;});
