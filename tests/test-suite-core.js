@@ -35,6 +35,8 @@ const fpOf = (it) => {
 (async function main() {
     console.log('=== 套图核心 测试 ===\n');
     const { C } = load();
+    const encoded=await C.recognize(['data:image/png;base64,AAAiconAAAlogoAAA'],[{key:'222'}],{expectCount:1});
+    ok(encoded.ok,'图像编码随机含 icon/logo 不应被当作路径噪声');
 
     // ---------------- 结果识别与去重 ----------------
     console.log('【1】结果识别：只取新结果、排除噪声、按内容去重');

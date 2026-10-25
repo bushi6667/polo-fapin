@@ -98,7 +98,11 @@ function matchGroupOption(optText, target) {
 function buildAttributeFields(product) {
     const hasVal = (v) => v && String(v).trim() && String(v).toLowerCase() !== 'none';
 
-    const printingVal = hasVal(product.printing_en) ? product.printing_en : 'Other';
+    // None means no printing; it is an explicit value, not a missing cell.
+    // Older parsed workbooks keep the alias 印花方式 in dynamic attributes.
+    const printingAttr = (product._attrs || []).find(a => ['印花方法', '印花方式'].includes(a.label));
+    const printingSource = String(product.printing_en || '').trim() || String(printingAttr?.en || '').trim();
+    const printingVal = printingSource || 'Other';
     const styleVal = hasVal(product.style_en) ? product.style_en : '';
 
     const category = (product.category || '').toLowerCase();
@@ -121,7 +125,8 @@ function buildAttributeFields(product) {
         isShirt = category.includes("shirt") && !isPolo && !isTshirt && !isHoodie && !isSweatshirt;
     }
     
-    const fabricVal = hasVal(product.fabric_en) ? product.fabric_en : (isShirt ? 'Poplin' : 'Knitted');
+    const fabricVal = hasVal(product.fabric_type_en) ? product.fabric_type_en :
+        (hasVal(product.fabric_en) ? product.fabric_en : (isShirt ? 'Poplin' : 'Knitted'));
     
     log(`================================================`, 'info');
     log(`🎯 类目判定:`, 'info');
@@ -356,6 +361,10 @@ function getFieldCurrentValue(container, mode) {
 function verifyFieldValue(container, expectedVal, mode) {
     const currentVal = getFieldCurrentValue(container, mode);
     if (!currentVal) return false;
+    if (mode === 'direct' || mode === 'input' || mode === 'auto') {
+        const exact = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+        return exact(currentVal) === exact(expectedVal);
+    }
     if (normalizeCompare(currentVal, expectedVal)) return true;
     const parts = String(expectedVal).split(/[,，]/).map(s => s.trim()).filter(Boolean);
     if (parts.length > 1) {
@@ -658,7 +667,7 @@ async function setSimpleSelect(c, val, labelHint, fallback) {
     nativeMouseClick(trigger);
     await sleep3(200);
 
-    const normalize = (s) => String(s).toLowerCase().replace(/[\s\-_/\\]/g, '').trim();
+    const normalize = (s) => String(s).toLowerCase().replace(/[\s\-_/\\\uE000-\uF8FF]/g, '').trim();
 
     const findOption = (word) => {
         const wNorm = normalize(word);
@@ -674,7 +683,7 @@ async function setSimpleSelect(c, val, labelHint, fallback) {
             const tNorm = normalize(t);
             if (!tNorm) continue;
             if (tNorm === wNorm) return it;
-            if (tNorm.includes(wNorm) || wNorm.includes(tNorm)) {
+            if (labelHint !== '徽标位置' && (tNorm.includes(wNorm) || wNorm.includes(tNorm))) {
                 const score = Math.min(tNorm.length, wNorm.length) / Math.max(tNorm.length, wNorm.length);
                 if (score > bestScore) { bestScore = score; bestMatch = it; }
             }
@@ -761,7 +770,7 @@ async function setSimpleSelect(c, val, labelHint, fallback) {
     };
 
     if (val) { ok = await fill(val); if (ok) used = val; }
-    if (!ok && fallback) {
+    if (!ok && fallback && !(labelHint === '徽标位置' && val)) {
         log(`🔄 ${labelHint} 原值 "${val}" 未找到，尝试 fallback "${fallback}"`, 'warn');
         const searchInp = findPopupSearchInput();
         if (searchInp) {
@@ -800,19 +809,20 @@ async function setSearchDropdownPage3(containerId, val, labelHint, fallback) {
     nativeMouseClick(trigger);
     await sleep3(150);
 
-    const normalize = (s) => String(s).toLowerCase().replace(/[\s\-_/\\]/g, '').trim();
+    const normalize = (s) => String(s).toLowerCase().replace(/[\s\-_/\\\uE000-\uF8FF]/g, '').trim();
 
     const findOptionInList = () => {
         const wNorm = normalize(val);
-        const allOpts = document.querySelectorAll('.options-item, .next-menu-item, li[role="option"], li');
-        for (const it of allOpts) {
-            if (it.offsetHeight === 0) continue;
-            const t = (it.innerText || '').trim();
-            if (!t || t === '请选择' || t.includes('暂无')) continue;
-            const tNorm = normalize(t);
-            if (tNorm === wNorm || tNorm.includes(wNorm) || wNorm.includes(tNorm)) return it;
-        }
-        return null;
+        const options = Array.from(document.querySelectorAll('.options-item, .next-menu-item, li[role="option"], li')).filter(it => {
+            const text = (it.innerText || '').trim();
+            return it.offsetHeight > 0 && text && text !== '请选择' && !text.includes('暂无');
+        });
+        const exact = options.find(it => normalize(it.innerText) === wNorm);
+        if (exact || labelHint === '徽标位置') return exact || null;
+        return options.find(it => {
+            const text = normalize(it.innerText);
+            return text.includes(wNorm) || wNorm.includes(text);
+        }) || null;
     };
 
     const pickOption = async (opt) => {
@@ -873,7 +883,7 @@ async function setSearchDropdownPage3(containerId, val, labelHint, fallback) {
     }
 
     // fallback
-    if (fallback) {
+    if (fallback && !(labelHint === '徽标位置' && val)) {
         log(`🔄 ${labelHint} 原值 "${val}" 未找到，尝试 fallback "${fallback}"`, 'warn');
         if (searchInp) {
             searchInp.focus();
@@ -993,57 +1003,29 @@ async function waitForProvinceField() {
 //   4. 上传后等待2-3秒检测结果
 //   5. 监听 uploadResult 消息等待最终结果，菜单项可正确判断成功/失败
 // ============================================================
-async function fillImagesPage3(product) {
-    const results = [];
-    let imgSection = null;
-    
-    if (window.smartFind && typeof window.smartFind.find === 'function') {
-        imgSection = window.smartFind.find('page3', 'mainImageSection');
-    }
-    
-    if (!imgSection) {
-        const mainImageSelectors = window.selectors && window.selectors.getList ?
-            window.selectors.getList('page3', 'mainImageSection') :
-            ['.sell-card', '#struct-image', '[class*="main-image"]', '[class*="image-section"]'];
-        imgSection = await scrollAndFind(() => document.querySelector(mainImageSelectors.join(',')), 5);
-    }
-    
-    if (imgSection) {
-        imgSection.scrollIntoView({block: 'center'});
-        await sleep3(300);
-    }
-
-    let imagePath;
-    if (IMAGE_DIR && product.row) {
-        const sep = IMAGE_DIR.includes('/') ? '/' : '\\';
-        imagePath = IMAGE_DIR + sep + 'row' + product.row + '_main.' + IMG_EXT;
-    } else {
-        imagePath = product.imagePath;
-    }
-
-    if (imagePath) {
-        results.push('⏳ 主图上传中，请稍候...');
-        chrome.runtime.sendMessage({ action: 'uploadMainImage', imagePath, pageType: 'page3' }, () => {});
-
-        const uploadResult = await new Promise((resolve) => {
-            const listener = (request) => {
-                if (request.action === 'uploadResult') {
-                    chrome.runtime.onMessage.removeListener(listener);
-                    resolve(request.result);
-                }
-            };
-            chrome.runtime.onMessage.addListener(listener);
+function requestPublicationUpload(product, kind) {
+    return new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>reject(Error('图片上传超时，请检查页面上传状态')),240000);
+        chrome.runtime.sendMessage({action:'uploadPublicationImages',kind,product:{row:product.row,category:product.category,_categoryType:product._categoryType,_publishFileKey:product._publishFileKey}},response=>{
+            clearTimeout(timer);const error=chrome.runtime.lastError;
+            if(error||!response?.ok)reject(Error(error?.message||response?.error||'后台没有确认上传成功'));
+            else resolve(response);
         });
-
-        if (uploadResult && uploadResult.ok) {
-            results.push('✅ 主图上传成功');
-        } else {
-            results.push('❌ 主图上传失败: ' + (uploadResult?.error || '未知错误'));
-        }
-    } else {
-        results.push('⚠️ 主图: 无图片路径');
-    }
-    return results;
+    });
+}
+async function fillImagesPage3(product) {
+    try {
+        const result=await requestPublicationUpload(product,'main');
+        if(result.count!==6)throw Error('主图数量不正确');
+        return ['✅ 主图上传成功：444、111 + '+result.category+' 的4张公共图（6张）'];
+    }catch(e){return ['❌ 主图上传失败：'+e.message];}
+}
+async function fillDetailImagesPage3(product) {
+    try {
+        const result=await requestPublicationUpload(product,'detail');
+        if(result.count!==3)throw Error('细节图数量不正确');
+        return ['✅ 细节图上传成功：333、666、222（3张）'];
+    }catch(e){return ['❌ 细节图上传失败：'+e.message];}
 }
 
 // ============================================================
@@ -1361,37 +1343,6 @@ async function fillAttributesPage3(product) {
         }
     }
 
-    const genderField = optional.find(f => f.lbl === '性别');
-    if (genderField && genderField.val) {
-        log('🔄 补填性别...', 'info');
-        const genderC = findFieldContainer('', '性别');
-        if (genderC) {
-            const genderInp = genderC.querySelector('input:not([readonly]):not([type="hidden"])');
-            if (genderInp) {
-                genderC.scrollIntoView({block: 'center'});
-                await sleep3(100);
-                genderInp.focus();
-                await sleep3(30);
-                document.execCommand('selectAll', false, null);
-                document.execCommand('delete', false, null);
-                await sleep3(20);
-                for (const ch of String(genderField.val)) {
-                    document.execCommand('insertText', false, ch);
-                    await sleep3(5);
-                }
-                genderInp.dispatchEvent(new Event('input', {bubbles: true}));
-                genderInp.dispatchEvent(new Event('change', {bubbles: true}));
-                confirmInput(genderInp);
-                await sleep3(200);
-                pressEnter(genderInp);
-                await sleep3(150);
-                genderInp.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
-                log('✅ 性别补填完成', 'success');
-                results.push('✅ 性别(补填) = ' + genderField.val);
-            }
-        }
-    }
-
     const collarField = optional.find(f => f.lbl === '领子' || f.lbl === '领型' || f.lbl === '领子/领型');
     if (collarField && collarField.val) {
         log('🔄 补填领子...', 'info');
@@ -1694,67 +1645,73 @@ async function fillColorsPage3(product) {
     }
 
     let uploadedCount = 0;
+    let changed = false;
+    const getColorInputs = () => Array.from(document.querySelectorAll('.posting-field-color-select input[role="colorCombobox"]')).filter(el => el.getBoundingClientRect().height > 0);
+    if (getColorInputs().length > colorList.length) return ['⚠️ 颜色规格超过4行，请先核对多余行'];
 
     for (let i = 0; i < colorList.length; i++) {
         const color = colorList[i];
 
-        const allInputs = document.querySelectorAll('.posting-field-color-select input[role="colorCombobox"]');
-        let targetInput = null;
-        let targetItem = null;
-
-        if (allInputs[i]) {
-            targetInput = allInputs[i];
-            targetItem = allInputs[i].closest('.item, [role="item"]');
-        } else if (allInputs.length > 0) {
-            targetInput = allInputs[allInputs.length - 1];
-            targetItem = allInputs[allInputs.length - 1].closest('.item, [role="item"]');
+        let allInputs = getColorInputs();
+        if (!allInputs[i]) {
+            const addBtn = document.querySelector('.add-color-btn, [role="btn-add"]');
+            if (addBtn) {
+                addBtn.click();
+                await sleep3(700);
+                allInputs = getColorInputs();
+            }
         }
+        let targetInput = allInputs[i];
+        let targetItem = targetInput?.closest('.item, [role="item"]');
 
         if (!targetInput) {
             results.push(`⚠️ ${color.label}: 未找到输入框`);
             continue;
         }
 
-        targetInput.scrollIntoView({ block: 'center' });
-        await sleep3(200);
-        await realClick(targetInput);
-        await sleep3(300);
-        targetInput.focus();
-        document.execCommand('selectAll', false, null);
-        await sleep3(50);
-        document.execCommand('insertText', false, '');
-        await sleep3(100);
-        for (const ch of String(color.label)) {
-            document.execCommand('insertText', false, ch);
-            await sleep3(15);
-        }
-        targetInput.dispatchEvent(new Event('input', {bubbles: true}));
-        targetInput.dispatchEvent(new Event('change', {bubbles: true}));
-        await sleep3(200);
-        confirmInput(targetInput);
-        pressEnter(targetInput);
-        await sleep3(500);
-
-        const colorSection = document.querySelector('.posting-field-color, #struct-saleProp');
-        if (colorSection) {
-            const sectionRect = colorSection.getBoundingClientRect();
-            const blankX = Math.round(sectionRect.left - 50);
-            const blankY = Math.round(sectionRect.top + 50);
-            const blankEl = document.elementFromPoint(blankX, blankY);
-            if (blankEl && blankEl !== targetInput && !targetInput.contains(blankEl)) {
-                blankEl.click();
+        if (targetInput.value !== color.label) {
+            changed = true;
+            targetInput.scrollIntoView({ block: 'center' });
+            await realClick(targetInput);
+            targetInput.focus();
+            targetInput.select();
+            document.execCommand('delete', false, null);
+            await sleep3(80);
+            for (const ch of color.label) {
+                targetInput = getColorInputs()[i];
+                if (!targetInput) break;
+                if (document.activeElement !== targetInput) {
+                    targetInput.focus();
+                    targetInput.setSelectionRange(targetInput.value.length, targetInput.value.length);
+                }
+                document.execCommand('insertText', false, ch);
+                await sleep3(30);
+            }
+            targetInput = getColorInputs()[i];
+            targetInput?.blur();
+            await sleep3(600);
+            targetInput = getColorInputs()[i];
+            if (targetInput && targetInput.value !== color.label) {
+                setInputValue(targetInput, color.label);
+                targetInput.blur();
+                await sleep3(600);
+                targetInput = getColorInputs()[i];
+            }
+            if (!targetInput || targetInput.value !== color.label) {
+                results.push(`⚠️ ${color.label} 文字未生效，当前值: ${targetInput?.value || '空'}`);
+                continue;
             }
         }
-        targetInput.blur();
-        await sleep3(600);
-
-        if (targetInput.value !== color.label) {
-            log(`⚠️ ${color.label} 输入可能未成功，当前值: ${targetInput.value}`);
+        targetItem = targetInput.closest('.item, [role="item"]');
+        if (Array.from(targetItem?.querySelectorAll('.value-preview.uploaded img') || []).some(img => img.getAttribute('src'))) {
+            log(`✅ ${color.label} 已有图片，保留`, 'success');
+            continue;
         }
 
         const pathResult = await new Promise((resolve) => {
             chrome.runtime.sendMessage({
                 action: 'getColorImagePath',
+                taskId: product._publishTaskId || getTaskFromUrl(),
                 rowNum: product.row,
                 color: color.key
             }, (resp) => {
@@ -1779,13 +1736,6 @@ async function fillColorsPage3(product) {
                 log(`✅ ${color.label} 图上传成功（Blob方式）`, 'success');
             } else {
                 results.push(`⚠️ ${color.label} 图上传失败: ${blobRes?.error || '未知错误'}`);
-            }
-            if (i < colorList.length - 1) {
-                const addBtn = document.querySelector('.add-color-btn, [role="btn-add"]');
-                if (addBtn) {
-                    addBtn.click();
-                    await sleep3(700);
-                }
             }
             continue;
         }
@@ -1890,18 +1840,13 @@ async function fillColorsPage3(product) {
             results.push(`ℹ️ ${color.label} 无图片，跳过上传`);
         }
 
-        if (i < colorList.length - 1) {
-            const addBtn = document.querySelector('.add-color-btn, [role="btn-add"]');
-            if (addBtn) {
-                addBtn.click();
-                await sleep3(700);
-            } else {
-                results.push('⚠️ 未找到「+ 添加」按钮');
-            }
-        }
     }
 
-    results.push(`✅ 颜色规格: 已添加 ${colorList.length} 个颜色，上传 ${uploadedCount} 张图`);
+    const actual = getColorInputs();
+    const complete = actual.length === colorList.length && actual.every((input, index) =>
+        input.value === colorList[index].label && Array.from(input.closest('.item, [role="item"]')?.querySelectorAll('.value-preview.uploaded img') || []).some(img => img.getAttribute('src')));
+    results.push(`${complete ? '✅' : '⚠️'} 颜色规格: ${complete ? '4种文字和图片已核对' : '文字或图片仍有缺项'}，本次上传 ${uploadedCount} 张图`);
+    if (changed && complete) results.push(...await fillBatchQtyPage3(product));
     return results;
 }
 
@@ -2494,9 +2439,12 @@ async function fillBatchQtyPage3(product) {
 // 📦 物流信息 fillLogisticsPage3
 async function fillLogisticsPage3(product) {
     const results = [];
+    const filled = [];
+    const visible = el => !!el && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width > 0;
+    const findVisible = selector => Array.from(document.querySelectorAll(selector)).find(visible);
 
     async function fastFillInput(inputEl, value, label) {
-        if (!inputEl) {
+        if (!visible(inputEl)) {
             results.push('⚠️ 未找到' + label + '输入框');
             return false;
         }
@@ -2515,30 +2463,34 @@ async function fillLogisticsPage3(product) {
         await sleep3(50);
         inputEl.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
         await sleep3(30);
-        log('✅ ' + label + ': ' + value, 'success');
+        if (inputEl.isConnected === false || Number(inputEl.value) !== Number(value)) {
+            results.push('⚠️ ' + label + '未生效');
+            return false;
+        }
+        log('✅ ' + label + ': ' + inputEl.value, 'success');
         return true;
     }
 
-    const ladderPeriod = await scrollAndFind(() => document.querySelector('#struct-ladderPeriod, #ladderPeriod'), 5);
+    const ladderPeriod = await scrollAndFind(() => findVisible('#struct-ladderPeriod, #ladderPeriod'), 5);
     if (ladderPeriod) {
         ladderPeriod.scrollIntoView({block: 'center'});
         await sleep3(100);
     }
 
-    const qtyInput = document.querySelector('#struct-ladderPeriod input[role="input-quantity"], #ladderPeriod input[role="input-quantity"]');
-    await fastFillInput(qtyInput, '50', '发货期数量');
+    const qtyInput = findVisible('#struct-ladderPeriod input[role="input-quantity"], #ladderPeriod input[role="input-quantity"]');
+    filled.push(await fastFillInput(qtyInput, '50', '发货期数量'));
 
-    const dayInput = document.querySelector('#struct-ladderPeriod input[role="input-day"], #ladderPeriod input[role="input-day"]');
-    await fastFillInput(dayInput, '31', '发货期预计时间');
+    const dayInput = findVisible('#struct-ladderPeriod input[role="input-day"], #ladderPeriod input[role="input-day"]');
+    filled.push(await fastFillInput(dayInput, '31', '发货期预计时间'));
 
-    const pkgSection = await scrollAndFind(() => document.querySelector('#struct-pkgWeight, #pkgWeight'), 5);
+    const pkgSection = await scrollAndFind(() => findVisible('#struct-pkgWeight, #pkgWeight'), 5);
     if (pkgSection) {
         pkgSection.scrollIntoView({block: 'center'});
         await sleep3(100);
     }
 
-    const weightInput = document.querySelector('input#pkgWeight, input[name="pkgWeight"]');
-    await fastFillInput(weightInput, '0.48', '毛重');
+    const weightInput = findVisible('input#pkgWeight, input[name="pkgWeight"]');
+    filled.push(await fastFillInput(weightInput, '0.48', '毛重'));
 
     function findVisibleMeasureSection() {
         const candidates = document.querySelectorAll('#pkgMeasure, .component-pkgMeasure');
@@ -2568,147 +2520,51 @@ async function fillLogisticsPage3(product) {
         }
 
         const lengthItem = findMeasureItemByLabel('长');
-        await fastFillInput(lengthItem?.input, '50', '长');
+        filled.push(await fastFillInput(lengthItem?.input, '50', '长'));
 
         const widthItem = findMeasureItemByLabel('宽');
-        await fastFillInput(widthItem?.input, '40', '宽');
+        filled.push(await fastFillInput(widthItem?.input, '40', '宽'));
 
         const heightItem = findMeasureItemByLabel('高');
-        await fastFillInput(heightItem?.input, '30', '高');
+        filled.push(await fastFillInput(heightItem?.input, '30', '高'));
     } else {
         results.push('⚠️ 未找到尺寸区域');
     }
 
-    results.push('✅ 物流信息: 发货期50/31天 / 毛重0.48kg / 尺寸50×40×30');
+    if (filled.length === 6 && filled.every(Boolean)) {
+        results.push('✅ 物流信息: 发货期50/31天 / 毛重0.48kg / 尺寸50×40×30');
+    }
 
     async function clickLogisticsProperty() {
-        const propertyResults = [];
-        
-        await sleep3(500);
-        
-        const logisticsPropertyEl = document.querySelector('#logisticsProperty, .component-logisticsProperty');
-        if (!logisticsPropertyEl) {
-            propertyResults.push('⚠️ 未找到物流属性区域');
-            return propertyResults;
+        const property = () => findVisible('#logisticsProperty, .component-logisticsProperty');
+        const isOrdinary = () => /普货|Ordinary goods/i.test(property()?.querySelector('.logistics-property-content')?.textContent || '');
+        const section = property();
+        if (!section) return ['⚠️ 未找到物流属性区域'];
+        if (isOrdinary()) return ['✅ 物流属性已为普货'];
+        const button = Array.from(section.querySelectorAll('button, .logistics-property-edit-btn, [class*="edit-btn"]')).find(visible);
+        if (!button) return ['⚠️ 未找到添加物流属性按钮'];
+        button.scrollIntoView({ block: 'center' });
+        await realClick(button);
+        let dialog;
+        for (let i = 0; i < 20 && !dialog; i++) {
+            await sleep3(200);
+            dialog = Array.from(document.querySelectorAll('.product-attr-dialog, .next-dialog, [role="dialog"]')).find(el =>
+                visible(el) && el.querySelector('.tag') && /普货|Ordinary goods/i.test(el.textContent || ''));
         }
-
-        logisticsPropertyEl.scrollIntoView({block: 'center'});
+        if (!dialog) return ['⚠️ 未找到物流属性弹窗'];
+        const tag = Array.from(dialog.querySelectorAll('.tag')).find(el => visible(el) && /^(普货|Ordinary goods)$/i.test(el.textContent.trim()));
+        if (!tag) return ['⚠️ 未找到普货选项'];
+        tag.click();
         await sleep3(300);
-
-        const contentEl = logisticsPropertyEl.querySelector('.logistics-property-content');
-        if (contentEl && contentEl.textContent.trim().includes('普货')) {
-            log('✅ 物流属性已为普货，无需操作', 'success');
-            propertyResults.push('✅ 物流属性已为普货');
-        } else {
-            const addBtn = logisticsPropertyEl.querySelector('button, .logistics-property-edit-btn, [class*="edit-btn"]');
-            if (addBtn) {
-                log('📦 点击添加物流属性', 'info');
-                addBtn.scrollIntoView({block: 'center'});
-                await sleep3(100);
-                await realClick(addBtn);
-                await sleep3(2000);
-
-                log('🔍 开始查找物流属性弹窗...', 'info');
-                let foundDialog = false;
-                
-                await sleep3(1500);
-                
-                const dialog = document.querySelector('.product-attr-dialog');
-                if (dialog) {
-                    log('✅ 找到物流属性弹窗(.product-attr-dialog)', 'success');
-                    foundDialog = true;
-                    
-                    const allTags = dialog.querySelectorAll('.tag');
-                    log(`   - 找到${allTags.length}个标签`, 'info');
-                    
-                    let foundPureGoods = false;
-                    for (const tag of allTags) {
-                        const tagText = tag.textContent.trim();
-                        log(`   - 标签: "${tagText}"`, 'info');
-                        if (tagText.includes('普货')) {
-                            log('✅ 找到普货标签，点击', 'success');
-                            tag.scrollIntoView({block: 'center'});
-                            await sleep3(200);
-                            tag.click();
-                            await sleep3(500);
-                            foundPureGoods = true;
-                            break;
-                        }
-                    }
-                    
-                    if (!foundPureGoods) {
-                        log('⚠️ 未找到普货标签', 'warn');
-                    }
-
-                    const confirmBtn = dialog.querySelector('.next-dialog-footer .next-btn-primary');
-                    if (confirmBtn) {
-                        const btnText = confirmBtn.textContent.trim();
-                        log(`✅ 找到确认按钮: "${btnText}"，点击`, 'success');
-                        confirmBtn.scrollIntoView({block: 'center'});
-                        await sleep3(200);
-                        confirmBtn.click();
-                        await sleep3(800);
-                        propertyResults.push('✅ 物流属性: 普货');
-                    } else {
-                        log('⚠️ 未找到确认按钮，尝试全局查找', 'warn');
-                        const allPrimaryBtns = dialog.querySelectorAll('.next-btn-primary');
-                        if (allPrimaryBtns.length > 0) {
-                            log(`✅ 找到${allPrimaryBtns.length}个主按钮，点击第一个`, 'success');
-                            allPrimaryBtns[0].scrollIntoView({block: 'center'});
-                            await sleep3(200);
-                            allPrimaryBtns[0].click();
-                            await sleep3(800);
-                            propertyResults.push('✅ 物流属性: 普货');
-                        }
-                    }
-                } else {
-                    log('⚠️ 未找到.product-attr-dialog，尝试查找所有弹窗', 'warn');
-                    const allDialogs = document.querySelectorAll('.next-dialog, [role="dialog"]');
-                    log(`   - 找到${allDialogs.length}个弹窗`, 'info');
-                    for (const d of allDialogs) {
-                        const hasPlaceholder = d.querySelector('#product-attr-dialog-placeholder');
-                        const hasTag = d.querySelector('.tag');
-                        log(`   - class: "${(d.className || '').slice(0, 60)}", hasPlaceholder: ${!!hasPlaceholder}, hasTag: ${!!hasTag}`, 'info');
-                        if (hasPlaceholder || (hasTag && d.textContent.includes('普货'))) {
-                            log('✅ 通过备选方式找到物流属性弹窗', 'success');
-                            foundDialog = true;
-                            
-                            const tags = d.querySelectorAll('.tag');
-                            for (const tag of tags) {
-                                if (tag.textContent.trim().includes('普货')) {
-                                    log('✅ 找到普货标签，点击', 'success');
-                                    tag.scrollIntoView({block: 'center'});
-                                    await sleep3(200);
-                                    tag.click();
-                                    await sleep3(500);
-                                    break;
-                                }
-                            }
-                            
-                            const confirmBtns = d.querySelectorAll('.next-btn-primary');
-                            if (confirmBtns.length > 0) {
-                                log('✅ 点击确认按钮', 'success');
-                                confirmBtns[0].scrollIntoView({block: 'center'});
-                                await sleep3(200);
-                                confirmBtns[0].click();
-                                await sleep3(800);
-                                propertyResults.push('✅ 物流属性: 普货');
-                            }
-                            break;
-                        }
-                    }
-                }
-                
-                if (!foundDialog) {
-                    log('⚠️ 未找到物流属性弹窗', 'warn');
-                    propertyResults.push('⚠️ 未找到物流属性弹窗');
-                }
-            } else {
-                propertyResults.push('⚠️ 未找到添加物流属性按钮');
-            }
+        const confirm = Array.from(dialog.querySelectorAll('button')).find(el =>
+            visible(el) && !el.disabled && /^(确认|确定|OK)$/i.test((el.innerText || el.textContent || '').trim()));
+        if (!confirm) return ['⚠️ 未找到物流属性确认按钮'];
+        confirm.click();
+        for (let i = 0; i < 15; i++) {
+            await sleep3(200);
+            if (isOrdinary()) return ['✅ 物流属性: 普货'];
         }
-
-        return propertyResults;
+        return ['⚠️ 物流属性未生效'];
     }
 
     const propertyResults = await clickLogisticsProperty();
@@ -2718,207 +2574,95 @@ async function fillLogisticsPage3(product) {
 }
 
 // ============================================================
-// 📦 箱规关联 fillBoxRule (混合方案)
-// 方式: 1)background CDP方式 2)postMessage+直接DOM操作iframe
+// 📦 箱规关联 fillBoxRule
+// 扩展 iframe 脚本执行关联；主页面显示完整参数后才判定完成。
 // ============================================================
+function getAssociatedBoxRule() {
+    const rules = document.querySelectorAll('#boxPackaging .already-associated-rules');
+    for (const rule of rules) {
+        if (!rule.getBoundingClientRect().width || !rule.getBoundingClientRect().height) continue;
+        const text = (rule.innerText || rule.textContent || '').replace(/\s+/g, ' ').trim();
+        if (/50\s*[*x×]\s*40\s*[*x×]\s*30/i.test(text) && /25\s*件\s*\/\s*批/.test(text)) return text;
+    }
+    return null;
+}
+
 async function fillBoxRule(product) {
-    const results = [];
+    if (getAssociatedBoxRule()) return ['✅ 箱规已关联: 50×40×30 / 25件'];
+    const findIframe = () => Array.from(document.querySelectorAll('iframe')).find(frame =>
+        frame.src.includes('scm.alibaba.com') && frame.src.includes('template_relate_package') &&
+        frame.getBoundingClientRect().height > 0);
 
-    const section = await scrollAndFind(() => {
-        const s = document.getElementById('logisticsProperty')?.parentElement?.parentElement;
-        if (s) return s;
-        const sections = document.querySelectorAll('[role="all"]');
-        for (const sec of sections) {
-            const text = (sec.textContent || '').replace(/\s+/g, ' ').trim();
-            if (text.includes('箱规') && text.includes('体积与重量')) return sec;
-        }
-        return null;
-    }, 5);
-    if (!section) {
-        results.push('⚠️ 箱规: 未找到物流信息区域');
-        return results;
-    }
-    section.scrollIntoView({block: 'center'});
-    await sleep3(300);
-
-    let addBtn = null;
-    const allBtns = section.querySelectorAll('button, [role="button"], span.add-btn-text');
-    log(`🔍 在区域内找到 ${allBtns.length} 个按钮元素`, 'info');
-    for (let i = 0; i < allBtns.length; i++) {
-        const b = allBtns[i];
-        const t = (b.innerText || b.textContent || '').trim();
-        const className = b.className || '';
-        log(`   按钮[${i}]: text="${t}", class="${className.substring(0, 50)}", offsetParent=${b.offsetParent !== null}`, 'info');
-        if (t.includes('添加或关联箱规')) {
-            addBtn = b;
-            break;
-        }
-    }
-
-    if (!addBtn) {
-        const boxContainer = document.getElementById('boxPackaging');
-        if (boxContainer) {
-            log('🔍 找到boxPackaging容器，尝试直接查找按钮', 'info');
-            addBtn = boxContainer.querySelector('button.add-btn, span.add-btn-text');
-        }
-    }
-
-    if (!addBtn) {
-        results.push('⚠️ 箱规: 未找到添加或关联箱规按钮');
-        return results;
-    }
-
-    log('🖱️ 准备点击按钮: ' + (addBtn.tagName || '') + ', className=' + (addBtn.className || '').substring(0, 50), 'info');
-    addBtn.scrollIntoView({block: 'center'});
-    await sleep3(200);
-
-    if (addBtn.tagName === 'SPAN') {
-        const parentBtn = addBtn.closest('button');
-        if (parentBtn) {
-            log('🔄 span找到父button，点击父元素', 'info');
-            addBtn = parentBtn;
-        }
-    }
-
-    const rect = addBtn.getBoundingClientRect();
-    const clickX = Math.round(rect.left + rect.width / 2);
-    const clickY = Math.round(rect.top + rect.height / 2);
-    log(`🎯 点击坐标: (${clickX}, ${clickY})`, 'info');
-
-    const rectBefore = addBtn.getBoundingClientRect();
-    log(`📐 点击前按钮尺寸: width=${rectBefore.width}, height=${rectBefore.height}`, 'info');
-
-    log('🔹 尝试方式1: element.click()', 'info');
-    try {
-        addBtn.click();
-        log('✅ 方式1执行完成', 'info');
-    } catch (e) {
-        log('❌ 方式1失败: ' + e.message, 'warn');
-    }
-    await sleep3(300);
-
-    let isHidden = addBtn.offsetHeight === 0 || addBtn.style.display === 'none';
-    if (!isHidden) {
-        log('🔹 尝试方式2: CDP坐标点击', 'info');
-        try {
-            const res = await chrome.runtime.sendMessage({ action: 'realMouseClick', x: clickX, y: clickY });
-            log(`📊 CDP点击结果: ${JSON.stringify(res)}`, 'info');
-        } catch (e) {
-            log('❌ 方式2失败: ' + e.message, 'warn');
-        }
-        await sleep3(500);
-    }
-
-    isHidden = addBtn.offsetHeight === 0 || addBtn.style.display === 'none';
-    if (!isHidden) {
-        log('🔹 尝试方式3: CDP注入click脚本', 'info');
-        try {
-            const res = await chrome.runtime.sendMessage({ action: 'runClickScript', selector: 'button.next-btn-primary.add-btn' });
-            log(`📊 脚本点击结果: ${JSON.stringify(res)}`, 'info');
-        } catch (e) {
-            log('❌ 方式3失败: ' + e.message, 'warn');
-        }
-        await sleep3(500);
-    }
-
-    isHidden = addBtn.offsetHeight === 0 || addBtn.style.display === 'none';
-    log(`📊 最终按钮状态: hidden=${isHidden}`, 'info');
-
-    const rectAfter = addBtn.getBoundingClientRect();
-    log(`📐 点击后按钮尺寸: width=${rectAfter.width}, height=${rectAfter.height}`, 'info');
-
-    const boxContainer = document.getElementById('boxPackaging');
-    if (boxContainer) {
-        const associatedDiv = boxContainer.querySelector('.already-associated-rules');
-        log(`📦 关联区域内容: ${associatedDiv?.innerHTML?.substring(0, 200) || '空'}`, 'info');
-    }
-
-    await sleep3(1500);
-
-    let iframeEl = null;
-    for (let i = 0; i < 40; i++) {
-        const allIframes = document.querySelectorAll('iframe');
-        log(`🔍 第${i+1}次检查: 页面共有 ${allIframes.length} 个iframe`, 'info');
-        for (const iframe of allIframes) {
-            const hasHeight = iframe.offsetHeight > 0;
-            const hasSrc = !!iframe.src;
-            log(`   - height=${iframe.offsetHeight}, hasSrc=${hasSrc}, src=${hasSrc ? iframe.src : '(empty)'}`);
-            if (hasHeight && hasSrc) {
-                if (iframe.src.includes('scm.alibaba.com') || 
-                    iframe.src.includes('template_relate_package') ||
-                    iframe.src.includes('package') ||
-                    iframe.src.includes('box') ||
-                    iframe.src.includes('cargo') ||
-                    iframe.src.includes('logistics') ||
-                    iframe.src.includes('freight')) {
-                    iframeEl = iframe;
-                    break;
-                }
-            }
-        }
-        if (iframeEl) {
-            log(`✅ 找到目标iframe: ${iframeEl.src}`, 'info');
-            break;
-        }
+    if (!findIframe()) {
+        const section = await scrollAndFind(() => {
+            const sections = document.querySelectorAll('#struct-pkgWeight, [role="all"]');
+            return Array.from(sections).find(sec => sec.getBoundingClientRect().height > 0 &&
+                (sec.textContent || '').includes('箱规') && (sec.textContent || '').includes('体积与重量'));
+        }, 5);
+        if (!section) return ['⚠️ 箱规: 未找到物流信息区域'];
+        const addBtn = Array.from(section.querySelectorAll('button, [role="button"], span.add-btn-text')).find(button =>
+            button.getBoundingClientRect().height > 0 &&
+            (button.innerText || button.textContent || '').includes('添加或关联箱规')) ||
+            Array.from(section.querySelectorAll('#boxPackaging .change-box-rule-text')).find(button =>
+                button.getBoundingClientRect().height > 0);
+        if (!addBtn) return ['⚠️ 箱规: 未找到添加或关联箱规按钮'];
+        addBtn.scrollIntoView({ block: 'center' });
         await sleep3(200);
-    }
-
-    if (!iframeEl) {
-        const allIframes = document.querySelectorAll('iframe');
-        if (allIframes.length > 0) {
-            log('⚠️ 未找到匹配的箱规iframe，所有iframe信息:', 'warn');
-            for (let j = 0; j < allIframes.length; j++) {
-                const iframe = allIframes[j];
-                log(`   iframe[${j}]: height=${iframe.offsetHeight}, src=${iframe.src || '(empty)'}, id=${iframe.id || '(no id)'}, className=${iframe.className || '(no class)'}`);
-            }
+        addBtn.click();
+        for (let i = 0; i < 15 && !findIframe(); i++) await sleep3(200);
+        if (!findIframe()) {
+            const rect = addBtn.getBoundingClientRect();
+            await chrome.runtime.sendMessage({ action: 'realMouseClick',
+                x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) });
         }
-        results.push('⚠️ 箱规: iframe未加载');
-        return results;
     }
+    for (let i = 0; i < 40 && !findIframe(); i++) await sleep3(200);
+    if (!findIframe()) return ['⚠️ 箱规: iframe未加载'];
+    await sleep3(800);
 
-    log('✅ iframe已加载，等待内部渲染...', 'info');
-    await sleep3(2000);
-
-    // 通过background处理CDP，content script直接执行iframe内部DOM操作
-    log('🔄 通过扩展执行箱规关联...', 'info');
-
-    return new Promise((resolve) => {
-        const handler = (msg) => {
-            if (msg.action === 'fillBoxRuleResult') {
-                chrome.runtime.onMessage.removeListener(handler);
-                const r = msg.result || {};
-                if (r.ok) {
-                    log('✅ 箱规关联完成', 'success');
-                    results.push('✅ 箱规关联完成');
-                } else {
-                    const err = r.error || '未知错误';
-                    log(`⚠️ 箱规关联失败: ${err}`, 'warn');
-                    if (r.frames) {
-                        log(`🔍 可用frames: ${(r.frames || []).join(', ')}`, 'info');
-                    }
-                    results.push(`⚠️ 箱规关联失败: ${err}`);
-                }
-                resolve(results);
+    // 弹窗完成后可能销毁消息通道；以主页面实际关联参数为准。
+    return new Promise(resolve => {
+        let settled = false;
+        let timeoutId;
+        let pollId;
+        const finish = result => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeoutId);
+            clearInterval(pollId);
+            chrome.runtime.onMessage.removeListener(handler);
+            resolve([result]);
+        };
+        const check = () => {
+            if (getAssociatedBoxRule()) {
+                finish('✅ 箱规关联完成: 50×40×30 / 25件');
+                return true;
             }
+            return false;
+        };
+        const handleResult = async result => {
+            for (let i = 0; i < 12 && !settled; i++) {
+                if (check()) return;
+                await sleep3(250);
+            }
+            if (!settled) finish('⚠️ 箱规未关联: ' + (result?.error || '页面未显示完整箱规参数'));
+        };
+        const handler = msg => {
+            if (msg.action === 'fillBoxRuleResult') handleResult(msg.result);
         };
         chrome.runtime.onMessage.addListener(handler);
-
-        chrome.runtime.sendMessage({ action: 'fillBoxRule' }, (resp) => {
-            if (!resp || !resp.ok) {
-                chrome.runtime.onMessage.removeListener(handler);
-                const err = resp?.error || '启动失败';
-                log(`⚠️ 箱规关联启动失败: ${err}`, 'warn');
-                results.push(`⚠️ 箱规关联启动失败: ${err}`);
-                resolve(results);
-            }
-        });
-
-        setTimeout(() => {
-            chrome.runtime.onMessage.removeListener(handler);
-            log('⚠️ 箱规关联超时', 'warn');
-            results.push('⚠️ 箱规关联超时');
-            resolve(results);
+        pollId = setInterval(check, 250);
+        timeoutId = setTimeout(() => {
+            if (!check()) finish('⚠️ 箱规关联超时，页面未显示完整箱规参数');
         }, 60000);
+        try {
+            chrome.runtime.sendMessage({ action: 'fillBoxRule' }, response => {
+                const error = chrome.runtime.lastError?.message;
+                if (error || !response?.ok) handleResult({ error: error || response?.error || '启动失败' });
+            });
+        } catch (error) {
+            handleResult({ error: error.message });
+        }
     });
 }
 
@@ -3583,8 +3327,13 @@ async function fillFaqsPage3(product, mode) {
     if (mode === 'overwrite') {
         startIdx = 0;
         while (existingItems.length > faqs.length) {
-            existingItems[existingItems.length - 1].remove();
+            const before = existingItems.length;
+            const remove = existingItems[before - 1].querySelector('.faq-handle .handle-item:last-child');
+            if (!remove) { results.push('⚠️ FAQs: 未找到多余条目的删除按钮'); break; }
+            await realClick(remove);
+            for (let i = 0; i < 20 && container.querySelectorAll('.item').length >= before; i++) await sleep3(100);
             existingItems = container.querySelectorAll('.item');
+            if (existingItems.length >= before) { results.push('⚠️ FAQs: 多余条目删除未生效'); break; }
         }
         log('📋 FAQ条目数调整为 ' + Math.min(faqs.length, existingItems.length) + ' 条', 'info');
     } else {
@@ -3602,6 +3351,10 @@ async function fillFaqsPage3(product, mode) {
         for (let t = 0; t < 20; t++) {
             await sleep3(100);
             if (container.querySelectorAll('.item').length > beforeCount) break;
+        }
+        if (container.querySelectorAll('.item').length <= beforeCount) {
+            results.push('⚠️ FAQs: 添加条目未生效');
+            break;
         }
     }
 
@@ -3663,10 +3416,21 @@ async function fillFaqsPage3(product, mode) {
         await sleep3(150);
     }
 
-    filled = faqs.length;
-
-    log('✅ FAQs: 已追加 ' + filled + ' 条（原有 ' + startIdx + ' 条）', 'success');
-    results.push('✅ FAQs: 追加 ' + filled + ' 条');
+    await sleep3(300);
+    const actualItems = container.querySelectorAll('.item');
+    for (let i = 0; i < faqs.length; i++) {
+        const item = actualItems[startIdx + i];
+        const question = item?.querySelector('.question input')?.value;
+        const answer = item?.querySelector('.answers textarea[data-real="true"]')?.value;
+        if (question === faqs[i].q && answer === faqs[i].a) filled++;
+        else results.push(`⚠️ FAQ${i + 1}: 问题或答案未完整生效`);
+    }
+    if (filled === faqs.length && (mode !== 'overwrite' || actualItems.length === faqs.length)) {
+        log('✅ FAQs: 已核对 ' + filled + ' 条', 'success');
+        results.push('✅ FAQs: 已核对 ' + filled + ' 条');
+    } else {
+        results.push(`⚠️ FAQs: ${filled}/${faqs.length} 条核对正确，页面共 ${actualItems.length} 条`);
+    }
     return results;
 }
 
@@ -3686,12 +3450,19 @@ async function saveDraft(product) {
         saveBtn.scrollIntoView({ block: 'center' });
         await sleep3(300);
         log('🖱️ 点击保存按钮...', 'info');
-        await realClick(saveBtn);
-        await sleep3(1000);
-        log('✅ 已点击保存（等待核实结果，不标记已保存）', 'success');
-        results.push('✅ 已点击保存（待核实）');
-        // 按实施要求：点击保存只进入「正在保存」，不凭点击 / 固定等待 / HTTP 200 / 关标签判定成功。
-        // 核实保存由保存检测负责（Stage 2，待实测）。
+        const rect = saveBtn.getBoundingClientRect();
+        const response = await sendMessageRetry({
+            action: 'savePublishProduct', row: product.row,
+            taskId: product._publishTaskId || getTaskFromUrl(), fileKey: product._publishFileKey,
+            x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)
+        });
+        if (response && response.ok) {
+            log('✅ 已点击保存，已按你的规则标记保存', 'success');
+            results.push('✅ 已保存');
+        } else {
+            log('⚠️ ' + (response?.error || '保存操作未完成'), 'warn');
+            results.push('⚠️ ' + (response?.error || '保存操作未完成'));
+        }
     } else {
         log('⚠️ 未找到保存按钮', 'warn');
         results.push('⚠️ 未找到保存按钮');
@@ -3929,6 +3700,11 @@ async function fillAllPage3(product, step) {
     const results = [];
     const run = (s) => !step || step === s || step === 'fill_all';
 
+    if(run('fill_images')){
+        const images=await fillImagesPage3(product);results.push(...images);
+        if(images.some(r=>r.startsWith('❌')))return results;
+    }
+
     if (run('fill_title')) results.push(...await fillTitlePage3(product));
     if (run('fill_group')) results.push(...await fillGroupPage3(product));
     if (run('fill_attributes')) results.push(...await fillAttributesPage3(product));
@@ -3941,10 +3717,17 @@ async function fillAllPage3(product, step) {
     if (run('fill_logistics_template')) results.push(...await fillLogisticsTemplate(product));
     if (run('fill_logistics')) results.push(...await fillLogisticsPage3(product));
     if (run('fill_box_rule')) results.push(...await fillBoxRule(product));
-    if (run('fill_detail_template')) results.push(...await fillDetailTemplate(product));
+    if (run('fill_detail_template')) {
+        const template=await fillDetailTemplate(product);results.push(...template);
+        if(!template.some(r=>r.startsWith('✅ 商品详情模板:')))return results;
+    }
+    if (run('fill_detail_images')) {
+        const images=await fillDetailImagesPage3(product);results.push(...images);
+        if(images.some(r=>r.startsWith('❌')))return results;
+    }
     if (run('fill_company_intro_template')) results.push(...await fillCompanyIntroTemplate(product));
 
-    if (!step) results.push('✅ 全部字段处理完毕');
+    if (!step) results.push(results.some(r => /^[⚠️❌]/u.test(r)) ? '⚠️ 填入结束，仍有未完成项' : '✅ 全部字段处理完毕');
     return results;
 }
 
@@ -3985,6 +3768,7 @@ function createPage3Panel() {
                 </button>
                 <div id="polo-action-menu" style="position:fixed;z-index:100000;background:#fff;border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.2);padding:6px;display:none;max-height:60vh;overflow-y:auto;"></div>
             </div>
+            <button id="polo-save-btn" style="display:block;width:100%;padding:10px 12px;margin-bottom:8px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;">💾 保存</button>
             <div id="polo-mode-container" style="position:relative;display:flex;gap:4px;padding:4px;margin-bottom:8px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
                 <div style="position:absolute;top:4px;left:4px;height:28px;border-radius:10px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);box-shadow:0 2px 8px rgba(102,126,234,0.3);transition:transform 0.4s cubic-bezier(0.34,1.56,0.64,1),width 0.3s cubic-bezier(0.34,1.56,0.64,1);z-index:1;pointer-events:none;" id="polo-mode-glider"></div>
                 <button id="polo-mode-overwrite" class="mode-tab active" style="position:relative;z-index:2;flex:1;height:28px;border:none;background:transparent;color:#fff;font-size:12px;font-weight:500;cursor:pointer;border-radius:10px;display:flex;align-items:center;justify-content:center;user-select:none;transition:color 0.35s ease;">
@@ -4034,6 +3818,16 @@ function createPage3Panel() {
     const modeFillBtn = document.getElementById('polo-mode-fill-btn');
     const modeFillSplit = document.getElementById('polo-mode-fill-split');
     const modeFillDropdownBtn = document.getElementById('polo-mode-fill-dropdown-btn');
+    const saveButton = document.getElementById('polo-save-btn');
+    saveButton.onclick = async () => {
+        if (!currentProduct) { log('没有产品数据！', 'error'); return; }
+        saveButton.disabled = true;
+        try {
+            const results = await saveDraft(currentProduct);
+            for (const result of results) log(result, result.startsWith('✅') ? 'success' : result.startsWith('⚠️') ? 'warn' : 'info');
+        } catch (error) { log('保存失败: ' + error.message, 'error'); }
+        finally { saveButton.disabled = false; }
+    };
     let isCollapsed = false;
     window.__polo_fill_mode = 'overwrite';
 
@@ -4050,6 +3844,8 @@ function createPage3Panel() {
 
     function togglePanel() {
         isCollapsed = !isCollapsed;
+        const fillSplit = document.getElementById(isCollapsed ? 'polo-mode-container' : 'polo-autofill-split');
+        fillSplit.parentNode.insertBefore(saveButton, fillSplit.nextSibling);
         if (isCollapsed) {
             collapseBtn.textContent = '+';
             pasteBtn.style.display = 'none';
@@ -4217,9 +4013,17 @@ function createPage3Panel() {
             await ensureTabActive();
             log('开始自动填写页3...');
             const results = await fillAllPage3(currentProduct);
+                // 本页完成一轮就进入待保存，完成消息丢失也不能在刷新后反复填写。
+                try {
+                    const completedRow = currentProduct.row ?? getRowFromUrl();
+                    const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
+                    if (completedRow !== null && completedRow !== undefined)
+                        sessionStorage.setItem('polo_page3_prefilled::' + completedTask + '::' + completedRow, '1');
+                } catch (_) {}
+
             for (const r of results) log(r, r.startsWith('✅') ? 'success' : r.startsWith('⚠️') ? 'warn' : 'info');
             
-            log('🎉 全部填入完成！', 'success');
+            log(results.some(r => /^[⚠️❌]/u.test(r)) ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', results.some(r => /^[⚠️❌]/u.test(r)) ? 'warn' : 'success');
             log('💡 请检查填写内容后，手动点击页面底部的保存按钮', 'success');
             
             const saveBtn = Array.from(document.querySelectorAll('button')).find(b => 
@@ -4234,13 +4038,11 @@ function createPage3Panel() {
             if (rowNum !== null) {
                 // 填写完成 ≠ 保存完成：只上报 publishFilled（携带任务标识），不写任何已保存标记
                 log(`🔄 批量模式：第${rowNum}行填写完成，待你核对后手动保存`, 'success');
-                setTimeout(() => {
-                    chrome.runtime.sendMessage({
-                        action: 'publishFilled',
-                        row: rowNum,
-                        taskId: getTaskFromUrl()
-                    }, () => {});
-                }, 1000);
+                await sendMessageRetry({
+                    action: 'publishFilled',
+                    row: rowNum,
+                    taskId: getTaskFromUrl()
+                });
             }
         } catch (e) {
             log('❌ 填入失败: ' + e.message, 'error');
@@ -4291,10 +4093,10 @@ function createPage3Panel() {
         { icon: '📦', label: '箱规关联', act: 'fill_box_rule' },
         { icon: '📑', label: '选择物流模板', act: 'fill_logistics_template' },
         { icon: '🖼️', label: '选择详情模板', act: 'fill_detail_template' },
+        { icon: '🖼️', label: '上传细节图', act: 'fill_detail_images' },
         { icon: '🏢', label: '选择公司介绍模板', act: 'fill_company_intro_template' },
         { icon: '✨', label: '填入商品卖点', act: 'fill_highlights', mode: true },
         { icon: '❓', label: '填入FAQs', act: 'fill_faqs', mode: true },
-        { icon: '💾', label: '保存', act: 'save_draft' },
     ];
 
     const actionMap = {
@@ -4312,6 +4114,7 @@ function createPage3Panel() {
         fill_box_rule: fillBoxRule,
         fill_logistics_template: fillLogisticsTemplate,
         fill_detail_template: fillDetailTemplate,
+        fill_detail_images: fillDetailImagesPage3,
         fill_company_intro_template: fillCompanyIntroTemplate,
         fill_highlights: fillHighlightsPage3,
         fill_faqs: fillFaqsPage3,
@@ -4341,7 +4144,7 @@ function createPage3Panel() {
                 let hasSuccess = false;
                 let hasWarn = false;
                 for (const r of results) {
-                    const type = r.startsWith('✅') ? 'success' : r.startsWith('⚠️') ? 'warn' : 'info';
+                    const type = r.startsWith('✅') ? 'success' : /^[⚠️❌]/u.test(r) ? 'warn' : 'info';
                     if (type === 'success') hasSuccess = true;
                     if (type === 'warn') hasWarn = true;
                     log(r, type);
@@ -4419,6 +4222,20 @@ function getTaskFromUrl() {
     try { return sessionStorage.getItem('polo_batch_task') || null; } catch (e) { return null; }
 }
 
+// 菜单保存由后台点击并记账；用户直接点平台保存也按相同规则记账。
+function observePage3SaveClick() {
+    document.addEventListener('click', event => {
+        const button = event.target?.closest?.('button');
+        if (!event.isTrusted || !button || (button.innerText || button.textContent || '').trim() !== '保存' || !currentProduct) return;
+        const product = currentProduct;
+        sendMessageRetry({ action: 'recordPublishSaveClick', row: product.row,
+            taskId: product._publishTaskId || getTaskFromUrl(), fileKey: product._publishFileKey, x: 0, y: 0
+        }).then(response => {
+            if (!response?.ok) log('保存记录未更新：' + (response?.error || '后台无响应'), 'error');
+        }).catch(error => log('保存记录未更新：' + error.message, 'error'));
+    }, true);
+}
+
 async function loadBatchProduct(rowNum) {
     try {
         const resp = await sendMessageRetry({
@@ -4431,10 +4248,23 @@ async function loadBatchProduct(rowNum) {
             updateProductInfo(currentProduct);
             log('✓ 从批量数据加载产品: 行' + rowNum, 'success');
 
+            let alreadyPrefilled = false;
+            try {
+                const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
+                alreadyPrefilled = sessionStorage.getItem('polo_page3_prefilled::' + completedTask + '::' + rowNum) === '1';
+            } catch (_) {}
+            if (alreadyPrefilled || resp.autoFillAllowed === false) {
+                log('该页已填入或不允许自动填写，刷新不重复填入；未保存内容待保存', 'info');
+                if (alreadyPrefilled) {
+                    await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl() });
+                }
+                return true;
+            }
+
             const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows', taskId: getTaskFromUrl() });
-            // 只依据「已核实保存」记录跳过；跳过后必须正常推进队列，不能卡死
+            // 已保存页跳过；待保存由填写完成记录拦截，二者不混用。
             if (uploadedResp && uploadedResp.ok && uploadedResp.rows && uploadedResp.rows[rowNum]) {
-                log(`⚠️ 第${rowNum}行已核实保存，跳过自动填入`, 'warn');
+                log(`⚠️ 第${rowNum}行已标记保存，跳过自动填入`, 'warn');
                 await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true });
                 return false;
             }
@@ -4448,9 +4278,17 @@ async function loadBatchProduct(rowNum) {
                 await ensureTabActive();
                 log('🔄 批量模式：自动开始填写页3...', 'success');
                 const results = await fillAllPage3(currentProduct);
+                // 本页完成一轮就进入待保存，完成消息丢失也不能在刷新后反复填写。
+                try {
+                    const completedRow = currentProduct.row ?? getRowFromUrl();
+                    const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
+                    if (completedRow !== null && completedRow !== undefined)
+                        sessionStorage.setItem('polo_page3_prefilled::' + completedTask + '::' + completedRow, '1');
+                } catch (_) {}
+
                 for (const r of results) log(r, r.startsWith('✅') ? 'success' : r.startsWith('⚠️') ? 'warn' : 'info');
                 
-                log('🎉 全部填入完成！', 'success');
+                log(results.some(r => /^[⚠️❌]/u.test(r)) ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', results.some(r => /^[⚠️❌]/u.test(r)) ? 'warn' : 'success');
                 log('💡 请检查填写内容后，手动点击页面底部的保存按钮', 'success');
                 
                 const saveBtn = Array.from(document.querySelectorAll('button')).find(b => 
@@ -4462,15 +4300,11 @@ async function loadBatchProduct(rowNum) {
                 }
                 
                 log(`🔄 批量模式：第${rowNum}行填写完成，待核对后手动保存`, 'success');
-                setTimeout(async () => {
-                    try {
-                        await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl() });
-                    } catch (e) {
-                        log('❌ 通知后台失败: ' + e.message, 'error');
-                    } finally {
-                        stopHeartbeat();
-                    }
-                }, 1000);
+                try {
+                    await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl() });
+                } finally {
+                    stopHeartbeat();
+                }
             } catch (e) {
                 log('❌ 自动填入失败: ' + e.message, 'error');
                 stopHeartbeat();
@@ -4487,6 +4321,7 @@ async function loadBatchProduct(rowNum) {
 function initPage3() {
     if (top !== self) return;
     createPage3Panel();
+    observePage3SaveClick();
 
     const rowNum = getRowFromUrl();
     if (rowNum !== null) {

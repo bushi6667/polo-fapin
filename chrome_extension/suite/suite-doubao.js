@@ -81,14 +81,8 @@ const SuiteDoubao = (() => {
         const controls = Array.from(document.querySelectorAll('button,[role="combobox"]'))
             .filter(el => el.getClientRects().length && !el.disabled)
             .map(el => (el.innerText || el.textContent || '').trim());
-        const model = String(settings.model || '').trim();
-        const ratio = String(settings.ratio || '').trim();
-        if (!ratio) throw new Error('任务缺少比例配置');
         if (!controls.some(text => text.toLowerCase().includes('seedream'))) throw new Error('未检测到豆包生图模型控件，未发送；请先确认已进入图像生成模式');
-        // 比例控件文本形如「比例 1:1」，先归一化掉中文标签前缀再比对
-        const normRatio = (t) => String(t).replace(/[^\d:.]/g, '');
-        if (!controls.some(text => normRatio(text) === ratio)) throw new Error(`未能确认豆包当前比例为 ${ratio}，未发送；请先选择对应比例`);
-        return { ok: true, model, ratio };
+        return { ok: true, settingsManagedByUser: true };
     }
 
     async function prepareSettings(settings) {
@@ -97,18 +91,6 @@ const SuiteDoubao = (() => {
             const enter=buttons().find(e=>(e.textContent||'').trim()==='图像生成');
             if(enter)enter.click();
             for(let i=0;i<40&&!buttons().some(e=>/seedream/i.test(e.textContent||''));i++)await sleep(250);
-        }
-        const ratio=String(settings.ratio||'1:1');
-        const control=buttons().find(e=>(e.textContent||'').replace(/\s+/g,'').startsWith('比例'));
-        if(control && String(control.textContent).replace(/[^\d:.]/g,'')!==ratio) {
-            control.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,buttons:1,pointerId:1,pointerType:'mouse',isPrimary:true}));
-            await sleep(300);
-            const menu=document.querySelector('[role="menu"]');
-            const choice=menu&&Array.from(menu.querySelectorAll('button,span,[role="menuitem"]')).find(e=>(e.textContent||'').trim()===ratio);
-            if(!choice)throw new Error('未找到比例选项 '+ratio+'，未发送');
-            choice.click();
-            document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}));
-            await sleep(300);
         }
         return verifySettings(settings);
     }
@@ -213,12 +195,16 @@ const SuiteDoubao = (() => {
     }
 
     async function typePrompt(text) {
-        const input = findInput();
+        let input = findInput();
         if (!input) throw new Error('豆包输入框未就绪，无法输入提示词');
         input.focus();
 
         await nativeInput('begin');
         try {
+            // attach debugger / 上传完成后的页面更新可能改变焦点或替换输入框。
+            input = findInput();
+            if (!input) throw new Error('豆包输入框已更新，请重新生成当前套图');
+            input.focus();
             if (readInputText(input)) await nativeInput('clear');
             // 逐字输入；换行用 Shift+Enter（原生桥内部实现），绝不发普通 Enter
             for (const ch of Array.from(String(text))) {
@@ -231,7 +217,7 @@ const SuiteDoubao = (() => {
 
         // 实际校验输入是否完整，不假定成功
         await sleep(300);
-        const got = readInputText(input).replace(/\u00a0/g, ' ').trim();
+        const got = readInputText(findInput() || input).replace(/\u00a0/g, ' ').trim();
         const want = String(text).replace(/\u00a0/g, ' ').trim();
         // ProseMirror 的软换行可能表现为双换行；只归一空白，不放过文字缺失或替换。
         const comparable=value=>value.replace(/\s+/g,' ').trim();
@@ -340,9 +326,14 @@ const SuiteDoubao = (() => {
     /* ---------- 消息入口 ---------- */
     async function pollNewImages(baselineUrls,expectCount) {
         for(const image of document.querySelectorAll('img'))if(String(image.className||'').startsWith('image-')&&String(image.src||'').startsWith('data:image/svg')){image.scrollIntoView({block:'center',behavior:'instant'});await sleep(400);}
-        const base=baselineUrls||S.baselineUrls, images=getAllImageUrls().filter(u=>!base.includes(u));
+        const base=baselineUrls||S.baselineUrls;
+        const baseKeys=new Set(base.map(contentKeyOf));
+        const raw=getAllImageUrls().filter(u=>!baseKeys.has(contentKeyOf(u)));
+        const groups=new Map();for(const url of raw){const key=contentKeyOf(url);if(!groups.has(key))groups.set(key,url);}
+        const images=[...groups.values()];
         const busy=!!document.querySelector('[class*="generating"],[class*="typing"]');
-        if(images.length!==expectCount||busy)return {ready:false,count:images.length};
+        if(busy||images.length<expectCount)return {ready:false,count:images.length};
+        if(images.length>expectCount)throw new Error(`生成结果数量不符：期望${expectCount}张，去重后${images.length}张，请检查本次对话`);
         return {ready:true,images:await materializeImages(images),rawCount:images.length,baselineCount:base.length,mergedGroups:0};
     }
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

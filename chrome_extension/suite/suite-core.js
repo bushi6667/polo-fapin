@@ -28,7 +28,8 @@ const SuiteCore = (() => {
         for (const item of (raw || [])) {
             const url = typeof item === 'string' ? item : (item && (item.url || item.src));
             if (typeof url !== 'string' || !url.trim()) continue;
-            if (NOISE_HINT.test(url)) continue;
+            // dataURL 是图像内容，base64 中随机出现 icon/logo 等字母不能当作路径噪声。
+            if (!/^(data:|blob:)/i.test(url) && NOISE_HINT.test(url)) continue;
             out.push({ url: url.trim(), w: (item && item.w) || 0, h: (item && item.h) || 0 });
         }
         return out;
@@ -100,6 +101,7 @@ const SuiteCore = (() => {
             const f = await fh.getFile();
             if (!f || !f.size) return { ok: false, error: '回读文件为空' };
             if (f.size !== blob.size) return { ok: false, error: `回读大小不一致（${f.size} ≠ ${blob.size}）` };
+            if (typeof deps.hash === 'function' && await deps.hash(f) !== await deps.hash(blob)) return { ok: false, error: '回读内容指纹不一致' };
             if (!/^image\//i.test(f.type || '')) return { ok: false, error: `回读类型不是图片（${f.type || '未知'}）` };
             let size = null;
             if (typeof deps.decodeSize === 'function') {
@@ -189,6 +191,21 @@ const SuiteCore = (() => {
             });
         }
 
+        // Update a whole set in one IDB transaction: a failed fifth index must not
+        // leave the first four pointing at a different generation.
+        async function putMany(records) {
+            const db = await open();
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction(storeName, 'readwrite');
+                tx.oncomplete = resolve;
+                tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error || new Error('套图索引事务已中止'));
+                for (const r of records) tx.objectStore(storeName).put(Object.assign({}, r, {
+                    id: idOf(r.fileKey, r.rowNum, r.key), savedAt: Date.now()
+                }));
+            });
+        }
+
         // 只返回该 fileKey + rowNum 的记录（切换产品不混图）
         async function list(fileKey, rowNum) {
             const db = await open();
@@ -210,7 +227,7 @@ const SuiteCore = (() => {
             });
         }
 
-        return { open, put, get, list, remove, idOf };
+        return { open, put, putMany, get, list, remove, idOf };
     }
 
     /* ---- 编号可靠性：候选顺序 vs 已确认 ----

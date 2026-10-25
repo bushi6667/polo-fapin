@@ -28,6 +28,41 @@ const DOUBAO_URL = 'https://www.doubao.com/chat';
 let assistantTabId = null;
 let assistantPort = null;
 const publicationRequests=new Map();
+const pageDirectoryRequests=new Map();
+let assistantBridgeReady=false;
+// 超时参数可被测试注入（globalThis.PAGE_DIR_ACK_MS / PAGE_DIR_TIMEOUT_MS），生产用默认值
+const PAGE_DIR_ACK_MS=(typeof globalThis.PAGE_DIR_ACK_MS==='number'&&globalThis.PAGE_DIR_ACK_MS)||5000;
+const PAGE_DIR_TIMEOUT_MS=(typeof globalThis.PAGE_DIR_TIMEOUT_MS==='number'&&globalThis.PAGE_DIR_TIMEOUT_MS)||60000;
+function pageDirectoryRequest(request){return new Promise((resolve,reject)=>{
+    if(!assistantPort)return reject(Error('请先打开看板页面，在页面配置目录'));
+    const requestId='directory_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+    const timer=setTimeout(()=>{pageDirectoryRequests.delete(requestId);reject(Error('页面目录操作超时，请检查页面是否仍然打开'));},PAGE_DIR_TIMEOUT_MS);
+    // 5 秒内页面必须先确认收到（ack）；不确认 = 页面没有目录桥监听或主线程长时间阻塞。
+    // 注意：不以「是否已握手」作为门槛——页面 connect 后第一条消息可能先于监听注册到达而被丢弃，
+    // 用 ack 判定页面是否真的能接请求，避免把正常页面误判成旧版。
+    const ackTimer=setTimeout(()=>{
+        const pending=pageDirectoryRequests.get(requestId);
+        if(!pending||pending.acked)return;
+        pageDirectoryRequests.delete(requestId);clearTimeout(timer);
+        reject(Error('看板页面未及时响应目录请求：请重试；若持续出现，请刷新（F5）发品助手页面'));
+    },PAGE_DIR_ACK_MS);
+    pageDirectoryRequests.set(requestId,{resolve,reject,timer,ackTimer,acked:false});
+    try{assistantPort.postMessage({action:'pageDirectoryRequest',requestId,request});}catch(e){clearTimeout(timer);clearTimeout(ackTimer);pageDirectoryRequests.delete(requestId);reject(e);}
+});}
+// 长连接端口消息里与目录桥相关的部分：握手、逐请求 ack、最终响应。
+// 独立成函数，便于从 background.js 切片做隔离验证。
+function handleBridgePortMessage(port,msg){
+    if(msg.action==='pageDirectoryBridgeReady'&&assistantPort===port)assistantBridgeReady=true;
+    if(msg.action==='pageDirectoryAck'&&assistantPort===port){
+        if(!assistantBridgeReady)assistantBridgeReady=true;   // 能 ack 就说明页面支持目录桥
+        const pending=pageDirectoryRequests.get(msg.requestId);
+        if(pending){clearTimeout(pending.ackTimer);pending.acked=true;}
+    }
+    if(msg.action==='pageDirectoryResponse'&&assistantPort===port){
+        const pending=pageDirectoryRequests.get(msg.requestId);
+        if(pending){clearTimeout(pending.timer);clearTimeout(pending.ackTimer);pageDirectoryRequests.delete(msg.requestId);msg.ok?pending.resolve(msg.result):pending.reject(Error(msg.error||'页面目录操作失败'));}
+    }
+}
 const publicationUploadLocks=new Set();
 function readPublicationGenerated(request){
     return new Promise((resolve,reject)=>{
@@ -54,6 +89,17 @@ async function ensureConfigLoaded() {
     });
 }
 
+function normalizeHelperPath(value) {
+    let path=String(value||'').trim();
+    if(/^file:/i.test(path)){
+        const url=new URL(path);
+        if(url.protocol!=='file:')return '';
+        path=decodeURIComponent(url.pathname);
+        if(url.hostname&&url.hostname!=='localhost')path='\\\\'+url.hostname+path;
+        if(/^\/[a-z]:\//i.test(path))path=path.slice(1);
+    }
+    return path.replace(/\//g,'\\').toLowerCase();
+}
 // H1 第1层：外部消息来源校验（Chrome 提供的 sender.url 不可伪造）
 async function isTrustedSender(sender) {
     const url = sender?.url || '';
@@ -67,7 +113,8 @@ async function isTrustedSender(sender) {
     if (!url.startsWith('file://')) return false;
     let path;
     try {
-        path = decodeURIComponent(url.replace(/^file:\/\/\//, '').replace(/^file:\/\//, '')).replace(/\//g, '\\');
+        path = normalizeHelperPath(url);
+        if(!path)return false;
     } catch (e) {
         console.warn('[isTrustedSender] 非法 file:// URL，拒绝:', url);
         return false;
@@ -75,7 +122,8 @@ async function isTrustedSender(sender) {
     // 优先精确匹配 popup 已配置的 helperPath（发品助手.html 的本地路径）
     const helper = await new Promise(r => chrome.storage.local.get(HELPER_PATH_KEY, v => r(v[HELPER_PATH_KEY] || '')));
     if (helper) {
-        const helperNorm = helper.replace(/\//g, '\\').toLowerCase();
+        let helperNorm;
+        try{helperNorm=normalizeHelperPath(helper);}catch(_){return false;}
         const pathLower = path.toLowerCase();
         if (pathLower === helperNorm) return true; // 绝对路径：完整相等
         if (!helperNorm.includes('\\') && !helperNorm.includes(':')) {
@@ -521,6 +569,46 @@ function pausePublishTask(reason, detail) {
     return withPublishLock(() => pausePublishTaskLocked(reason, detail));
 }
 
+// 手动暂停：立即闸停并关闭当前产品页（填入中断，未保存的行仍留在队列头部，继续时重发该产品）
+async function pausePublishTaskManual() {
+    markPublishStop();
+    return withPublishLock(async () => {
+        const t = await loadPublishTask();
+        if (t && t.state !== 'done') {
+            const tabId = t.currentTabId;
+            t.currentRow = null;
+            t.currentTabId = null;
+            t.currentStartedAt = 0;
+            t.currentRowRetries = 0;
+            t.currentRowFailure = '';
+            t.resourceBlockDetail = '';
+            await savePublishTask(t);
+            if (tabId !== null && tabId !== undefined) {
+                try { await chrome.tabs.remove(tabId); } catch (_) {}
+            }
+        }
+        await pausePublishTaskLocked('manual', '用户手动暂停：当前产品已停止填入；点「继续」重新发该产品');
+    });
+}
+
+// 回收：发品内容不保存即全部丢弃，关闭当前产品页，任务不可恢复
+async function discardPublishTask() {
+    markPublishStop();
+    return withPublishLock(async () => {
+        const t = await loadPublishTask();
+        const tabId = t ? t.currentTabId : null;
+        const row = t ? t.currentRow : null;
+        await savePublishTask(null);
+        stopPublishTick();
+        if (tabId !== null && tabId !== undefined) {
+            try { await chrome.tabs.remove(tabId); } catch (_) {}
+        }
+        await appendPublishLog({ level: 'discard', row });
+        await broadcastPublishState();
+        return { ok: true };
+    });
+}
+
 // 当前行是否"已失效、可重试"。与资源暂停原因分开保存：
 //   currentRowFailure = rowTimeout/tabClosed/openFail（行本身失效，重试/继续的判断依据）
 //   pauseReason       = 最近一次暂停原因，可能是 memory/pageLimit/monitorFail 等资源原因
@@ -565,12 +653,19 @@ async function resumePublishTask() {
     if (t.state === 'running') { notifyAssistant('publishResumeRejected', { message: '任务正在运行中' }); return { ok: false, message: '任务正在运行中' }; }
     if (t.remaining.length === 0) { notifyAssistant('publishResumeRejected', { message: '队列已空' }); return { ok: false, message: '队列已空' }; }
 
-    // 当前行处于"已失效"状态：不能靠"继续"空等，必须走明确的重试/跳过
-    const rowFailR = rowFailureOf(t);
-    if (t.currentRow !== null && rowFailR) {
-        const msg = `第 ${t.currentRow} 行需要明确处理（${rowFailR}）：请点「↻ 重试当前行」重开该页，或「⏭ 跳过当前行」`;
-        notifyAssistant('publishResumeRejected', { message: msg });
-        return { ok: false, message: msg };
+    // 继续 = 当前产品重新发一遍：关闭上次未完成的页面并复位当前行（行未 shift，仍是 remaining[0]）
+    if (t.currentRow !== null) {
+        const oldTabId = t.currentTabId;
+        t.currentRow = null;
+        t.currentTabId = null;
+        t.currentStartedAt = 0;
+        t.currentRowRetries = 0;
+        t.currentRowFailure = '';
+        t.resourceBlockDetail = '';
+        if (oldTabId !== null && oldTabId !== undefined) {
+            try { await chrome.tabs.remove(oldTabId); } catch (_) {}
+        }
+        await savePublishTask(t);
     }
 
     // ③ 合法性检查全部通过 → 才允许解除"本请求开始前"的旧停止
@@ -689,8 +784,10 @@ async function processPublishQueueLocked() {
     }
 
     // 本批已开页数达上限 → 暂停，等用户主动继续（不因关页/保存自动继续）
-    if ((t.batchFilled || 0) >= t.batchSize) {
-        await pausePublishTaskLocked('batch', `本批已开 ${t.batchFilled}/${t.batchSize} 页达上限，剩 ${t.remaining.length} 款；处理完已开页面后点「继续下一批」`);
+    // 本批「填满」才暂停（用已填完数，不是已开页数）：这样暂停时当前套已完成，
+    // 点继续自然从下一套开始，不会重上最后一款。
+    if ((t.batchFilledDone || 0) >= t.batchSize) {
+        await pausePublishTaskLocked('batch', `本批已填满 ${t.batchFilledDone}/${t.batchSize} 套，剩 ${t.remaining.length} 款；点「继续」从下一套开始`);
         return;
     }
 
@@ -913,6 +1010,8 @@ async function skipPublishRow() {
         t.remaining.shift();
         if (!Array.isArray(t.skippedRows)) t.skippedRows = [];
         t.skippedRows.push(row);
+        // 跳过也算本批处理完一套：保持「已开 / 已处理」两个计数一致，避免显示「已开 51/50」
+        t.batchFilledDone = (t.batchFilledDone || 0) + 1;
         t.currentRow = null;
         t.currentTabId = null;
         t.currentStartedAt = 0;
@@ -1224,6 +1323,14 @@ function buildColorImagePath(rowNum, color, context) {
 // 返回 { url, path }（data URL 或本地路径），供发品页上传颜色图
 function getColorImagePathData(rowNum, color, callback, context) {
     context = context || { fileKey: getFilePrefix(), fileFolder: CURRENT_FILENAME || DEFAULT_FILE_FOLDER, colorImgDir: COLOR_IMG_DIR };
+    // 图片以磁盘为准：先按页面句柄读 <文件名>/rowN/rowN_<color>.png，读到就直接用 dataUrl 上传。
+    // 读不到（未授权/文件不存在）才回落到旧记录逻辑，兼容历史数据。
+    fetchColorImageAsBase64(rowNum, color, undefined, context.fileFolder).then(r => {
+        if (r && r.ok && r.dataUrl) { callback({ ok: true, url: r.dataUrl, dataUrl: r.dataUrl, fromDisk: true, path: null }); return; }
+        getColorImagePathDataLegacy(rowNum, color, callback, context);
+    }).catch(() => getColorImagePathDataLegacy(rowNum, color, callback, context));
+}
+function getColorImagePathDataLegacy(rowNum, color, callback, context) {
     if (typeof PoloDirectories !== 'undefined' && PoloDirectories.isColorSelection(context.colorImgDir)) {
         PoloDirectories.colorImage(context.colorImgDir,context.fileFolder,rowNum,color)
             .then(url => callback({ok:true,url,path:null}))
@@ -1622,6 +1729,25 @@ async function suiteVerifyOutput(request) {
 // （saveProductData/saveBatchProducts/getProductByRow/openPublishPage/…/getConfig），
 // 各动作内直接操作 storage 与目录配置并 sendResponse
 async function handleSharedAction(request, sendResponse, sender) {
+    if(['listScriptDirectory','readScriptDirectory','psDirectoryStatus','readPsImage','writePsImage','suiteOutputStatus','suiteWriteOutput','suiteVerifyOutput'].includes(request.action)){
+        try{sendResponse(await pageDirectoryRequest(request));}catch(e){sendResponse({ok:false,error:e.message});}
+        return true;
+    }
+    if(request.action==='registerPagePaths'){
+        if(!await isTrustedSender(sender)){sendResponse({ok:false,error:'来源不符'});return true;}
+        const helper=String(sender.url||'').split('?')[0].split('#')[0];
+        await chrome.storage.local.set({polo_helper_path:helper});
+        sendResponse({ok:true});return true;
+    }
+    if (request.action === 'suitePreparePage') {
+        try {
+            const exec = await getActiveColorExec();
+            if (exec && ['accepted', 'pending'].includes(exec.state)) throw Error('换色任务正在执行，请先暂停换色');
+            const tab = await prepareSuiteDoubaoPage();
+            sendResponse({ok:true,tabId:tab.id});
+        } catch(e) { sendResponse({ok:false,error:e.message}); }
+        return true;
+    }
     if (['listScriptDirectory','readScriptDirectory'].includes(request.action)) {
         try {
             const result = request.action === 'listScriptDirectory' ? await PoloDirectories.scriptDirectoryFiles()
@@ -1656,14 +1782,17 @@ async function handleSharedAction(request, sendResponse, sender) {
 
     // ---------- 发品任务控制（发品助手页 file:// 与扩展内部均可） ----------
     if (request.action === 'pausePublishQueue') {
-        markPublishStop();   // 立即置闸门并递增停止代次：资源检查/开页途中也不再创建新页
-        pausePublishTask('manual', '用户手动停止').then(() => {
+        pausePublishTaskManual().then(() => {
             buildPublishStatePayload().then(p => sendResponse({ ok: true, state: p.state }));
         }).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'resumePublishQueue') {
         resumePublishTask().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'discardPublishTask') {
+        discardPublishTask().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'getPublishState') {
@@ -1877,11 +2006,7 @@ async function handleSharedAction(request, sendResponse, sender) {
                 await saveActiveColorExec(null).catch(() => {});
                 globalThis.__suiteExecLock = { taskId, at: Date.now() };
 
-                let tab = await findDoubaoTab();
-                if (!tab) {
-                    tab = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
-                    await new Promise(r => setTimeout(r, 4000));
-                }
+                let tab = await prepareSuiteDoubaoPage();
                 let tabId = tab.id;   // 页面失联时可能换成新标签
                 await chrome.tabs.update(tabId,{active:true});
                 await chrome.windows.update(tab.windowId,{focused:true});
@@ -1922,7 +2047,11 @@ async function handleSharedAction(request, sendResponse, sender) {
                 };
 
                 // ① 探测就绪 / 登录
-                const pr = await toTab('suite-probe');
+                let pr = await toTab('suite-probe');
+                for (let attempt=0; pr?.success && !pr.hasInput && !pr.loggedOut && attempt<60; attempt++) {
+                    await new Promise(resolve=>setTimeout(resolve,250));
+                    pr = await toTab('suite-probe');
+                }
                 if (!pr || !pr.success) throw new Error('豆包页面未就绪：' + ((pr && pr.error) || '无响应'));
                 if (pr.loggedOut) throw new Error('豆包登录失效，请先登录后再发起套图');
                 if (!pr.hasInput) throw new Error('豆包输入框未出现，页面结构可能已变化');
@@ -2542,6 +2671,7 @@ chrome.runtime.onConnectExternal.addListener((port) => {
         if (port.name === 'assistant-channel') {
             assistantPort = port;
             assistantTabId = port.sender?.tab?.id || null;
+            assistantBridgeReady = false;   // 新端口必须重新握手，防止请求发到未就绪页面
             console.log('✅ [onConnectExternal] 发品助手长连接已建立, tabId=', assistantTabId);
             // 连接建立后主动推一次任务状态：页面刷新/重连后能立刻恢复面板与暂停原因
             broadcastPublishState().catch(() => {});
@@ -2549,16 +2679,23 @@ chrome.runtime.onConnectExternal.addListener((port) => {
                 console.log('🔌 [onConnectExternal] 发品助手长连接已断开');
                 if(assistantPort!==port)return;
                 assistantPort = null;
+                assistantBridgeReady = false;
+                for(const pending of pageDirectoryRequests.values()){clearTimeout(pending.timer);clearTimeout(pending.ackTimer);pending.reject(Error('看板页面已断开，目录操作停止'));}
+                pageDirectoryRequests.clear();
                 for(const pending of publicationRequests.values()){clearTimeout(pending.timer);pending.reject(Error('发品助手连接断开，图片上传已停止'));}
                 publicationRequests.clear();
             });
             port.onMessage.addListener((msg) => {
+                handleBridgePortMessage(port, msg);
                 if(msg.action==='publicationImagesResponse'&&assistantPort===port){
                     const pending=publicationRequests.get(msg.requestId);
                     if(pending){clearTimeout(pending.timer);publicationRequests.delete(msg.requestId);msg.ok?pending.resolve(msg.files):pending.reject(Error(msg.error||'生成图片读取失败'));}
                 }
                 console.log('🔍 [onConnectExternal] 收到消息:', msg.action);
             });
+            // 监听注册完成后再主动探测一次目录桥：页面连接时抢先发出的首条消息可能被丢弃，
+            // 由扩展侧发起可确保页面一定能收到并回 bridgeReady。
+            try{port.postMessage({action:'bridgeProbe'});}catch(_){}
         }
     }).catch((err) => {
         console.warn('[onConnectExternal] 来源校验异常，断开连接:', err.message);
@@ -2591,15 +2728,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === 'pausePublishQueue') {
-        markPublishStop();   // 立即置闸门并递增停止代次（同上）
-        loadPublishTask().then(t => {
-            if (!t) { sendResponse({ ok: false, message: '没有发品任务' }); return; }
-            pausePublishTask('manual', '用户手动停止').then(() => sendResponse({ ok: true }));
-        });
+        pausePublishTaskManual().then(() => sendResponse({ ok: true })).catch(e => sendResponse({ ok: false, message: e.message }));
         return true;
     }
     if (request.action === 'resumePublishQueue') {
         resumePublishTask().then(sendResponse).catch(e => sendResponse({ ok: false, message: e.message }));
+        return true;
+    }
+    if (request.action === 'discardPublishTask') {
+        discardPublishTask().then(sendResponse).catch(e => sendResponse({ ok: false, message: e.message }));
         return true;
     }
     if (request.action === 'getPublishState') {
@@ -3167,6 +3304,18 @@ async function batchUploadImages(tabId, imagePaths, uploadFn) {
     return { ok: success > 0, success, total: imagePaths.length };
 }
 
+let suitePagePreparing = null;
+function prepareSuiteDoubaoPage() {
+    if (suitePagePreparing) return suitePagePreparing;
+    suitePagePreparing = (async () => {
+        const tab = await findDoubaoTab() || await chrome.tabs.create({url:DOUBAO_URL,active:true});
+        await chrome.tabs.update(tab.id,{active:true});
+        if (tab.windowId) await chrome.windows.update(tab.windowId,{focused:true});
+        return tab;
+    })().finally(() => { suitePagePreparing = null; });
+    return suitePagePreparing;
+}
+
 async function findDoubaoTab() {
     const tabs = await chrome.tabs.query({ url: ['*://www.doubao.com/*', '*://doubao.com/*'] });
     if (tabs.length > 0) return tabs[0];
@@ -3186,7 +3335,28 @@ async function openDoubaoAndStartTaskLocked(task, epochAtRequest) {
     // 保留上一份"已接收"身份：豆包繁忙被拒时不得覆盖原活动执行身份
     const prevExec = await getActiveColorExec();
     if (prevExec && (prevExec.state === 'accepted' || prevExec.state === 'pending')) {
-        return { ok: false, busy: true, error: '已有执行或待接收任务，未覆盖原执行身份' };
+        // 失效身份自愈：页面刷新/回收后遗留的执行身份会一直挡住后续换色
+        let live = false;
+        try {
+            if (prevExec.tabId) {
+                await chrome.tabs.get(prevExec.tabId);
+                const st = await chrome.tabs.sendMessage(prevExec.tabId, { action: 'getColorTaskStatus' }).catch(() => null);
+                const sameTask = !!(st && st.ok === true && st.isProcessing === true && st.task
+                    && prevExec.executionId && st.task.executionId === prevExec.executionId);
+                live = sameTask;
+                if (st && st.ok === true && st.isProcessing === true && !sameTask) {
+                    // 页面里跑的不是这份执行身份：取消它，释放豆包输入通道
+                    await chrome.tabs.sendMessage(prevExec.tabId, { action: 'cancelColorTask' }).catch(() => {});
+                }
+            }
+        } catch (_) { live = false; }
+        if (!live && prevExec.state === 'pending' && Date.now() - (prevExec.startedAt || 0) < 120000) {
+            return { ok: false, busy: true, error: '已有执行或待接收任务，未覆盖原执行身份' };
+        }
+        if (live) return { ok: false, busy: true, error: '豆包仍在生成上一款，请等它完成后再换色' };
+        console.warn('🧹 清理失效的换色执行身份（执行页已结束或已关闭）');
+        await saveActiveColorExec(null);
+        await savePendingColorTask(null);
     }
     if (task.fileKey !== undefined && task.fileKey !== getFilePrefix()) return { ok: false, error: '换色任务所属 Excel 已切换' };
     if (epochAtRequest !== colorDispatchEpoch) return { ok: false, error: '启动期间收到停止请求' };
@@ -3304,6 +3474,21 @@ async function uploadDoubaoImage(tabId, imagePath) {
         targetId = tabId || tab?.id;
         if (!targetId) throw new Error('无法获取标签页ID');
 
+        const fileName=decodeURIComponent(String(imagePath||'').split(/[\\/]/).pop().split('?')[0]);
+        const source=await pageDirectoryRequest({action:'readPsImage',fileName});
+        if(!source.ok||!source.dataUrl)throw Error(source.error||'页面产品原图读取失败');
+        const injected=await chrome.scripting.executeScript({target:{tabId:targetId},func:async(dataUrl,name)=>{
+            const input=document.querySelector('input[type="file"]');
+            if(!input)throw Error('未找到豆包文件输入框');
+            const blob=await(await fetch(dataUrl)).blob();
+            const transfer=new DataTransfer();transfer.items.add(new File([blob],name,{type:blob.type}));
+            input.files=transfer.files;
+            input.dispatchEvent(new Event('input',{bubbles:true}));
+            input.dispatchEvent(new Event('change',{bubbles:true}));return true;
+        },args:[source.dataUrl,fileName]});
+        if(!injected[0]?.result)throw Error('豆包图片上传未成功');
+        return {ok:true};
+
         try {
             await chrome.debugger.attach({ tabId: targetId }, '1.3');
             attached = true;
@@ -3352,7 +3537,6 @@ async function uploadDoubaoImage(tabId, imagePath) {
         }
     }
 }
-
 // AI 换色图片下载：优先预取 blob 转 data URL（MV3 SW 无 URL.createObjectURL）并存 IDB，
 // 再走 chrome.downloads 落盘到 Polo发品_颜色图/{文件名}/rowN/；
 // 强制文件名经 downloadFilenameMap（id/url 匹配）由 onDeterminingFilename 生效；
@@ -3407,6 +3591,17 @@ async function downloadDoubaoImage(url, filename, rowNum, execution) {
                 }
             }
 
+            // 页面为唯一目录来源：直接写入页面选择的实际文件夹，不再下载到另一位置。
+            if(!dataUrl)return resolve({ok:false,error:'无法获取颜色图，未写入页面目录'});
+            try{
+                const saved=await pageDirectoryRequest({action:'pageWriteColor',dataUrl,filename,rowNum,fileFolder});
+                if(colorMatch){
+                    const storageKey=bound.fileKey+'color__'+rowNum;
+                    const old=await chrome.storage.local.get(storageKey);
+                    await chrome.storage.local.set({[storageKey]:{...(old[storageKey]||{}),[colorMatch[1]]:{url,path:saved.path}}});
+                }
+                return resolve({ok:true,filename,path:saved.path});
+            }catch(e){return resolve({ok:false,error:e.message});}
             const downloadUrl = dataUrl && dataUrl.length <= 5 * 1024 * 1024 ? dataUrl : url;
             console.log(`[download] using url type: ${downloadUrl === dataUrl ? 'data' : 'original'}, filename: ${relativePath}`);
 
@@ -3672,7 +3867,14 @@ async function downloadViaFetch(url, filename, rowNum, relativePath, bound) {
     }
 }
 
-async function fetchColorImageAsBase64(rowNum, color, expectedFileKey) {
+async function fetchColorImageAsBase64(rowNum, color, expectedFileKey, fileFolder) {
+    if(expectedFileKey!==undefined&&expectedFileKey!==getFilePrefix())return {ok:false,error:'颜色图所属文件已切换'};
+    try{
+        const result=await pageDirectoryRequest({action:'pageReadColor',rowNum,color,fileFolder:fileFolder||CURRENT_FILENAME||DEFAULT_FILE_FOLDER});
+        if(expectedFileKey!==undefined&&expectedFileKey!==getFilePrefix())return {ok:false,error:'颜色图所属文件已切换'};
+        return result;
+    }catch(e){return {ok:false,error:e.message};}
+    /* 旧目录读取实现保留用于迁移核对，不再执行。 */
     const fileKey = getFilePrefix(), fileName = CURRENT_FILENAME;
     if (expectedFileKey !== undefined && expectedFileKey !== fileKey) return {ok:false,error:'颜色图所属文件已切换'};
     let directoryError = null;

@@ -6,6 +6,19 @@
 // 面板：页面右下角浮动面板（Polo发品助手）
 // ============================================================
 let hiddenFileInput = null;
+async function uploadPage2PublicationImages(product){
+    log('正在准备并压缩6张主图：444、111及当前类目4张公共图…');
+    const result=await new Promise((resolve,reject)=>{
+        const timer=setTimeout(()=>reject(Error('六张主图上传超时，已停止后续步骤')),240000);
+        chrome.runtime.sendMessage({action:'uploadPublicationImages',kind:'main',product:{row:product.row,category:product.category,_categoryType:product._categoryType,_publishFileKey:product._publishFileKey}},response=>{
+            clearTimeout(timer);const error=chrome.runtime.lastError;
+            if(error||!response?.ok)reject(Error(error?.message||response?.error||'主图上传失败'));else resolve(response);
+        });
+    });
+    if(result.count!==6)throw Error('主图未全部上传成功：'+result.count+'/6');
+    log('✓ 六张主图上传完成（统一JPG、每张不超过1MB）','success');
+    return result;
+}
 let IMG_EXT = 'jpg';
 
 // 从 storage 加载图片格式配置（默认 jpg）
@@ -197,33 +210,13 @@ async function autoFillPage2(product) {
     dots[1].style.background = '#667eea';
     setNextStep('类目');
     log('上传主图...');
-    if (!IMAGE_DIR) await loadImageDir();
-    if (!IMG_EXT) await loadImgExt();
-    const imagePath = IMAGE_DIR + (IMAGE_DIR.includes('/') ? '/' : '\\') + 'row' + product.row + '_main.' + IMG_EXT;
     try {
-        const resp = await chrome.runtime.sendMessage({
-            action: 'uploadMainImage',
-            pageType: 'page2',
-            imagePath: imagePath
-        });
-        if (resp?.accepted) {
-            log('⏳ 图片上传中，请稍候...', 'warn');
-        } else {
-            dots[1].style.background = '#ff4d4f';
-            log('✗ 图片上传请求失败', 'error');
-        }
+        await uploadPage2PublicationImages(product);
+        dots[1].style.background = '#52c41a';
     } catch (e) {
         dots[1].style.background = '#ff4d4f';
         log('✗ 图片上传失败: ' + e.message, 'error');
-    }
-
-    log('⏳ 等待图片上传完成...', 'warn');
-    const uploadOk = await waitForImageUploadPage2(20000);
-    if (uploadOk) {
-        dots[1].style.background = '#52c41a';
-        log('✓ 主图上传完成', 'success');
-    } else {
-        log('⚠️ 图片上传等待超时，继续下一步', 'warn');
+        return;
     }
 
     // ---------- 步骤2.5：等待预测类目渲染 ----------
@@ -365,28 +358,18 @@ function createPage2Panel() {
         btn.style.opacity = '1';
     };
 
-    // 仅上传主图按钮
+// 仅上传主图按钮
     document.getElementById('polo-upload-img-btn').onclick = async () => {
         if (!currentProduct) {
             log('没有产品数据！', 'error');
             return;
         }
-        if (!IMAGE_DIR) await loadImageDir();
-        if (!IMG_EXT) await loadImgExt();
-        const imagePath = IMAGE_DIR + (IMAGE_DIR.includes('/') ? '/' : '\\') + 'row' + currentProduct.row + '_main.' + IMG_EXT;
-        log('开始上传主图: ' + imagePath);
+        const button=document.getElementById('polo-upload-img-btn');button.disabled=true;
         try {
-            const resp = await chrome.runtime.sendMessage({
-                action: 'uploadMainImage',
-                pageType: 'page2',
-                imagePath: imagePath
-            });
-            if (resp?.accepted) {
-                log('⏳ 图片上传中，请稍候...', 'warn');
-            }
+            await uploadPage2PublicationImages(currentProduct);
         } catch (e) {
             log('✗ 上传失败: ' + e.message, 'error');
-        }
+        } finally {button.disabled=false;}
     };
 
     // 图片格式按钮选中态切换（JPG/PNG 高亮）
@@ -471,6 +454,10 @@ async function loadBatchProduct(rowNum) {
             currentProduct = resp.data;
             updateProductInfo(currentProduct);
             log('✓ 从批量数据加载产品: 行' + rowNum, 'success');
+            if (resp.autoFillAllowed === false) {
+                log('该页已保存或产品页身份不匹配，不自动重填', 'info');
+                return true;
+            }
             
             const stopHeartbeat = startHeartbeat(15000);
             log('💓 保活心跳已启动（每15秒）', 'info');
@@ -533,8 +520,7 @@ function setupNextStepRowPass(rowNum) {
                     try { sessionStorage.setItem('polo_batch_row', rowNum); } catch(_e) {}
                     if (btn.href && btn.href.includes('easyListing')) {
                         e.preventDefault();
-                        const sep = btn.href.includes('?') ? '&' : '?';
-                        window.location.href = btn.href + sep + 'row=' + rowNum;
+                        window.location.href = appendRowToUrl(btn.href);
                         return false;
                     }
                 }, true);
@@ -548,12 +534,7 @@ function setupNextStepRowPass(rowNum) {
     const origOpen = window.open;
     window.open = function(url, ...args) {
         try { sessionStorage.setItem('polo_batch_row', rowNum); } catch(_e) {}
-        if (url && (url.includes('easyListing') || url.includes('publish'))) {
-            if (!url.includes('row=')) {
-                const sep = url.includes('?') ? '&' : '?';
-                url = url + sep + 'row=' + rowNum;
-            }
-        }
+        url = appendRowToUrl(url);
         return origOpen.call(this, url, ...args);
     };
 
@@ -566,14 +547,11 @@ function setupNextStepRowPass(rowNum) {
     function appendRowToUrl(url) {
         try { sessionStorage.setItem('polo_batch_row', rowNum); } catch(_e) {}
         if (taskId) { try { sessionStorage.setItem('polo_batch_task', taskId); } catch(_e) {} }
-        if (url && url.includes && (url.includes('easyListing') || url.includes('publish'))) {
-            const sep = url.includes('?') ? '&' : '?';
-            if (!url.includes('row=')) {
-                url = url + sep + 'row=' + rowNum;
-            }
-            if (taskId && !url.includes('task=')) {
-                url = url + '&task=' + encodeURIComponent(taskId);
-            }
+        if (typeof url === 'string' && (url.includes('easyListing') || url.includes('publish'))) {
+            const target = new URL(url, window.location.href);
+            target.searchParams.set('row', String(rowNum));
+            if (taskId) target.searchParams.set('task', taskId);
+            url = target.href;
         }
         return url;
     }

@@ -58,14 +58,14 @@ function createTaskEnv(initial = {}) {
 }
 
 /* ---------- 页面预检环境 ---------- */
-const PAGE_FNS = ['SuiteQuickFive', 'renderSuitePrompt', 'checkSuiteVariables', 'probeSuiteImage', 'resolveSuiteAssets', 'currentFileKey'];
+const PAGE_FNS = ['excelRowSpec', 'buildExcelRowSnapshot', 'suiteRowSnapshot', 'suiteRenderPrompt', 'renderSuitePrompt', 'checkSuiteVariables', 'probeSuiteImage', 'resolveSuiteAssets', 'currentFileKey'];
 function createPageEnv(opts = {}) {
     // SuiteQuickFive 是 const IIFE，单独抽取
     const iifeStart = HTML.indexOf('const SuiteQuickFive = (() => {');
     const iifeEnd = HTML.indexOf('})();', iifeStart);
     const iife = HTML.slice(iifeStart, iifeEnd + 5);
     const src = [extractConst('SUITE_OUTPUTS'), iife]
-        .concat(['renderSuitePrompt', 'checkSuiteVariables', 'probeSuiteImage', 'resolveSuiteAssets', 'currentFileKey'].map(extractFn))
+        .concat(PAGE_FNS.map(extractFn))
         .join('\n\n');
 
     const fetchLog = [];
@@ -75,6 +75,7 @@ function createPageEnv(opts = {}) {
         loadedFileName: opts.loadedFileName === undefined ? 'A.xlsx' : opts.loadedFileName,
         products: [],
         extensionInstalled: opts.extensionInstalled !== false,
+        suiteSend: async () => ({ ok: false, error: '未配置测试目录' }),
         getColorImagePath: (row, color) => (opts.colorPaths ? opts.colorPaths[row + ':' + color] : null),
         chrome: { runtime: { lastError: null, sendMessage: (id, req, cb) => { if (opts.onColorImage) opts.onColorImage(req, cb); else cb({ ok: false }); } } },
         // 只模拟外部 API（fetch / createImageBitmap），不模拟被测业务分支
@@ -93,10 +94,23 @@ function createPageEnv(opts = {}) {
         }
     };
     sandbox.globalThis = sandbox;
+    sandbox.window = sandbox;
+    sandbox.localStorage = { getItem: () => null, setItem: () => {} };
+    sandbox.document = { addEventListener() {} };
     const ctx = vm.createContext(sandbox);
+    // 真实业务模块：行快照、类目字段真源、面板步骤真源（不写替身）
+    for (const f of ['category-field-rules.js', 'excel-row.js', 'custom-step-defaults.js', 'custom-step-config.js']) {
+        vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), ctx, { filename: f });
+    }
+    // 当前导入 Excel：表头用本类目真实列名，第 2 行是待测产品行
+    const headers = Array.from(sandbox.CategoryFieldRules.columnsOf('polo'));
+    sandbox.currentSheet = {
+        fileName: 'A.xlsx', sheetName: 'Sheet1', startRow: 1, headers,
+        rows: [headers, headers.map(h => ({ 材质: 'Cotton / 棉', 面料克重: 180, 类目: 'polo(2)' }[h] ?? ''))],
+    };
     vm.runInContext('var currentRowIndex = 0;', ctx);
     vm.runInContext(src, ctx, { filename: '发品助手.html:suite-fns' });
-    return { ctx, fetchLog, run: (e) => vm.runInContext(e, ctx) };
+    return { ctx, fetchLog, run: (e) => vm.runInContext(e, ctx), set: (n, v) => { ctx[n] = v; } };
 }
 
 // 五步配置（每步单图、编号唯一、模型/比例一致）
@@ -155,24 +169,48 @@ function mkSteps(over = {}) {
     }
 
     // ================= B. 变量解析 =================
-    console.log('\n【B】变量解析：未解析变量必须在发送前失败并指明步骤');
+    // 说明：提示词变量映射已与配置面板共用同一实现（真实 Excel 列名 + 行快照），
+    // 旧的 `{{页面字段}}`（material_en 之类）通路已随面板改造停用，断言按当前功能状态调整。
+    console.log('\n【B】变量解析：与面板「预览」同一实现（真实 Excel 列名 + 行快照）');
     {
         const env = createPageEnv();
-        const product = { row: 412, material_en: 'Cotton' };
-        const steps = mkSteps({ 333: { prompt: '面料 {{material_en}} / {{未定义字段}}' } });
-        const problems = env.run(`checkSuiteVariables(${JSON.stringify(steps)}, ${JSON.stringify(product)})`);
-        ok(Array.isArray(problems) && problems.some(p => /面料图/.test(p)) && problems.some(p => /未定义字段/.test(p)),
-            `未解析变量被指出步骤与变量名（${JSON.stringify(problems)}）`);
-        const steps2 = mkSteps({ 333: { prompt: '面料 {{material_en}}', mappings: [{ variable: 'material_en', field: 'material_en' }] } });
-        const p2 = env.run(`checkSuiteVariables(${JSON.stringify(steps2)}, ${JSON.stringify(product)})`);
-        ok(p2.length === 0, `声明映射后全部可解析（${JSON.stringify(p2)}）`);
-        // 声明了但产品无该字段 → 渲染为空，不算未解析（值可为空）
-        const steps3 = mkSteps({ 333: { prompt: '面料 {{missing_field}}', mappings: [{ variable: 'missing_field', field: 'missing_field' }] } });
-        const p3b = env.run(`checkSuiteVariables(${JSON.stringify(steps3)}, ${JSON.stringify(product)})`);
-        ok(p3b.length === 0, '已声明但取值为空的变量不报未解析（值允许为空）');
+        const snap = env.run('buildExcelRowSnapshot(2)');
+        ok(snap.cell('材质') === 'Cotton / 棉' && snap.cell('面料克重') === '180' && snap.category() === 'polo',
+            '行快照按真实 Excel 列名取值且类目归一化正确');
+        env.set('__snap', snap);
+
+        const okSteps = mkSteps({ 333: { prompt: '面料：{material}；克重：{weight}', mappings: [{ variable: 'material', field: '材质' }, { variable: 'weight', field: '面料克重' }] } });
+        const p0 = env.run(`checkSuiteVariables(${JSON.stringify(okSteps)}, __snap)`);
+        ok(p0.length === 0, `声明映射后全部可解析（${JSON.stringify(p0)}）`);
+        ok(env.run(`renderSuitePrompt(${JSON.stringify(okSteps[2])}, __snap)`) === '面料：Cotton；克重：180',
+            '提示词按当前产品行的真实列名替换（与后处理同一份数据）');
+
+        // 未声明的 {变量} → 发送前失败并指明步骤与变量名
+        const miss = mkSteps({ 333: { prompt: '面料：{undefined_var}', mappings: [] } });
+        const p1 = env.run(`checkSuiteVariables(${JSON.stringify(miss)}, __snap)`);
+        ok(p1.some(p => /面料图/.test(p)) && p1.some(p => /undefined_var/.test(p)),
+            `未解析变量被指出步骤与变量名（${JSON.stringify(p1)}）`);
+
+        // [[...]] 段内属性为空 → 整段省略（与面板预览一致）
+        const omit = mkSteps({ 222: { prompt: '袖口图。[[材质：{material}；]][[门襟：{placket}；]]结束', mappings: [{ variable: 'material', field: '材质' }, { variable: 'placket', field: '' }] } });
+        const p2 = env.run(`checkSuiteVariables(${JSON.stringify(omit)}, __snap)`);
+        ok(p2.length === 0, `可选段为空时整段省略（${JSON.stringify(p2)}）`);
+        ok(env.run(`renderSuitePrompt(${JSON.stringify(omit[1])}, __snap)`) === '袖口图。材质：Cotton；结束',
+            '省略段不残留占位符');
+
+        // 映射到本类目不存在的列 → 明确报错，不静默取空值
+        const bad = mkSteps({ 666: { prompt: '{material}', mappings: [] } });
+        env.run("var __badSnap = ExcelRow.build({fileName:'A.xlsx',sheetName:'S',rowNumber:2,headers:['类目'],values:['polo']});");
+        const p3 = env.run(`checkSuiteVariables(${JSON.stringify(bad)}, __badSnap)`);
+        ok(p3.some(p => /领口图/.test(p) && /整列不存在/.test(p)), `不存在的列被明确指出（${JSON.stringify(p3)}）`);
+
         const noStep = mkSteps().filter(s => s.outputKeys[0].key !== '666');
-        const p3 = env.run(`checkSuiteVariables(${JSON.stringify(noStep)}, ${JSON.stringify(product)})`);
-        ok(p3.some(p => /666/.test(p)), '缺少编号步骤被指出');
+        const p4 = env.run(`checkSuiteVariables(${JSON.stringify(noStep)}, __snap)`);
+        ok(p4.some(p => /666/.test(p)), '缺少编号步骤被指出');
+
+        // 没有行数据 → 明确失败（不假装渲染成功）
+        ok(env.run(`checkSuiteVariables(${JSON.stringify(okSteps)}, null)`).some(p => /无法读取当前产品行数据/.test(p)),
+            '无行数据时明确失败，不假装渲染成功');
     }
 
     // ================= C. 素材真实性与完整性 =================
@@ -233,6 +271,29 @@ function mkSteps(over = {}) {
         let ec = null;
         try { await e.S.create(Object.assign({}, base, { rowNum: 999, expectCount: 4 })); } catch (err) { ec = err.message; }
         ok(ec && /expectCount 必须为 5/.test(ec), `quick-five 的 expectCount 必须为 5（${ec}）`);
+
+        // batch-gen：合并生成若干张 AI 原图（expectCount = 本次 AI 步骤数），一键整套为 222/333/666 共 3 张
+        let bg = null;
+        try { await e.S.create(Object.assign({}, base, { rowNum: 413, mode: 'batch-gen', expectCount: 3, targetKeys: ['222', '333', '666'] })); } catch (err) { bg = err.message; }
+        ok(!bg, `batch-gen 接受 222/333/666 且 expectCount=3（${bg || 'ok'}）`);
+        let bgCount = null;
+        try { await e.S.create(Object.assign({}, base, { rowNum: 414, mode: 'batch-gen', expectCount: 3, targetKeys: ['222', '333', '666', '444'] })); } catch (err) { bgCount = err.message; }
+        ok(bgCount && /编号必须唯一且与图片数量一致/.test(bgCount), `targetKeys 数量 ≠ expectCount 被拒绝（${bgCount}）`);
+        let bgNumber = null;
+        try { await e.S.create(Object.assign({}, base, { rowNum: 415, mode: 'batch-gen', expectCount: 4, targetKeys: ['222', '333', '666'] })); } catch (err) { bgNumber = err.message; }
+        ok(bgNumber && /编号必须唯一且与图片数量一致/.test(bgNumber), `expectCount 与 targetKeys 数量不一致被拒绝（${bgNumber}）`);
+        let bgDup = null;
+        try { await e.S.create(Object.assign({}, base, { rowNum: 416, mode: 'batch-gen', expectCount: 3, targetKeys: ['222', '333', '333'] })); } catch (err) { bgDup = err.message; }
+        ok(bgDup && /编号必须唯一/.test(bgDup), `重复编号被拒绝（${bgDup}）`);
+        let bgIllegal = null;
+        try { await e.S.create(Object.assign({}, base, { rowNum: 417, mode: 'batch-gen', expectCount: 3, targetKeys: ['222', '333', '999'] })); } catch (err) { bgIllegal = err.message; }
+        ok(bgIllegal && /无效编号/.test(bgIllegal), `非法编号被拒绝（${bgIllegal}）`);
+        let bgBound = null;
+        try { await e.S.create(Object.assign({}, base, { rowNum: 418, mode: 'batch-gen', expectCount: 6, targetKeys: ['111', '222', '333', '444', '666'] })); } catch (err) { bgBound = err.message; }
+        ok(bgBound && /1 至 5/.test(bgBound), `expectCount 超出 1~5 被拒绝（${bgBound}）`);
+        // batch-gen 与 quick-five 是独立互斥域：不同模式允许并存，不互相阻挡
+        const bg5 = await e.S.create(Object.assign({}, base, { rowNum: 419, mode: 'batch-gen', expectCount: 5, targetKeys: ['111', '222', '333', '444', '666'] }));
+        ok(bg5.stage === 'received', 'batch-gen 单次创建成功且不与同文件 quick-five 冲突');
 
         // 阶段推进：不允许跳过 saved 直接 completed
         let skipErr = null;
@@ -296,9 +357,36 @@ function mkSteps(over = {}) {
         ok(late.accepted === false, '恢复后拒绝自动续跑/迟到回传');
     }
 
+    console.log('\n【G】生成子任务：generated 终态只代表原图已缓存，成品语义不被占用');
+    {
+        const e = createTaskEnv();
+        const mk = (k) => e.S.create({ fileKey: 'A__', rowNum: 700, mode: 'step-gen', expectCount: 1, targetKeys: [k], prompt: 'x' });
+        const g1 = await mk('222');
+        await e.S.advance(g1.taskId, 'sent');
+        await e.S.advance(g1.taskId, 'acquired');
+        let dup = null;
+        try { await mk('333'); } catch (err) { dup = err.message; }
+        ok(dup && /拒绝重复发起/.test(dup), `生成中仍互斥，防并发重复请求（${dup}）`);
+        const g1done = await e.S.finish(g1.taskId, 'generated', '', { results: [{ key: '222', acquired: true, saved: false }] });
+        ok(g1done.stage === 'generated', '生成子任务以独立终态 generated 结束');
+        ok(g1done.results[0].saved === false, 'generated 明确标注成品未保存');
+        let comp = null;
+        try { await e.S.finish(g1.taskId, 'completed'); } catch (err) { comp = err.message; }
+        ok(comp && /终态/.test(comp), `generated 不能升级为 completed（成品语义仍要求 saved，${comp}）`);
+        const g2 = await mk('333');
+        ok(g2 && g2.stage === 'received', 'generated 结束释放互斥，下一生成子任务可开始');
+        const late = await e.S.acceptReport({ taskId: g1.taskId, fileKey: 'A__', rowNum: 700, stage: 'acquired' });
+        ok(late.accepted === false, 'generated 后拒绝迟到结果（防重复覆盖）');
+        const active = await e.S.list({ fileKey: 'A__', rowNum: 700, activeOnly: true });
+        ok(active.length === 1 && active[0].taskId === g2.taskId, '同一作业同一时刻只有一个进行中的生成子任务');
+        await e.S.recoverOnStartup();
+        ok((await e.S.get(g1.taskId)).stage === 'generated', '冷启动不改写已缓存的 generated 子任务');
+    }
+
     console.log('\n' + '='.repeat(52));
     console.log(`通过: ${pass}   失败: ${fail}`);
     if (failures.length) { console.log('失败项:'); failures.forEach(f => console.log('  - ' + f)); }
     console.log('='.repeat(52));
     process.exit(fail === 0 ? 0 : 1);
 })().catch(e => { console.error('测试运行异常:', e && e.stack || e); process.exit(1); });
+

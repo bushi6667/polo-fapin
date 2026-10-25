@@ -101,6 +101,8 @@ const browser = {
         messages.push(req);
         (async () => {
             if(req.action==='suiteOutputStatus')return {ok:true,configured:true,permission:'granted'};
+            // 套图入口第一步：扩展先打开/激活豆包页面（生产由 background.prepareSuiteDoubaoPage 完成）
+            if(req.action==='suitePreparePage')return {ok:true,tabId:1};
             if(req.action==='suiteCancel'){await browser.SuiteTaskStore.cancel(req.taskId);return {ok:true};}
             if(req.action==='suiteCreate')return {ok:true,task:await browser.SuiteTaskStore.create(req.task)};
             if(req.action==='suiteGetTask')return {ok:true,task:await browser.SuiteTaskStore.get(req.taskId)};
@@ -199,7 +201,8 @@ browser.SuiteCore.ResultStore=(db='results')=>({
     remove:async (fk,row,key)=>records.delete(db+'|'+fk+'|'+row+'|'+key)
 });
 // 预览状态文字使用页面同一个 HTML 转义函数，沙箱也加载真实实现。
-vm.runInContext(html.slice(html.indexOf('function escapeHtml(s)'),html.indexOf('const AUDIT_DATA')),ctx);
+// 右边界必须用「仍存在且早于 window.load 监听器」的标记，否则会把监听器切进沙箱（沙箱没有 window）。
+vm.runInContext(html.slice(html.indexOf('function escapeHtml(s)'),html.indexOf("window.addEventListener('load'")),ctx);
 vm.runInContext(section,ctx);
 vm.runInContext(`
  currentFileKey=()=> 'test.xlsx';
@@ -515,7 +518,7 @@ function seedPending(taskId, rowNum = 7, fileKey = 'test.xlsx') {
     assert.equal(records.has('polo_suite_pending|test.xlsx|7|fivefreeze'),false,'任务完成后清理冻结记录');
     assert.equal(vm.runInContext('suitePendingNumbering',ctx),null);
 
-    /* ---------- (K) 原图已缓存但后处理未执行：刷新/恢复只继续后处理，不跳过、不重新生图 ---------- */
+    /* ---------- (K) 继续 = 整套重做：失败后继续不复用旧 AI 原图，取消旧任务后按当前行数据重新执行 ---------- */
     browser.currentProduct={row:2};
     const beforeKRuns=messages.filter(m=>m.action==='suiteRun').length;
     const beforeKCreates=messages.filter(m=>m.action==='suiteCreate').length;
@@ -534,29 +537,38 @@ function seedPending(taskId, rowNum = 7, fileKey = 'test.xlsx') {
     assert.equal(await browser.suiteBadgeReady('test.xlsx',2),false,'222 有原图但成品未保存，不显示套图角标');
     assert.equal(messages.filter(m=>m.action==='suiteRun').length,beforeKRuns+1,'失败前只发了一次合并生成请求（3 张一次拿到）');
     assert.equal(messages.filter(m=>m.action==='suiteCreate').length,beforeKCreates+1,'失败前只创建了一个 batch-gen 任务');
-    const frozenMain=failedFive.main.dataUrl;
     assert.equal(browser.ExcelRow.build(failedFive.excelRowSpec).cell('材质'),'Cotton / 棉','冻结记录保存了任务启动时的行数据');
     // 同名 Excel 重导（第 2 行材质被改）+ 页面内存状态丢失后再继续：必须仍用冻结主图与行数据。
+    // 同名 Excel 重导（第 2 行材质被改）+ 页面内存状态丢失后再继续：继续=整套重做，按当前行数据执行。
+    // 注意 excelRowSpec 的行号索引是 rowNumber - startRow（startRow=1 → 第 2 行是 rows[1]）。
     vm.runInContext(`currentSheet = { fileName:'test.xlsx', sheetName:'S9', startRow:1, headers:currentSheet.headers,
-        rows: currentSheet.rows.map((row,i)=> i===2 ? currentSheet.headers.map(h=>h==='类目'?'polo(2)':h==='材质'?'重导后':'') : row) };
+        rows: currentSheet.rows.map((row,i)=> i===1 ? currentSheet.headers.map(h=>h==='类目'?'polo(2)':h==='材质'?'Redone / 重导后':'') : row) };
         suiteAutoState=null;suitePendingNumbering=null;`,ctx);
     const stepsBeforeResume=runStepLog.length;
     await browser.startSuiteGeneration();
     const resumedFiveState=browser.readSuiteAutoState();
     assert.equal(resumedFiveState.phase,'completed',statuses.slice(-2).join(' | '));
-    assert.equal(messages.filter(m=>m.action==='suiteRun').length,beforeKRuns+1,'恢复后不重新发合并请求，复用已缓存的三张 AI 原图');
-    assert.equal(messages.filter(m=>m.action==='suiteCreate').length,beforeKCreates+1,'恢复后不新建生成任务（复用原 batch-gen 已获取结果）');
+    // 继续 = 从当前产品整套重做（用户确认语义）：五张全部重新生成，不复用旧图、不复用旧任务。
+    assert.equal(messages.filter(m=>m.action==='suiteRun').length,beforeKRuns+2,'整套重做：失败一次 + 重做一次，共两次合并请求');
+    assert.equal(messages.filter(m=>m.action==='suiteCreate').length,beforeKCreates+2,'整套重做：重新创建 batch-gen 任务');
     const resumedSteps=runStepLog.slice(stepsBeforeResume);
-    assert(resumedSteps.some(x=>x.key==='222'&&x.input===failedFive.generated['222'].dataUrl),'恢复后 222 用已缓存原图继续后处理');
-    assert.equal(resumedSteps.find(x=>x.key==='444').input,frozenMain,'重导 Excel 后继续仍用原任务冻结的产品主图');
+    assert.deepEqual(resumedSteps.map(x=>x.key),['111','222','333','444','666'],'五张全部重做：'+JSON.stringify(resumedSteps.map(x=>x.key)));
+    const taskIdOf=u=>String(u).match(/https:\/\/image\/([^/]+)\//)?.[1]||'';
+    const redoneAi=new Set(resumedSteps.filter(x=>['222','333','666'].includes(x.key)).map(x=>taskIdOf(x.input)));
+    assert.equal(redoneAi.size,1,'重做的三张 AI 原图来自同一个新任务');
+    assert(!redoneAi.has(failedFive.groupTaskId),'重做任务不是旧 batch-gen 任务，旧图未被复用');
+    // 重做覆盖了已保存的 111：内容按当前行数据（Redone）重写
+    const redone111=dir.subdirs.get('test.xlsx/row2')?.get('111.png');
+    assert(redone111,'重做后 111 成品已落盘');
+    assert((await redone111.text()).startsWith('Redone|'),'整套重做：111 已按当前行数据重新生成覆盖');
     const genTasks=await browser.SuiteTaskStore.list({fileKey:'test.xlsx',rowNum:2});
     assert(genTasks.filter(t=>t.mode==='batch-gen').every(t=>t.stage==='generated'),'batch-gen 任务以 generated 结束，成品语义不被占用');
     assert.equal(records.has('polo_suite_pending|test.xlsx|2|fivefreeze'),false,'整套完成后清理冻结记录');
     assert.equal(await browser.suiteBadgeReady('test.xlsx',2),true,'五张成品全部保存后才显示套图角标');
-    // 恢复后的成品同样落进 row2 子目录（与颜色图同构），不进根层
+    // 重做后的成品同样落进 row2 子目录（与颜色图同构），不进根层
     const suiteSubdir2=dir.subdirs.get('test.xlsx/row2');
     assert(suiteSubdir2&&suiteSubdir2.size===5,'row2 五张成品落在 Polo发品_颜色图/test.xlsx/row2/ 子目录');
-    assert(files.size===beforeFiles,'恢复后套图成品仍不进根层');
+    assert(files.size===beforeFiles,'重做后套图成品仍不进根层');
 
     // 指定重生成：生产菜单 -> 生产生成入口 -> 真实后处理执行器 -> 写盘。
     vm.runInContext(fs.readFileSync(path.join(root,'targeted-regeneration.js'),'utf8'),ctx);
@@ -599,7 +611,7 @@ function seedPending(taskId, rowNum = 7, fileKey = 'test.xlsx') {
     assert.equal(vm.runInContext('targetedRegenerationRunning',ctx),false);
     console.log('PASS targeted production entry: 4(0,3) -> color + config step 3 -> matching 222 script -> frozen row -> saved output; empty script blocks request and cannot reuse previous completion');
 
-    console.log('PASS automatic five-step suite: 一键整套只发 1 次合并生成请求（batch-gen, expectCount=3, targetKeys=222/333/666）；111/444 直接用同一冻结产品主图后处理、无 AI 请求；后处理按配置顺序执行；五张成品落进 <文件名>/rowN/ 子目录并校验；五张齐全才显示套图角标；后处理失败恢复复用已缓存原图不重新生图');
+    console.log('PASS automatic five-step suite: 一键整套只发 1 次合并生成请求（batch-gen, expectCount=3, targetKeys=222/333/666）；111/444 直接用同一产品主图后处理、无 AI 请求；后处理按配置顺序执行；五张成品落进 <文件名>/rowN/ 子目录并校验；五张齐全才显示套图角标；失败后继续=从当前产品整套重做（五张全部重新生成）');
     console.log('PASS production page: single-step regeneration routes through the same five-step pipeline (one request for 222, no generation for 111/444); confirmation/freeze/render/disk-verify legacy paths still guarded');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 

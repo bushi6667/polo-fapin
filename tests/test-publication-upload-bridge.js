@@ -1,0 +1,35 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const prefix=fs.readFileSync('tests/test-publish-queue.js','utf8');
+const c={require,__dirname,console,setTimeout,clearTimeout,setInterval,clearInterval,URLSearchParams,AbortController,TextDecoder,process};
+vm.createContext(c);vm.runInContext(prefix.slice(0,prefix.indexOf('(async function main()')),c);
+const env=vm.runInContext('createEnv()',c),calls=[];env.ctx.Blob=Blob;env.ctx.btoa=btoa;
+env.ctx.chrome.runtime.getURL=path=>'chrome-extension://test/'+path;
+env.ctx.fetch=async()=>({ok:true,blob:async()=>new Blob(['bank'],{type:'image/jpeg'})});
+env.ctx.chrome.webNavigation={getAllFrames:async()=>[{frameId:0,url:'https://post.alibaba.com/product/publish.htm'},{frameId:2,url:'https://unrelated.example/'},{frameId:3,url:'https://scm.alibaba.com/decorate.htm'}]};
+env.ctx.chrome.scripting={executeScript:async options=>{
+ calls.push(options);
+ if(options.files)return [];
+ if(options.args.length===1)return [{result:{found:options.args[0]==='main'?options.target.frameIds[0]===0:options.target.frameIds[0]===3}}];
+ return [{result:{ok:true,count:options.args[1].length,expectedCount:options.args[0]==='main'?6:3}}];
+}};
+env.run(fs.readFileSync('chrome_extension/upload/publication-images.js','utf8'));
+env.run(`assistantPort={postMessage(request){const pending=publicationRequests.get(request.requestId);clearTimeout(pending.timer);publicationRequests.delete(request.requestId);pending.resolve(request.keys.map(key=>({key,dataUrl:'data:image/jpeg;base64,dGVzdA=='})));}};`);
+const sender={tab:{id:7,url:'https://post.alibaba.com/product/publish.htm'},frameId:0};
+const product={row:412,category:'Non-hooded sweatshirt(5)',_publishFileKey:'file-A'};
+(async()=>{
+ const main=await env.sendInternal({action:'uploadPublicationImages',kind:'main',product},sender);
+ assert.equal(main.ok,true,main.error);assert.equal(main.count,6);
+ const mainCall=calls.find(o=>o.args?.length===2);assert.deepEqual(Array.from(mainCall.args[1].slice(0,2),f=>f.key),['444','111']);
+ calls.length=0;
+ const detail=await env.sendInternal({action:'uploadPublicationImages',kind:'detail',product},sender);
+ assert.equal(detail.ok,true,detail.error);assert.equal(detail.count,3);
+ const detailCall=calls.find(o=>o.args?.length===2);assert.equal(detailCall.target.frameIds[0],3);assert.deepEqual(Array.from(detailCall.args[1],f=>f.key),['333','666','222']);
+ assert(!calls.some(o=>o.target.frameIds.includes(2)),'不能向无关域iframe注入上传代码');
+ calls.length=0;
+ const other=await env.sendInternal({action:'uploadPublicationImages',kind:'main',product},{tab:{id:9,url:'https://www.doubao.com/chat/'}});
+ assert.equal(other.ok,false);assert.equal(calls.length,0);
+ env.run('assistantPort=null');
+ const missing=await env.sendInternal({action:'uploadPublicationImages',kind:'main',product},sender);
+ assert.equal(missing.ok,false);assert.equal(calls.length,0,'生成素材不可用时不能清空页面图片');
+ console.log('PASS real background route: six/three files, same product identity, scoped old-editor frame, unrelated site rejected, no page mutation without generated source');
+})().catch(e=>{console.error(e);process.exitCode=1;});

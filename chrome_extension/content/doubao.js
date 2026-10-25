@@ -176,6 +176,7 @@ async function switchToImageGenMode() {
 
 // 上传图片：发消息给 background，由其用 CDP 注入文件到豆包页面的 file input
 async function uploadImage(imagePath) {
+    if (!imagePath) throw new Error('主图路径为空，未向豆包发送生成请求');
     log('上传图片: ' + imagePath);
     const resp = await chrome.runtime.sendMessage({
         action: 'doubaoUploadImage',
@@ -186,8 +187,9 @@ async function uploadImage(imagePath) {
         await sleep(2000);
         return true;
     }
-    log('图片上传失败: ' + (resp?.error || '未知错误'), 'error');
-    return false;
+    const error = resp?.error || '未知错误';
+    log('图片上传失败: ' + error, 'error');
+    throw new Error('主图上传失败：' + error);
 }
 
 // 在聊天输入框输入提示词（textarea 走原生 setter，contenteditable 直接 innerText）
@@ -388,7 +390,7 @@ async function waitForGenerationComplete(timeout = 600000, minImages = 4) {
 
 // 增量下载新图：按 white/black/gray/navy 顺序命名 row{rowNum}_{color}.png，
 // 逐张发 downloadDoubaoImage 消息让 background 下载（自动建子文件夹）
-async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages = 4) {
+async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages = 4, execution = colorTask) {
     log(`等待 ${totalImages} 张图片出现（最多${Math.round(timeout/60000)}分钟）...`);
 
     const colorNames = ['white', 'black', 'gray', 'navy'];
@@ -402,6 +404,11 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
 
     while (Date.now() - startTime < timeout) {
         await sleep(2000);
+        if (colorTask !== execution || !isProcessing) return [];
+        const pageText = String(document.body?.innerText || '');
+        if (pageText.includes('出了点问题，请稍后重试')) {
+            throw new Error('豆包生成失败：出了点问题，请稍后重试');
+        }
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
 
         const currentUrls = getAllImageUrls();
@@ -436,6 +443,7 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
     log(`开始一次性下载 ${allNewUrls.length} 张图...`);
 
     for (let i = 0; i < allNewUrls.length; i++) {
+        if (colorTask !== execution || !isProcessing) return downloads;
         const url = allNewUrls[i];
         const colorName = colorNames[i] || `color${i + 1}`;
         const filename = `row${rowNum}_${colorName}.png`;
@@ -448,7 +456,9 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
                 action: 'downloadDoubaoImage',
                 url: url,
                 filename: filename,
-                rowNum: rowNum
+                rowNum: rowNum,
+                batchId: execution && execution.batchId,
+                executionId: execution && execution.executionId
             });
             if (resp?.ok) {
                 downloads.push({ color: colorName, filename, ok: true, isRaw });
@@ -470,19 +480,31 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
 
 // AI 换色主流程：切换模式 → 上传图 → 输提示词 → 发送 → 增量下载 4 张新图；
 // 结束后发 colorTaskComplete 通知 background 并写回结果
-async function runColorTask(task) {
+async function runColorTask(task, onAccepted) {
     if (isProcessing) {
         log('已有任务进行中，跳过', 'warn');
+        if (onAccepted) onAccepted({ ok: false, busy: true, error: '豆包正在执行上一个任务' });
         return;
     }
     isProcessing = true;
     colorTask = task;
     // 确认接收：让后台把"待派发身份"提升为"已接收执行身份"
-    chrome.runtime.sendMessage({
+    const accepted = await chrome.runtime.sendMessage({
         action: 'colorTaskAccepted',
         rowNum: task && task.rowNum,
-        batchId: (task && task.batchId) || null
-    }).catch(() => {});
+        batchId: (task && task.batchId) || null,
+        executionId: task && task.executionId
+    }).catch(() => null);
+    if (!accepted || !accepted.ok) {
+        if (colorTask === task) isProcessing = false;
+        if (onAccepted) onAccepted({ ok: false, error: '后台派发许可失效，未开始生成' });
+        return { success: false, error: '后台派发许可失效，未开始生成' };
+    }
+    if (colorTask !== task || !isProcessing) {
+        if (onAccepted) onAccepted({ ok: false, error: '已暂停' });
+        return;
+    }
+    if (onAccepted) onAccepted({ ok: true, accepted: true });
     // 启动心跳，防止批量换色期间 SW 休眠丢失通知通道
     startHeartbeatForColorTask();
 
@@ -493,20 +515,24 @@ async function runColorTask(task) {
         results.step = '切换图像生成模式';
         await switchToImageGenMode();
         await sleep(1000);
+        if (colorTask !== task || !isProcessing) return;
 
         results.step = '上传图片';
         await uploadImage(imagePath);
         await sleep(2000);
+        if (colorTask !== task || !isProcessing) return;
 
         results.step = '输入提示词';
         await typePrompt(prompt);
         await sleep(500);
+        if (colorTask !== task || !isProcessing) return;
 
         results.step = '发送消息';
         await sendMessage();
+        if (colorTask !== task || !isProcessing) return;
 
         results.step = '逐张下载';
-        const downloads = await downloadImagesIncremental(rowNum, 600000, 4);
+        const downloads = await downloadImagesIncremental(rowNum, 600000, 4, task);
         results.downloads = downloads;
         results.success = downloads.filter(d => d.ok).length > 0;
         results.images = downloads.map(d => d.filename);
@@ -516,6 +542,7 @@ async function runColorTask(task) {
         results.error = e.message;
     }
 
+    if (colorTask !== task || !isProcessing) return;
     isProcessing = false;
     // 任务完成后停止心跳
     stopHeartbeatForColorTask();
@@ -525,7 +552,8 @@ async function runColorTask(task) {
         results: results,
         rowNum: rowNum,
         // 由【本执行任务自身】携带批量标识返回：后台不得从可变的 pendingColorTask 反推身份
-        batchId: (task && task.batchId) || null
+        batchId: (task && task.batchId) || null,
+        executionId: task && task.executionId
     }).catch(() => {});
 
     return results;
@@ -534,6 +562,15 @@ async function runColorTask(task) {
 // 消息入口：startColorTask 触发换色流程；startAiEditTask 触发改图；
 // getColorTaskStatus 查询任务状态
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === 'cancelColorTask') {
+        if (!request.executionId || (colorTask && colorTask.executionId === request.executionId)) {
+            colorTask = null;
+            isProcessing = false;
+            stopHeartbeatForColorTask();
+        }
+        sendResponse({ ok: true });
+        return true;
+    }
     if (request.action === 'startColorTask') {
         // 忙碌时返回真实拒绝：页面不得把它当成"已接收"
         if (isProcessing) {
@@ -541,11 +578,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ ok: false, busy: true, error: '豆包正在执行上一个换色任务，未接收新任务' });
             return true;
         }
-        runColorTask(request.task);
-        sendResponse({ ok: true, accepted: true });
+        runColorTask(request.task, sendResponse).catch(e => {
+            isProcessing = false;
+            sendResponse({ ok: false, error: e.message });
+        });
         return true;
     }
     if (request.action === 'startAiEditTask') {
+        if (isProcessing) { sendResponse({ ok: false, busy: true, error: '豆包仍在处理上一个任务' }); return true; }
         runAiEditTask(request.task);
         sendResponse({ ok: true, accepted: true });
         return true;

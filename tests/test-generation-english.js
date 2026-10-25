@@ -1,0 +1,23 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const env={window:{},console};vm.createContext(env);
+for(const f of ['category-field-rules.js','excel-row.js','custom-js-data.js'])vm.runInContext(fs.readFileSync(f,'utf8'),env);
+const E=env.window.ExcelRow;
+for(const [input,output] of [['Cotton / 棉','Cotton'],['棉／Cotton','Cotton'],['80% Cotton 20% Polyester / 80%棉20%涤纶','80% Cotton 20% Polyester'],['Crew Neck（圆领）','Crew Neck'],['Cotton/Polyester','Cotton/Polyester'],[0,'0'],['','']])assert.equal(E.englishText(input),output);
+assert.throws(()=>E.englishText('纯棉'),/缺少独立英文/,'中文独有值不得悄悄画到图上或伪装成英文');
+const row=E.build({fileName:'test.xlsx',sheetName:'S',rowNumber:2,headers:['类目','材质'],values:['polo','Cotton / 棉']});
+const data=env.window.CustomJsDataDomain.create({excelRow:row,englishOnly:true});
+assert.equal(data.cell('材质'),'Cotton');assert.equal(data.role('material').value,'Cotton');
+assert.equal(data.raw('材质'),'Cotton / 棉');assert.equal(row.cell('材质'),'Cotton / 棉','原始冻结行不被改写');
+assert.equal(env.window.CustomJsDataDomain.create({excelRow:row}).cell('材质'),'Cotton / 棉','普通数据读取保持原值');
+const calls=[];
+env.ExcelRow=E;
+env.createImageBitmap=async()=>({width:10,height:10,close(){}});
+env.document={createElement:()=>({getContext:()=>({drawImage(){},fillText:t=>calls.push(['fill',t]),strokeText:t=>calls.push(['stroke',t]),measureText:t=>{calls.push(['measure',t]);return {width:t.length};}})})};
+vm.runInContext(fs.readFileSync('chrome_extension/suite/suite-image-sdk.js','utf8'),env);
+(async()=>{
+ const surface=await env.SuiteImageSdk.createSurface({arrayBuffer:async()=>new ArrayBuffer(0)});
+ surface.ctx.measureText('MATERIAL / 材质');surface.ctx.fillText('MATERIAL / 材质',0,0);surface.ctx.strokeText('Cotton / 棉',0,0);
+ assert.deepEqual(calls,[['measure','MATERIAL'],['fill','MATERIAL'],['stroke','Cotton']]);
+ surface.dispose();
+ console.log('PASS English generation values, raw row preserved, old script labels measured and drawn in English');
+})().catch(e=>{console.error(e);process.exitCode=1;});

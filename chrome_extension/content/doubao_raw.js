@@ -17,6 +17,10 @@ if (window.__poloRawInterceptorInited) {
 
 // 原图 URL 缓存：hash（URL 中的十六进制片段）-> 完整 image_raw URL
 window.__poloRawUrls = new Map();
+// document_start 捕获可能早于 ISOLATED 监听器，允许重放已捕获映射。
+document.addEventListener('_poloRawReplay', () => {
+    for (const [hash,url] of window.__poloRawUrls) document.dispatchEvent(new CustomEvent('_poloRawUrlUpdate',{detail:{hash,url}}));
+});
 
 // 从网络响应文本中提取 image_raw 原图 URL
 // 匹配 byteimg.com 且含 image_raw 参数的 URL，去转义后按 hash 去重，

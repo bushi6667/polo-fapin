@@ -98,6 +98,16 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "runtime/ort.min.js",
+        "runtime/ort-wasm.wasm",
+        "runtime/ort-wasm-simd.wasm",
+        "runtime/u2net.onnx",
+        "js代码/brand_blacklist.json"
+      ],
+      "matches": ["<all_urls>"]
+    },
+    {
+      "resources": [
         "popup.html",
         "popup.js"
       ],

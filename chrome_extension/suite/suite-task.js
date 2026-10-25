@@ -12,6 +12,13 @@
  *   completed   任务完成（仅 saved 之后才能到达）
  *   失败/中断：failed / interrupted（终态，不回退）
  *
+ * 生成子任务（mode=step-gen）是五步作业里的 222/333/666 单次生成：
+ *   received → sent → acquired → generated（终态）
+ *   generated 只表示「AI 原图已获取并缓存到作业冻结记录」，
+ *   绝不代表成品已后处理/已保存 —— 成品状态始终由 saved/completed 表达。
+ *   子任务在 generated 结束后不再占用同类互斥，下一生成步骤可以继续；
+ *   received/sent 期间仍按原规则互斥，保留真正的并发冲突保护。
+ *
  * 约束：
  *  - 收到消息 ≠ 成功；只有 saved 之后才允许 completed。
  *  - 任何进度/结果回传都必须携带任务身份（taskId+fileKey+rowNum），
@@ -23,12 +30,12 @@
 
 const SuiteTaskStore = (() => {
     const KEY = 'suite_tasks_v1';
-    const MAX_KEEP = 60;                        // 只保留最近的任务，避免无限增长
+    const MAX_KEEP = 10;                        // 只保留最近 10 条；终态任务已剥离素材图片与提示词正文
     const STAGES = ['received', 'sent', 'acquired', 'saved', 'completed'];
-    const TERMINAL = ['completed', 'failed', 'interrupted'];
+    const TERMINAL = ['completed', 'failed', 'interrupted', 'generated'];
 
-    // 合法模式：快速五图 / 指定单张重生成
-    const MODES = ['quick-five', 'single-regen'];
+    // 合法模式：快速五图 / 指定单张重生成 / 五步作业内的单次生成子任务
+    const MODES = ['quick-five', 'single-regen', 'step-gen', 'batch-gen'];
 
     let cache = null;                           // 内存缓存（可随时从 storage 重建）
 
@@ -51,16 +58,36 @@ const SuiteTaskStore = (() => {
         });
     }
 
+    // 终态任务不再保留素材图片与提示词正文：只留可读的元数据。
+    // 用户约定：Excel 与图片目录各自独立，换了产品就等于任务作废，不需要事后用旧图重放。
+    // 图片数据只在任务进行中需要（执行器上传素材），一旦进入 completed/generated/failed/interrupted 即可丢弃。
+    function slim(all) {
+        for (const id of Object.keys(all)) {
+            const t = all[id];
+            if (!t || !isTerminal(t.stage)) continue;
+            if (Array.isArray(t.assets) && t.assets.length) {
+                t.assets = t.assets.map(a => (a && typeof a === 'object')
+                    ? { color: a.color, filename: a.filename, fileKey: a.fileKey, row: a.row, bytes: a.bytes, width: a.width, height: a.height }
+                    : a);
+            }
+            if (t.prompt) t.prompt = '';
+        }
+        return all;
+    }
+
     function writeAll(all) {
-        cache = all;
-        return new Promise((resolve) => chrome.storage.local.set({ [KEY]: all }, resolve));
+        cache = slim(all);
+        return new Promise((resolve) => chrome.storage.local.set({ [KEY]: cache }, resolve));
     }
 
     function prune(all) {
         const ids = Object.keys(all);
         if (ids.length <= MAX_KEEP) return all;
-        ids.sort((a, b) => (all[a].startedAt || 0) - (all[b].startedAt || 0));
-        for (const id of ids.slice(0, ids.length - MAX_KEEP)) delete all[id];
+        // 只裁剪已结束的任务：正在跑的任务无论多老都不能删（否则执行器会读不到自己的记录）
+        const terminalIds = ids.filter(id => all[id] && isTerminal(all[id].stage))
+            .sort((a, b) => (all[a].startedAt || 0) - (all[b].startedAt || 0));
+        const excess = ids.length - MAX_KEEP;
+        for (const id of terminalIds.slice(0, Math.max(0, excess))) delete all[id];
         return all;
     }
 
@@ -77,12 +104,19 @@ const SuiteTaskStore = (() => {
         if (MODES.indexOf(mode) < 0) throw new Error(`未知套图模式：${mode || '(空)'}`);
         if (!Number.isInteger(rowNum) || rowNum <= 0) throw new Error('套图任务缺少有效的产品行号');
         if (!Array.isArray(targetKeys) || targetKeys.length === 0) throw new Error('套图任务缺少目标输出编号');
-        if (mode === 'quick-five') {
+        if (mode === 'batch-gen') {
+            if (!Number.isInteger(expectCount) || expectCount < 1 || expectCount > 5) throw new Error('合并生成图片数量必须为 1 至 5');
+            if (targetKeys.length !== expectCount || new Set(targetKeys.map(String)).size !== expectCount) throw new Error('合并生成编号必须唯一且与图片数量一致');
+            if (targetKeys.some(key => !['111','222','333','444','666'].includes(String(key)))) throw new Error('合并生成包含无效编号');
+        } else if (mode === 'quick-five') {
             if (expectCount !== 5) throw new Error('快速五图任务的 expectCount 必须为 5');
             if (targetKeys.length !== 5) throw new Error('快速五图必须配置 5 个输出编号');
         } else if (mode === 'single-regen') {
             if (expectCount !== 1) throw new Error('指定单张重生成的 expectCount 必须为 1');
             if (targetKeys.length !== 1) throw new Error('指定单张重生成必须且只能指定 1 个输出编号');
+        } else if (mode === 'step-gen') {
+            if (expectCount !== 1) throw new Error('单次生成子任务的 expectCount 必须为 1');
+            if (targetKeys.length !== 1) throw new Error('单次生成子任务必须且只能指定 1 个输出编号');
         }
 
         const dup = await activeFor({ fileKey: fk, rowNum, mode });
@@ -154,6 +188,7 @@ const SuiteTaskStore = (() => {
         if (!t) throw new Error(`任务不存在：${taskId}`);
         if (isTerminal(t.stage)) throw new Error(`任务已处于终态（${t.stage}），不能再结束`);
         if (TERMINAL.indexOf(stage) < 0) throw new Error(`非终态阶段：${stage}`);
+        if (stage === 'completed' && t.stage !== 'saved') throw new Error('未保存成功不允许标记完成');
         t.stage = stage;
         t.error = error || '';
         t.updatedAt = Date.now();
@@ -199,15 +234,28 @@ const SuiteTaskStore = (() => {
         return { accepted: true, task: JSON.parse(JSON.stringify(t)) };
     }
 
+    // 用户主动恢复已发送任务的实际结果；普通迟到进度仍由 acceptReport 拒绝。
+    async function recoverResults(taskId, identity, images) {
+        const all=await readAll(), t=all[taskId];
+        if(!t||t.cancelled||t.stage==='completed'||t.stage==='saved'||t.stage==='generated')throw new Error('任务不能恢复');
+        if(t.fileKey!==normalizeKey(identity.fileKey)||t.rowNum!==identity.rowNum)throw new Error('恢复任务身份不符');
+        if(!t.stageAt.sent)throw new Error('任务没有已发送证据，禁止恢复结果');
+        if(!Array.isArray(images)||images.length!==t.expectCount||new Set(images).size!==images.length||images.some(u=>!/^data:image\//.test(u)))throw new Error('恢复图片数量或内容不符合原任务');
+        if(t.stage==='acquired'){if(JSON.stringify(t.images)!==JSON.stringify(images))throw new Error('已有结果不能被其他图片覆盖');return JSON.parse(JSON.stringify(t));}
+        const from=t.stage;t.stage='acquired';t.images=images;t.error='';t.updatedAt=Date.now();t.stageAt.acquired=t.updatedAt;
+        t.diag=[...(t.diag||[]),`主动恢复已有结果 ${images.length} 张（原阶段 ${from}，未重新生成）`];
+        await writeAll(all);return JSON.parse(JSON.stringify(t));
+    }
     // MV3 冷启动恢复：非终态任务标记为中断（不自动重发豆包请求）
     async function recoverOnStartup() {
         const all = await readAll();
         const interrupted = [];
         for (const id of Object.keys(all)) {
             const t = all[id];
-            if (isTerminal(t.stage)) continue;
+            if (isTerminal(t.stage) || t.stage === 'acquired' || t.stage === 'saved') continue;
+            const previousStage = t.stage;
             t.stage = 'interrupted';
-            t.error = `后台休眠/重载导致执行上下文丢失（中断于 ${t.stage}）`;
+            t.error = `后台休眠/重载导致执行上下文丢失（中断于 ${previousStage}）`;
             t.updatedAt = Date.now();
             t.stageAt.interrupted = Date.now();
             interrupted.push(id);
@@ -221,8 +269,8 @@ const SuiteTaskStore = (() => {
 
     return {
         KEY, STAGES, TERMINAL, MODES,
-        create, get, list, activeFor, advance, fail, interrupt, cancel,
-        acceptReport, recoverOnStartup, reset, isTerminal
+        create, get, list, activeFor, advance, finish, fail, interrupt, cancel,
+        acceptReport, recoverOnStartup, recoverResults, reset, isTerminal
     };
 })();
 
