@@ -102,7 +102,6 @@ button:disabled:hover {transform:none;}
 .product-row {color:#cec2df;}
 .uploaded-badge {padding:3px 9px;background:rgba(67,167,124,.20);border-color:rgba(133,221,178,.32);color:#d3f9e4;box-shadow:none;font-size:11px;}
 .color-generated-badge {padding:3px 9px;background:rgba(173,140,226,.23);border-color:rgba(215,186,255,.25);color:#efe0ff;box-shadow:none;font-size:11px;}
-.suite-generated-badge {padding:3px 9px;background:rgba(92,164,206,.22);border:1px solid rgba(160,218,248,.28);border-radius:999px;color:#dcf4ff;box-shadow:none;font-size:11px;}
 .tag {background:rgba(255,255,255,.085);border-color:rgba(230,218,255,.12);color:#e7dff1;}
 .field-value {border-color:rgba(227,212,255,.10);line-height:1.7;}
 .task-progress {background:rgba(47,36,64,.70);border:1px solid var(--ui-border);box-shadow:0 4px 16px rgba(17,12,30,.12);border-radius:16px;}

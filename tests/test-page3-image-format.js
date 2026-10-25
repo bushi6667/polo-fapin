@@ -117,22 +117,22 @@ test('滑块更新逻辑', () => {
     );
 });
 
-test('fillImagesPage3 动态拼接路径', () => {
+test('fillImagesPage3 改用生成套图清单，原图格式选择不影响成品上传', () => {
     assert(
-        page3Src.includes('IMAGE_DIR && product.row'),
-        '检查 IMAGE_DIR 和 product.row 是否存在'
+        page3Src.includes('_publishFileKey:product._publishFileKey'),
+        '请求绑定原始文件标识'
     );
     assert(
-        page3Src.includes("row' + product.row + '_main.' + IMG_EXT"),
-        '使用 IMG_EXT 动态拼接图片路径'
+        page3Src.includes("requestPublicationUpload(product,'main')"),
+        '读取主图成品清单而非原图文件'
     );
     assert(
-        page3Src.includes('imagePath = product.imagePath'),
-        'IMAGE_DIR 不可用时回退到 product.imagePath'
+        page3Src.includes('if(result.count!==6)'),
+        '必须确认两张生成图与四张公共图'
     );
     assert(
-        page3Src.includes('IMAGE_DIR.includes') ? true : true,
-        '使用 IMAGE_DIR 中的路径分隔符'
+        page3Src.includes('row:product.row'),
+        '请求绑定实际产品行号'
     );
 });
 

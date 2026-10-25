@@ -1,0 +1,82 @@
+/* 此面板占据原详情区；不使用全屏遮罩，也不改变左侧列表布局。 */
+.detail-panel.step-config-mode {background:var(--bg-card);border-color:var(--border);overflow:hidden;}
+.step-config-view {display:flex;flex-direction:column;flex:1;min-height:0;color:var(--text-primary);font-size:13px;}
+.step-config-view * {box-sizing:border-box;}
+.step-config-heading {display:flex;align-items:center;justify-content:space-between;padding:22px;background:rgba(255,255,255,.035);border-bottom:1px solid var(--border);}
+.step-config-heading h2 {margin:0;font-size:19px;}
+.step-config-view button {border:1px solid var(--border-inner);border-radius:var(--radius-sm);padding:9px 14px;color:var(--text-primary);background:rgba(255,255,255,.08);cursor:pointer;font:inherit;}
+.step-config-view button:hover {background:var(--bg-card-hover);}
+.step-config-view button.primary {background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border-color:rgba(189,171,255,.45);box-shadow:var(--shadow-sm);font-weight:600;}
+.step-config-view .step-close {border:0;background:transparent;font-size:23px;padding:0 5px;color:var(--text-secondary);}
+.step-config-toolbar {display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:16px 20px;}
+.step-config-toolbar p {flex:1 1 240px;margin:0;color:var(--text-secondary);font-size:12px;line-height:1.6;}
+.step-config-view input,.step-config-view select,.step-config-view textarea {border:1px solid var(--border);background:rgba(255,255,255,.065);color:var(--text-primary);border-radius:10px;padding:7px 8px;font:inherit;min-width:0;}
+.step-config-view textarea {width:100%;min-height:140px;resize:vertical;line-height:1.7;}
+.step-config-list {overflow:auto;padding:0 20px 20px;flex:1;min-height:0;}
+.step-card {margin:0 0 24px;border:1px solid var(--border);background:var(--bg-card);box-shadow:var(--shadow-inner);border-radius:var(--radius-md);padding:12px;}
+.step-card.dragging {opacity:.4;}
+.step-card-top {display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
+.step-card-top .step-toggle {background:transparent;border:0;color:#d2c4ff;padding:6px 0;margin-right:6px;min-width:94px;text-align:left;}
+.step-card-top .step-name {flex:1 1 110px;max-width:180px;}
+.step-card-top label {display:flex;align-items:center;gap:5px;color:var(--text-secondary);font-size:12px;}
+.step-card-top .step-key {width:65px;}
+.step-card-top .step-test {margin-left:auto;color:#e0d5ff;padding:7px 10px;}
+.step-config-view .step-delete {color:#ff9caf;border:0;background:transparent;padding:7px;}
+.step-card-body {padding-top:14px;}
+.step-card-body[hidden] {display:none;}
+.step-section {border:1px solid var(--border-light);background:rgba(255,255,255,.03);border-radius:var(--radius-sm);padding:12px;margin-bottom:12px;}
+.step-section-title {display:flex;align-items:center;justify-content:space-between;margin-bottom:9px;color:var(--text-secondary);}
+.step-section-title button {padding:3px 9px;font-size:12px;}
+.step-mapping-row {display:flex;gap:6px;align-items:center;margin-top:7px;}
+.step-mapping-row input,.step-mapping-row select {flex:1;width:0;}
+.step-mapping-row button {padding:4px 8px;}
+.step-post-row {display:flex;align-items:center;gap:7px;margin:6px 0;}
+.step-post-row span {flex:1;overflow-wrap:anywhere;}
+.step-config-note {font-size:12px;color:var(--text-tertiary);line-height:1.7;margin:8px 0;}
+.step-config-message {white-space:pre-wrap;color:#e0d5ff;padding:0 20px;max-height:190px;overflow:auto;}
+.step-config-footer {display:flex;gap:8px;justify-content:flex-end;padding:14px 20px;background:rgba(255,255,255,.035);border-top:1px solid var(--border);}
+@media(max-width:700px){.step-card-top .step-test{margin-left:0}.step-card-top .step-name{max-width:none}.step-mapping-row{flex-wrap:wrap}.step-mapping-row input,.step-mapping-row select{flex-basis:40%;}}
+
+/* 复用主页玻璃卡片和紫色强调色，焦点与下拉菜单保持可读。 */
+.step-config-view button {transition:background var(--transition-fast),box-shadow var(--transition-fast);}
+.step-config-view button.primary:hover {background:linear-gradient(135deg,#7888ed,#8a60b2);box-shadow:var(--shadow-md);}
+.step-config-view input:focus,.step-config-view select:focus,.step-config-view textarea:focus {outline:none;border-color:rgba(181,161,255,.7);box-shadow:0 0 0 3px rgba(146,117,230,.14);}
+.step-config-view button:focus-visible {outline:2px solid #c5afff;outline-offset:3px;}
+.step-config-view select option {background:#39344e;color:#fff;}
+.step-card-top .step-toggle:hover {background:rgba(168,139,250,.1);}
+.step-card:hover {border-color:rgba(216,202,255,.28);}
+.step-config-view ::placeholder {color:var(--text-tertiary);}
+
+.step-script-chooser {margin-top:12px;padding:12px;border:1px solid var(--border-inner);border-radius:var(--radius-sm);background:rgba(255,255,255,.04);}
+.step-script-files {max-height:240px;overflow:auto;}
+.step-script-files label {display:flex;align-items:center;gap:8px;padding:7px;cursor:pointer;overflow-wrap:anywhere;}
+.step-script-files label:hover {background:var(--bg-card-hover);border-radius:8px;}
+.step-script-files input[type=checkbox] {width:15px;height:15px;flex:none;accent-color:#a48ce5;}
+.step-script-actions {display:flex;justify-content:flex-end;gap:8px;margin-top:10px;}
+
+/* 添加脚本后自动解析出的「所需内容」清单 */
+.step-post-item {border:1px solid var(--border-light);border-radius:var(--radius-sm);padding:8px 10px;margin:6px 0;background:rgba(255,255,255,.02);}
+.step-post-item .step-post-row {margin:0;}
+.step-resource-list {margin-top:8px;border-top:1px dashed var(--border-light);padding-top:8px;}
+.step-resource-row {display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:5px 0;font-size:12px;color:var(--text-secondary);}
+.step-resource-row code {color:#d2c4ff;font-family:monospace;}
+.step-resource-note {flex-basis:100%;font-size:12px;color:var(--text-tertiary);}
+/* 已配置后处理但脚本内容为空（默认占位脚本）：面板必须明确提示需要导入，执行时也会明确报错 */
+.step-script-missing {color:#ffb020;}
+.step-resource-map {flex-basis:100%;max-height:200px;overflow:auto;display:flex;flex-direction:column;gap:2px;}
+.step-resource-map div {display:flex;gap:6px;align-items:baseline;font-size:12px;}
+.step-resource-map code {color:#d2c4ff;font-family:monospace;min-width:96px;}
+.step-resource-map span {color:var(--text-tertiary);}
+.step-resource-map em {color:var(--text-primary);font-style:normal;overflow-wrap:anywhere;}
+.step-resource-row em {font-style:normal;overflow-wrap:anywhere;flex:1;min-width:120px;color:var(--text-primary);}
+.step-resource-picker {position:relative;padding:5px 10px;border:1px solid var(--border-light);border-radius:8px;cursor:pointer;}
+.step-resource-picker input {position:absolute;inset:0;opacity:0;width:100%;cursor:pointer;}
+
+.step-prompt-toolbar {display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;min-height:30px;}
+.step-prompt-toolbar .step-config-note {margin:0;flex:1;}
+.step-config-view .step-prompt-add {flex-shrink:0;padding:5px 9px;font-size:12px;background:rgba(173,142,255,.2);color:#eadfff;}
+.step-prompt-add[hidden] {display:none;}
+.step-prompt-editor {width:100%;min-height:140px;max-height:420px;overflow:auto;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.9;padding:10px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.065);color:var(--text-primary);outline:none;}
+.step-prompt-editor:focus {border-color:rgba(181,161,255,.7);box-shadow:0 0 0 3px rgba(146,117,230,.14);}
+.step-prompt-token {color:#ffc1e7;background:rgba(237,100,182,.15);border-radius:4px;font-size:1.12em;font-weight:700;padding:1px 3px;box-decoration-break:clone;}
+.step-mapping-label {color:#ffc1e7;max-width:40%;overflow-wrap:anywhere;}

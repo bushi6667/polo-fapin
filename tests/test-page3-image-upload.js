@@ -27,15 +27,15 @@ const uploadSrc = fs.readFileSync(UPLOAD_PATH, 'utf-8');
 
 test('fillImagesPage3 异步等待模式', () => {
     assert(
-        page3Src.includes("action === 'uploadResult'"),
-        'fillImagesPage3 监听 uploadResult 消息'
+        page3Src.includes("action:'uploadPublicationImages'"),
+        '使用有回执的本产品多图上传请求'
     );
     assert(
         page3Src.includes("chrome.runtime.onMessage.removeListener"),
         '收到结果后移除监听器，避免内存泄漏'
     );
     assert(
-        page3Src.includes("'✅ 主图上传成功'"),
+        page3Src.includes('✅ 主图上传成功：'),
         '上传成功时返回 ✅ 主图上传成功'
     );
     assert(
@@ -43,8 +43,8 @@ test('fillImagesPage3 异步等待模式', () => {
         '上传失败时返回 ❌ 主图上传失败'
     );
     assert(
-        page3Src.includes("'⏳ 主图上传中，请稍候...'"),
-        '仍保留上传中的提示信息'
+        page3Src.includes("if(result.count!==6)"),
+        '必须确认六张主图，不能只看到一张就返回成功'
     );
 });
 
@@ -104,13 +104,13 @@ test('日志文案优化', () => {
     );
 });
 
-test('不影响现有功能 - fillAllPage3 不调用 fillImagesPage3', () => {
+test('一键填入包含新主图上传', () => {
     const fillAllMatch = page3Src.match(/async function fillAllPage3[\s\S]*?^\}/m);
     const fnBody = fillAllMatch ? fillAllMatch[0] : '';
 
     assert(
-        !fnBody.includes('fillImagesPage3'),
-        'fillAllPage3 全量填入不调用 fillImagesPage3，不会被上传阻塞'
+        fnBody.includes('fillImagesPage3')&&fnBody.includes('fillDetailImagesPage3'),
+        '全量填入包含六张主图与三张细节图'
     );
 });
 

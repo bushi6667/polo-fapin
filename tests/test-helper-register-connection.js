@@ -1,0 +1,24 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync('chrome_extension/background.js','utf8'),popup=fs.readFileSync('chrome_extension/popup.js','utf8');
+let helper='',updated,notice='',tabs=[];
+const chrome={runtime:{id:'a'.repeat(32)},storage:{local:{get:(k,cb)=>cb({polo_helper_path:helper}),set:async data=>{helper=data.polo_helper_path;}}},tabs:{query:async()=>tabs,update:async(id,arg)=>{updated={id,...arg};}}};
+const ctx={URL,console,chrome,HELPER_PATH_KEY:'polo_helper_path',helperPath:'',alert:s=>notice=s};
+vm.createContext(ctx);
+vm.runInContext(source.slice(source.indexOf('function normalizeHelperPath('),source.indexOf('// M3：目录配置值校验')),ctx);
+const a=source.indexOf("    if(request.action==='registerPagePaths')"),b=source.indexOf("    if (request.action === 'suitePreparePage')",a);
+vm.runInContext('async function register(request,sendResponse,sender){'+source.slice(a,b)+'}',ctx);
+vm.runInContext(popup.slice(popup.indexOf('async function connectCurrentHelper()'),popup.indexOf("document.getElementById('connect-helper')")),ctx);
+(async()=>{
+ const sender={url:'file:///C:/%E6%B5%8B%E8%AF%95%20folder/发品助手.html'};
+ assert(await ctx.isTrustedSender(sender));
+ let response;await ctx.register({action:'registerPagePaths'},r=>response=r,sender);assert(response.ok);
+ assert(await ctx.isTrustedSender(sender),'registered URL must remain trusted');
+ helper='C:\\测试 folder\\发品助手.html';assert(await ctx.isTrustedSender(sender),'legacy Windows paths remain valid');
+ assert(!await ctx.isTrustedSender({url:'file:///C:/other/发品助手.html'}));
+ assert(!await ctx.isTrustedSender({url:'https://example.com/发品助手.html'}));
+ helper='file:///C:/old/发品助手.html';tabs=[{id:9,active:true,url:sender.url}];
+ await ctx.connectCurrentHelper();assert.equal(updated.id,9);assert.equal(new URL(updated.url).searchParams.get('poloExtension'),chrome.runtime.id);
+ assert(await ctx.isTrustedSender(sender),'moving the project can rebind the exact selected page');
+ updated=null;tabs=[];await ctx.connectCurrentHelper();assert.equal(updated,null);assert(notice.includes('先在 Chrome'));
+ console.log('PASS actual source: register/reconnect, encoded Chinese+spaces, legacy path, foreign page rejection, fresh/moved project binding and no-page guidance');
+})().catch(e=>{console.error(e);process.exitCode=1;});
