@@ -12,5 +12,18 @@ node_modules/
 # 本地密钥/未跟踪资源
 chrome_extension/js代码/api_config.json
 *.key
-_path_config.json
-_path_config.json.tmp
+
+# ONNX 运行时与模型（u2net.onnx 168MB，超 GitHub 100MB 限制；与扩展内 chrome_extension/runtime/ 重复）
+runtime/
+chrome_extension/runtime/
+
+# 业务数据（不入库）
+第39批_*.xlsx
+归档/
+项目素材/
+
+# 移植/审查类临时文档
+跨电脑移植专项审查_*.md
+项目代码审查_*.md
+项目完整复查_*.md
+自动脚本配置与无水印核验.md
