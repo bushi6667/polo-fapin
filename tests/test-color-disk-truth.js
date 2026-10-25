@@ -51,7 +51,7 @@ function el(tag = 'div') {
     return e;
 }
 
-function makeEnv({ cfgColorDir, serverUp, httpStatus }) {
+function makeEnv({ cfgColorDir, imageLoads, colorImagePath }) {
     const grid = el(); grid.attrs.id = 'colorImagesGrid';
     for (const c of ['white', 'black', 'gray', 'navy']) {
         const it = el(); it.attrs['data-color'] = c;
@@ -61,30 +61,26 @@ function makeEnv({ cfgColorDir, serverUp, httpStatus }) {
     const byId = { colorImagesGrid: grid, colorImagesSection: el(), suiteImagesGrid: el(), suiteImagesArea: el() };
     const toasts = [], logs = [];
     // fetch 桩：按 httpStatus 返回 200/403/404；serverUp=false 时直接拒绝（模拟连接失败）
-    const fetchCalls = [];
-    const fakeFetch = (url) => {
-        fetchCalls.push(url);
-        if (!serverUp) return Promise.reject(new Error('failed to fetch'));
-        const status = httpStatus === undefined ? 404 : httpStatus;
-        return Promise.resolve({
-            status,
-            blob: () => Promise.resolve({ size: status === 200 ? 3 : 0, type: 'image/png' })
-        });
-    };
-    class FakeImage { set src(v) { this._src = v; } get src() { return this._src; } }
+    const imgSrcs = [];
+    class FakeImage {
+        set src(v) { this._src = v; imgSrcs.push(v); setTimeout(() => { if (imageLoads && this.onload) this.onload(); else if (!imageLoads && this.onerror) this.onerror(); }, 0); }
+        get src() { return this._src; }
+    }
     const PathConfig = {
         read: () => ({ colorImgDir: cfgColorDir || '', imageDir: '', scriptDir: '', suiteDir: '' }),
-        serverState: () => (serverUp ? 'up' : 'down'),
-        serverUp: () => !!serverUp,
-        pingServer: () => Promise.resolve(serverUp ? 'up' : 'down'),
-        imageUrl: (abs, bust) => 'http://127.0.0.1:8765/local-image?path=' + encodeURIComponent(abs) + (bust ? '&v=' + Date.now() : ''),
-        colorImagePath: (row, color, folder) => cfgColorDir ? cfgColorDir + '\\' + folder + '\\row' + row + '\\row' + row + '_' + color + '.png' : '',
+        imageUrl: () => '',
+        colorImagePath: colorImagePath || ((row, color, folder) => {
+            if (!cfgColorDir) return '';
+            const S = String.fromCharCode(92);   // 反斜杠
+            return cfgColorDir + S + folder + S + 'row' + row + S + 'row' + row + '_' + color + '.png';
+        }),
+        serverState: () => 'up', serverUp: () => true, pingServer: () => Promise.resolve('up'),
         open: () => {}
     };
     const sandbox = {
         console: { log: (...a) => logs.push(a.join(' ')), warn() {}, error() {}, info: (...a) => logs.push(a.join(' ')), debug() {} },
         document: { getElementById: id => byId[id] || null, querySelector: () => null, querySelectorAll: () => [], createElement: t => el(t), addEventListener() {} },
-        Image: FakeImage, fetch: fakeFetch, URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
+        Image: FakeImage, URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
         products: [{ row: 2 }], currentProduct: { row: 2 }, loadedFileName: 'A.xlsx',
         currentFileKey: () => 'A__', extensionInstalled: true, EXTENSION_ID: 'x',
         getColorImagePath: () => '',
@@ -102,14 +98,14 @@ function makeEnv({ cfgColorDir, serverUp, httpStatus }) {
         extractFn('loadColorImagesFromExtension'),
         extractFn('clearColorImage'),
         extractFn('setColorImage'),
-        extractFn('noteColorServerDown'),
+        extractFn('noteColorFileMissing'),
         extractFn('noteColorPathMissing'),
-        extractFn('noteColorFetchError'),
+        extractFn('toFileUrl'),
         extractFn('noteColorDirUnauthorized'),
         extractFn('showColorDirFixButton'),
         extractFn('clearColorDirFixButton')
     ].join('\n\n'), cx, { filename: 'page:color' });
-    return { cx, grid, toasts, logs, fetchCalls };
+    return { cx, grid, toasts, logs, imgSrcs };
 }
 
 const itemOf = (grid, c) => grid.children.find(x => x.attrs['data-color'] === c);
@@ -123,11 +119,11 @@ const imgOf = (grid, c) => { const it = itemOf(grid, c); return it && it.childre
         const env = makeEnv({ cfgColorDir: 'C:\\Users\\wangs\\Downloads\\Polo发品_颜色图', serverUp: true, imageLoads: true });
         vm.runInContext('loadColorImagesFromExtension(2)', env.cx);
         await new Promise(r => setTimeout(r, 80));
-        ok(env.fetchCalls.length === 4, '四种颜色各发起一次读图请求', env.fetchCalls.length);
-        const u = decodeURIComponent(env.fetchCalls[0] || '');
-        ok(u.startsWith('http://127.0.0.1:8765/local-image?path='), '图片经本地服务读取（不是 file://）', u);
+        ok(env.imgSrcs.length === 4, '四种颜色各加载一次', env.imgSrcs.length);
+        const u = decodeURIComponent(env.imgSrcs[0] || '');
+        ok(u.startsWith('file:///C:/Users/wangs/Downloads/'), '直接用 file:// 读磁盘图片（不需要本地服务）', u);
         ok(/row2_white\.png/.test(u), '路径按 <目录>/<文件名>/row2/row2_white.png 拼接', u);
-        ok(/[&?]v=\d+/.test(env.fetchCalls[0] || ''), '带时间戳参数（删文件立即反映）');
+        ok(/[&?]t=\d+/.test(u), '带时间戳参数（删文件立即反映）');
     }
 
     console.log('\n【②】服务未启动 → 清空并提示，不回退 file://');
@@ -135,9 +131,8 @@ const imgOf = (grid, c) => { const it = itemOf(grid, c); return it && it.childre
         const env = makeEnv({ cfgColorDir: 'C:\\Users\\wangs\\Downloads\\Polo发品_颜色图', serverUp: false, imageLoads: true });
         vm.runInContext('loadColorImagesFromExtension(2)', env.cx);
         await new Promise(r => setTimeout(r, 60));
-        ok(env.fetchCalls.length === 0, '服务未启动时不发起读图请求');
-        ok(env.toasts.some(t => /本地服务未启动/.test(t)), '提示本地服务未启动', JSON.stringify(env.toasts));
-        ok(!env.toasts.some(t => /授权/.test(t)), '不再出现「授权失效」');
+        ok(env.imgSrcs.length === 4, '仍然按路径探测（文件不存在由 onerror 如实反映）');
+        ok(!env.toasts.some(t => /授权|本地服务/.test(t)), '不出现「授权失效 / 本地服务」提示', JSON.stringify(env.toasts));
     }
 
     console.log('\n【③】文件不存在 → 清空（删除即消失）');
@@ -145,17 +140,17 @@ const imgOf = (grid, c) => { const it = itemOf(grid, c); return it && it.childre
         const env = makeEnv({ cfgColorDir: 'C:\\Users\\wangs\\Downloads\\Polo发品_颜色图', serverUp: true, imageLoads: false });
         vm.runInContext('loadColorImagesFromExtension(2)', env.cx);
         await new Promise(r => setTimeout(r, 80));
-        ok(env.fetchCalls.length === 4, '仍然按路径去请求（404 由服务端如实返回）');
-        ok(env.toasts.length > 0, '404 有明确提示（不静默）', JSON.stringify(env.toasts));
+        ok(env.imgSrcs.length === 4, '按路径探测四次');
+        ok(env.logs.some(l => /磁盘上没有这张图/.test(l)), '日志如实说明磁盘上没有这张图', JSON.stringify(env.logs).slice(0, 120));
     }
 
     console.log('\n【④】未配置路径 → 不显示缓存图');
     {
-        const env = makeEnv({ cfgColorDir: '', serverUp: true, httpStatus: 200 });
+        const env = makeEnv({ cfgColorDir: '', imageLoads: true });
         vm.runInContext('loadColorImagesFromExtension(2)', env.cx);
         await new Promise(r => setTimeout(r, 80));
-        ok(env.fetchCalls.length === 0, '未配置路径时不请求、也不显示缓存图');
-        ok(env.toasts.every(t => !/授权/.test(t)), '不出现「授权失效」');
+        ok(env.imgSrcs.length === 0, '未配置路径时不加载、也不显示缓存图');
+        ok(env.toasts.every(t => !/授权|本地服务/.test(t)), '不出现「授权失效 / 本地服务」提示');
     }
 
     console.log('\n' + '='.repeat(54));

@@ -1428,7 +1428,7 @@ body::after {
 .suite-grid { grid-template-columns: repeat(5, 1fr); }
 /* 路径配置：复用「自定义步骤配置」的 .step-config-* 外壳，这里只补列表行样式 */
 .path-config-list { display: flex; flex-direction: column; gap: 14px; padding: 4px 2px 8px; }
-.path-config-row { display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: center; }
+.path-config-row { display: grid; grid-template-columns: 1fr 2fr auto auto; gap: 10px; align-items: center; }
 .path-config-meta { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: rgba(255,255,255,0.72); }
 .path-config-meta span { font-size: 11px; color: rgba(255,255,255,0.45); }
 .path-config-row input { width: 100%; padding: 8px 10px; border-radius: 8px; font-size: 12px;
@@ -1786,6 +1786,7 @@ body::after {
 <script src="chrome_extension/suite/suite-image-sdk.js"></script>
 <script src="chrome_extension/suite/suite-runtime.js"></script>
 <script src="chrome_extension/suite/suite-rembg.js"></script>
+<script src="page-directories.js"></script>
 <script src="path-config.js"></script>
 <script>
 if (typeof XLSX === 'undefined') {
@@ -2533,7 +2534,7 @@ function parseProducts(data) {
             }
         }
 
-        product.imagePath = 'extracted_images/row' + product.row + '_main.jpg';
+        product.imagePath = 'extracted_images/row' + product.row + '_main.png';
         products.push(product);
     }
 
@@ -2542,24 +2543,56 @@ function parseProducts(data) {
     return skippedCount;
 }
 
-function saveToLocalStorage() {
+// 产品与原始工作表作为同一份快照存储，避免刷新后只恢复一半。
+function openImportCache() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open('PoloImportCache', 1);
+        req.onupgradeneeded = () => req.result.createObjectStore('imports');
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+async function saveToLocalStorage() {
+    if (!currentSheet) return;
+    const snapshot = structuredClone({ version: 1, products, currentColMap, currentSheet, loadedFileName });
+    let db;
     try {
-        localStorage.setItem('polo_products', JSON.stringify(products));
-        localStorage.setItem('polo_col_map', JSON.stringify(currentColMap));
-    } catch (e) {}
+        db = await openImportCache();
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction('imports', 'readwrite');
+            tx.objectStore('imports').put(snapshot, 'last');
+            tx.oncomplete = resolve;
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error('缓存写入中断'));
+        });
+    } catch (e) {
+        console.warn('保存完整 Excel 缓存失败:', e);
+        showToast('⚠️ 自动导入缓存保存失败，下次打开请重新导入 Excel');
+    } finally { if (db) db.close(); }
 }
 function saveSelectedIdx(idx) { try { localStorage.setItem('polo_selected_idx', idx); } catch (e) {} }
 function saveActiveTab(tab) { try { localStorage.setItem('polo_active_tab', tab); } catch (e) {} }
 
-function loadFromLocalStorage() {
+async function loadFromLocalStorage() {
     try {
-        const saved = localStorage.getItem('polo_products');
-        if (saved) {
-            products = JSON.parse(saved);
-            const savedColMap = localStorage.getItem('polo_col_map');
-            if (savedColMap) currentColMap = JSON.parse(savedColMap);
-            const savedFn = localStorage.getItem('polo_loaded_filename');
-            if (savedFn) loadedFileName = savedFn;
+        const db = await openImportCache();
+        let saved;
+        try {
+            saved = await new Promise((resolve, reject) => {
+                const req = db.transaction('imports', 'readonly').objectStore('imports').get('last');
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+        } finally { db.close(); }
+        // 用户已手动导入时，不让较晚返回的缓存覆盖新文件。
+        if (currentSheet) return false;
+        if (saved && saved.version === 1 && Array.isArray(saved.products) &&
+            saved.currentSheet && Array.isArray(saved.currentSheet.rows) &&
+            Array.isArray(saved.currentSheet.headers) && saved.loadedFileName) {
+            products = saved.products;
+            currentColMap = saved.currentColMap;
+            currentSheet = saved.currentSheet;
+            loadedFileName = saved.loadedFileName;
             // 真实启动入口：产品与文件名就绪后恢复换色任务（保持暂停、不自动派发）
             setTimeout(() => { try { restoreColorBatchState(); } catch (e) { console.warn('恢复换色任务失败:', e); } }, 300);
             renderProductList();
@@ -2580,6 +2613,9 @@ function loadFromLocalStorage() {
             }
             if (savedIdx !== null && products[parseInt(savedIdx)]) selectProduct(parseInt(savedIdx));
             return true;
+        }
+        if (localStorage.getItem('polo_products')) {
+            showToast('⚠️ 旧缓存缺少完整 Excel 数据，请重新导入一次，之后打开将自动恢复');
         }
     } catch (e) { console.warn('恢复本地产品缓存失败:', e); }
     return false;
@@ -2707,6 +2743,7 @@ function toggleSelectAll() {
 
 // 批量发品：产品快照与队列在一次请求中创建；固定每批 50 款
 function batchPublish() {
+    window.UnifiedTaskStarted?.();
     const selectedProducts = getSelectedProducts();
     if (selectedProducts.length === 0) return;
 
@@ -2859,42 +2896,21 @@ function checkColorGeneratedStatus() {
     });
 }
 
+// 用户明确不要「套图」完成角标：这里只负责清掉历史遗留的标记，不再添加。
 function addSuiteGeneratedBadge(rowNum) {
     const productIdx = products.findIndex(p => p.row === rowNum);
     if (productIdx === -1) return;
     const card = document.querySelector(`.product-card[data-idx="${productIdx}"]`);
-    if (!card || card.querySelector('.suite-generated-badge')) return;
-    const badge = document.createElement('span');
-    badge.className = 'suite-generated-badge';
-    badge.textContent = '套图';
-    const tags = card.querySelector('.product-tags');
-    if (!tags) return;
-    const colorBadge = tags.querySelector('.color-generated-badge');
-    const firstTag = tags.querySelector('.tag');
-    if (colorBadge) colorBadge.after(badge);
-    else if (firstTag) firstTag.after(badge);
-    else tags.appendChild(badge);
+    const badge = card && card.querySelector('.suite-generated-badge');
+    if (badge) badge.remove();
 }
 
 // 「套图」角标只按成品验收：同一 fileKey+rowNum 的 111/222/333/444/666 全部存在
 // 已保存并校验过的后处理成品才显示；跨任务补齐同样计入，单步任务完成不代表整套完成。
+// 角标已取消（用户要求）：不再做全表核验，只清理历史遗留标记。
 function checkSuiteGeneratedStatus() {
-    if (!extensionInstalled || products.length === 0) return;
-    const queriedFile = currentFileKey();
-    const queriedProducts = products;
-    (async () => {
-        for (let i = 0; i < queriedProducts.length; i++) {
-            if (queriedFile !== currentFileKey() || products !== queriedProducts) return;
-            const rowNum = queriedProducts[i].row;
-            const ready = await suiteBadgeReady(queriedFile, rowNum);
-            if (ready) addSuiteGeneratedBadge(rowNum);
-            else {
-                const card = document.querySelector(`.product-card[data-idx="${i}"]`);
-                const badge = card && card.querySelector('.suite-generated-badge');
-                if (badge) badge.remove();
-            }
-        }
-    })().catch(() => {});
+    if (products.length === 0) return;
+    document.querySelectorAll('.suite-generated-badge').forEach(badge => badge.remove());
 }
 
 function syncProductToExtension(product) {
@@ -3038,6 +3054,9 @@ function renderDetail() {
                             </button>
                             <button class="batch-color-btn" onclick="startColorChangeForRows()" id="colorRowsBtn" style="justify-content: center;">
                                 🔁 指定重生成
+                            </button>
+                            <button class="ai-edit-btn" onclick="compressSuiteImages()" id="suiteCompressBtn" style="justify-content: center;" title="把当前 Excel 下所有成品图压到 1MB 以内（JPG，直接覆盖）">
+                                🗜️ 压缩图片
                             </button>
                             <button class="ps-edit-btn" onclick="openPhotopea(${p.row})" style="justify-content: center;">
                                 🖌️ PS编辑
@@ -3286,7 +3305,27 @@ function checkExtension() {
             try {
                 if (!extensionPort) {
                     extensionPort = chrome.runtime.connect(EXTENSION_ID, { name: 'assistant-channel' });
+                    chrome.runtime.sendMessage(EXTENSION_ID,{action:'registerPagePaths'},()=>{void chrome.runtime.lastError;});
+                    // 目录桥握手：告诉扩展本页支持目录桥请求（扩展据此快速拒绝旧版页面，不再静默超时）
+                    try{extensionPort.postMessage({action:'pageDirectoryBridgeReady'});}catch(_){}
                     extensionPort.onMessage.addListener((msg) => {
+                        // 扩展侧主动探测（连接建立后由扩展发出）：回一次握手，供扩展确认本页支持目录桥
+                        if(msg.action==='bridgeProbe'){
+                            try{extensionPort.postMessage({action:'pageDirectoryBridgeReady'});}catch(_){}
+                        }
+                        if(msg.action==='pageDirectoryRequest'){
+                            const replyPort=extensionPort;
+                            // 先立即确认收到，扩展据此区分「旧版页面无监听」与「页面执行慢」
+                            try{replyPort.postMessage({action:'pageDirectoryAck',requestId:msg.requestId});}catch(_){}
+                            let dispatchPromise;
+                            try{
+                                dispatchPromise = (typeof PageDirectories!=='undefined')
+                                    ? PageDirectories.dispatch(msg.request)
+                                    : Promise.reject(Error('页面目录模块未加载'));
+                            }catch(error){ dispatchPromise = Promise.reject(error); }
+                            dispatchPromise.then(result=>replyPort.postMessage({action:'pageDirectoryResponse',requestId:msg.requestId,ok:true,result}))
+                                .catch(error=>{try{replyPort.postMessage({action:'pageDirectoryResponse',requestId:msg.requestId,ok:false,error:error.message});}catch(_){}});
+                        }
                         if(msg.action==='publicationImagesRequest'){
                             const replyPort=extensionPort;
                             PublicationImageSource.read(msg).then(files=>replyPort.postMessage({action:'publicationImagesResponse',requestId:msg.requestId,ok:true,files}))
@@ -3962,32 +4001,61 @@ function renderSuiteAutoControls() {
     const text=document.getElementById('suiteAutoProgress');if(text)text.textContent=`${state.phase==='completed'?'✅':state.paused?'⏸':'⏳'} ${state.paused?(suiteTaskRunning?'暂停中 · ':'已暂停 · '):''}${label}${state.currentKey?' · '+state.currentKey:''} · ${state.done||0}/${total}`;
     const button=document.getElementById('suiteAutoToggle');if(button){button.style.display=state.phase==='completed'?'none':'';button.textContent=state.paused||!suiteTaskRunning?'▶ 继续':'⏸ 暂停';}
 }
+window.PoloRecycleTask=async function(kind){
+    if(kind==='suite'||kind==='suiteBatch'){
+        const state=readSuiteAutoState();
+        if(state&&state.taskId){try{await suiteSend('suiteCancel',{taskId:state.taskId,reason:'用户回收进度'});}catch(_){}}
+        try{localStorage.removeItem('polo_suite_auto_v1');}catch(_){}
+        suiteAutoState=null;renderSuiteAutoControls();
+        if(kind==='suiteBatch'){
+            try{localStorage.removeItem('polo_suite_batch_v1');}catch(_){}
+            if(typeof suiteBatchState!=='undefined')suiteBatchState={fileKey:currentFileKey(),rows:[],index:0,paused:true,completed:true,recycled:true};
+        }
+    }else if(kind==='publish'||kind==='publishImage'){
+        try{chrome.runtime.sendMessage(EXTENSION_ID,{action:'discardPublishTask'},()=>{void chrome.runtime.lastError;refreshPublishState();});}catch(_){refreshPublishState();}
+    }else if(kind==='color'){
+        const btn=document.getElementById('batchColorToggleBtn');if(btn&&!btn.disabled&&typeof batchColorState!=='undefined'&&batchColorState&&batchColorState.running)btn.click();
+        try{setColorResumeRows([]);}catch(_){}
+        if(typeof batchColorState!=='undefined'){batchColorState=null;try{saveColorBatchState();}catch(_){}}
+        try{localStorage.removeItem('polo_color_batch_state');localStorage.removeItem('polo_color_batch_state::'+currentFileKey());}catch(_){}
+        if(typeof updateBatchColorStatus==='function')updateBatchColorStatus('已回收');
+        if(typeof restoreBatchColorUI==='function')restoreBatchColorUI();
+    }
+};
 function suiteAutoCheckpoint(taskId,phase,done) {
     const state=readSuiteAutoState();if(!state||state.taskId!==taskId)return true;
     saveSuiteAutoState({...state,phase,done,total:SUITE_FIVE_TOTAL});
     if(state.paused){updateSuiteStatus('⏸ 套图已暂停，结果已保留；点击继续，不会重新生图');return false;}
     updateSuiteStatus(`⏳ 套图自动处理 · ${done}/${SUITE_FIVE_TOTAL} · ${phase==='processing'?'后处理':'保存'}`);return true;
 }
+async function cancelSuiteProductTasks(state) {
+    const active = await suiteSend('suiteListTasks', {fileKey:state.fileKey,rowNum:state.rowNum,activeOnly:true});
+    if (!active.ok) throw Error(active.error || '无法读取待停止的套图任务');
+    for (const task of active.tasks || []) {
+        const result = await suiteSend('suiteCancel', {taskId:task.taskId,reason:'用户暂停当前套图'});
+        if (!result.ok) throw Error(result.error || '套图停止失败');
+    }
+}
 async function toggleSuiteAuto() {
     const state=readSuiteAutoState();if(!state||state.phase==='completed')return;
     if(!currentProduct||state.fileKey!==currentFileKey()||state.rowNum!==currentProduct.row){showToast('请切回该任务产品后继续');return;}
-    if(!state.paused&&suiteTaskRunning){saveSuiteAutoState({...state,paused:true});updateSuiteStatus('⏸ 已请求暂停；当前生成或处理完成后保留结果，不再进入下一阶段');return;}
+    if(!state.paused&&suiteTaskRunning){saveSuiteAutoState({...state,paused:true});await cancelSuiteProductTasks(state).catch(e=>showToast(e.message));updateSuiteStatus('⏸ 已暂停；点击继续从当前产品整套重新生成（五张全部重做）');return;}
+    if(suiteTaskRunning){showToast('当前套图正在停止，请稍后点击继续');return;}
+    // 必须先在点击手势内申请目录权限，再进行任何异步任务读取。
+    if(typeof ensurePsDirPermission==='function')await ensurePsDirPermission();
     saveSuiteAutoState({...state,paused:false});
+    if(typeof suiteBatchState!=='undefined'&&suiteBatchState&&!suiteBatchState.completed&&
+        suiteBatchState.fileKey===state.fileKey&&suiteBatchState.rows[suiteBatchState.index]===state.rowNum){
+        await runSuiteBatch();return;
+    }
     if(!suiteTaskRunning)await resumeSuiteAuto();
 }
 async function resumeSuiteAuto() {
     if(suiteTaskRunning)return;
     const state=readSuiteAutoState();if(!state||state.paused||state.phase==='completed')return;
     if(!currentProduct||state.fileKey!==currentFileKey()||state.rowNum!==currentProduct.row)return;
-    // 五步混合流程：只用任务启动时冻结的 Excel 行、步骤配置与产品主图继续，未完成步骤才补；
-    // 已生成过的图片直接从冻结缓存复用，不重新消耗生图额度。
-    const five=await readSuiteFive(state.fileKey,state.rowNum);
-    if(!five||!five.excelRowSpec||!five.main||!five.main.dataUrl){
-        saveSuiteAutoState({...state,paused:true,phase:'error'});
-        updateSuiteStatus('❌ 缺少原任务冻结数据（产品主图 / Excel 行 / 步骤配置），不能恢复，未重新生图；请重新发起套图');
-        return;
-    }
-    await runSuiteFiveJob({ keys: five.keys || SUITE_STEP_KEYS, resume: true });
+    // “继续”= 从当前产品整套重做：五张全部重新生成，不沿用旧图（用户确认的语义）。
+    await runSuiteFiveJob({ keys: SUITE_STEP_KEYS, restart: true });
 }
 async function waitSuiteAutoImages(taskId) {
     const deadline=Date.now()+900000;
@@ -3996,7 +4064,7 @@ async function waitSuiteAutoImages(taskId) {
         if(!r.ok||!task)throw Error(r.error||'任务记录丢失');
         if(task.stage==='acquired'){const full=await suiteSend('suiteGetTask',{taskId});if(!full.ok||!full.task)throw Error('结果读取失败');return full.task;}
         if(task.stage==='completed')return task;
-        if(task.cancelled||['failed','interrupted'].includes(task.stage))throw Error(task.error||'任务已中断；已有结果可恢复，未重新发送请求');
+        if(task.cancelled||['failed','interrupted','generated'].includes(task.stage))throw Error(task.error||'任务已中断或已结束；请点继续按磁盘现状续跑');
         await new Promise(resolve=>setTimeout(resolve,2000));
     }
     throw Error('等待生成超时，任务已保留，继续时只读取已有任务');
@@ -4127,14 +4195,20 @@ function psDirHandleRef() {
 
 // 只能在用户点击（「生成套图」）的手势窗口内调用；不弹二级界面，只出现浏览器自己的权限确认。
 async function ensurePsDirPermission() {
+    if(typeof PageDirectories!=='undefined'){
+        try{const permissions=await PageDirectories.permissions();return {ok:permissions.every(p=>p==='granted'),reason:permissions.some(p=>p!=='granted')?'请在页面路径配置确认目录授权':''};}
+        catch(e){return {ok:false,reason:e.message};}
+    }
     const dir = psDirHandleRef();
     if (!dir) return { ok: false, reason: '页面没有保存过产品原图目录句柄' };
     try {
-        const perm = await dir.queryPermission({ mode: 'readwrite' });
-        if (perm === 'granted') return { ok: true, permission: perm };
+        // requestPermission 必须在点击手势里最先调用：先 await queryPermission 会丢失用户激活，
+        // Chrome 会抛 "User activation is required to request permissions"。
+        // 已授权时 requestPermission 直接返回 granted，不会重复弹窗。
         const granted = await dir.requestPermission({ mode: 'readwrite' });
-        return { ok: granted === 'granted', permission: granted };
-    } catch (e) { return { ok: false, reason: (e && e.message) || '申请产品原图目录权限失败' }; }
+        if (granted === 'granted') return { ok: true, permission: granted };
+        return { ok: false, needsPermission: true, permission: granted, reason: '产品原图目录权限未授予（当前 ' + granted + '）' };
+    } catch (e) { return { ok: false, needsPermission: true, reason: (e && e.message) || '申请产品原图目录权限失败' }; }
 }
 
 // 直读当前行原图：file:// 页面既 fetch 不到本地图片（Failed to fetch），也不能把 <img> 画进 canvas
@@ -4187,9 +4261,22 @@ async function resolveSuiteAssets(product) {
     const fileKey = currentFileKey();
     const assets = {};
     const problems = [];
-    let mainUrl = product.imagePath || ('extracted_images/row' + product.row + '_main.jpg');
-    if(typeof SuiteRuntime!=='undefined')mainUrl=SuiteRuntime.imageUrl(mainUrl);
-    let probe = await probeSuiteImage('主图', mainUrl);
+    // 与颜色图同源：都优先用 Excel 提取图 extracted_images/rowN_main.*（实际多为 .png）。
+    // 按扩展名逐个试，绝不写死 .jpg —— 写死会导致探测必然失败、静默改用另一个目录的图。
+    const mainCandidates = [];
+    if (product.imagePath) mainCandidates.push(product.imagePath);
+    for (const ext of ['png', 'jpg', 'jpeg', 'webp']) mainCandidates.push('extracted_images/row' + product.row + '_main.' + ext);
+    let mainUrl = '', probe = { ok: false };
+    for (const candidate of mainCandidates) {
+        const url = (typeof SuiteRuntime !== 'undefined') ? SuiteRuntime.imageUrl(candidate) : candidate;
+        const got = await probeSuiteImage('主图', url);
+        if (got.ok) { mainUrl = url; probe = got; break; }
+        probe = got;
+        // 文件本身存在但不可用（尺寸过小/不是位图）→ 停止换候选，直接把它报出来；
+        // 只有「这个扩展名没有这个文件」才继续试下一个扩展名。
+        if (!/HTTP 40[34]|Failed to fetch|ERR_FILE_NOT_FOUND|没有可用的图片来源/.test(String(got.error || ''))) { mainUrl = url; break; }
+    }
+    if (!mainUrl) mainUrl = (typeof SuiteRuntime !== 'undefined') ? SuiteRuntime.imageUrl(mainCandidates[0]) : mainCandidates[0];
     let pageReadReason = '';
     // 首选：用页面自己的「产品原图目录」句柄直读同一行（在点击手势里已恢复授权，不再需要扩展弹窗授权）。
     // typeof 守卫：本函数被单测按函数切片隔离运行时，该助手不在切片内，此时走下面的扩展后备路径。
@@ -4219,7 +4306,7 @@ async function resolveSuiteAssets(product) {
         if (p2.ok) { probe = p2; mainUrl = pngUrl; }
     }
     if (probe.ok) assets.main = Object.assign({ color: 'main', url: mainUrl, fileKey, row: product.row }, probe);
-    else problems.push([probe.error, pageReadReason].filter(Boolean).join('；'));
+    else problems.push(pageReadReason ? `${pageReadReason}；原图路径读取失败（${probe.error}）` : probe.error);
 
     for (const color of ['white', 'black', 'gray', 'navy']) {
         let url = (typeof getColorImagePath === 'function') ? getColorImagePath(product.row, color) : null;
@@ -4332,20 +4419,21 @@ function suiteSend(action, payload, timeoutMs = 8000) {
 // 字段、原图与保存目录共用同一配置，任务开始时冻结。
 const SUITE_WIRED_STEP_KEY = '222';
 
-// 一键生成套图：整套一次请求，按输出顺序自动后处理和保存；继续只读取原任务。
+// 一键生成套图：整套一次请求，按输出顺序自动后处理和保存。
+// 继续 = 从当前产品整套重做（用户确认的语义）：五张全部重新生成，不复用旧图。
 async function startSuiteGeneration() {
     if(typeof targetedRegenerationRunning!=='undefined'&&targetedRegenerationRunning)return showToast("指定重生成正在执行，请先等待完成");
     const existing=readSuiteAutoState();
     if(existing&&existing.phase!=='completed'){
         if(existing.fileKey!==currentFileKey()||existing.rowNum!==currentProduct?.row){renderSuiteAutoControls();showToast('已有未完成套图任务，请点击顶部「查看任务」继续');return;}
-        // 有冻结数据就继续原任务：已生成的图片直接复用，不重复消耗生图额度。
+        // 有任务记录就进入继续分支；继续语义是整套重做（resumeSuiteAuto → restart），五张全部重来。
         if(['preparing','generating','processing','saving','error'].includes(existing.phase)){
             const five=await readSuiteFive(existing.fileKey,existing.rowNum);
             if(five&&five.main&&five.main.dataUrl){saveSuiteAutoState({...existing,paused:false});return resumeSuiteAuto();}
         }
         // 没有冻结数据（例如预检阶段就失败）：只能按新任务重新发起。
     }
-    // 只有新任务才申请原图读取权限；继续已有任务不重新读原图、不发生成请求。
+    // 重做会重新读当前产品主图，因此同样要先申请原图读取权限。
     const perm = await ensurePsDirPermission();
     if (!perm.ok && perm.reason) console.warn('产品原图目录授权未恢复：' + perm.reason);
     return runSuiteFiveJob({ keys: SUITE_STEP_KEYS });
@@ -4360,6 +4448,7 @@ async function runSuiteSingleStep(key) {
 async function runSuiteJob(keys, {automatic=false,targeted=false} = {}) {
     if(typeof targetedRegenerationRunning!=='undefined'&&targetedRegenerationRunning&&!targeted)return showToast("指定重生成正在执行");
     if (suiteTaskRunning) return null;
+    window.UnifiedTaskStarted?.();
     const product = currentProduct;
     if (!product || !product.row) { showToast('❌ 请先导入 Excel 并选择一个产品'); return null; }
     if(!Array.isArray(keys)||![1,5].includes(keys.length)||new Set(keys).size!==keys.length||keys.some(k=>!['111','444','222','333','666'].includes(k))){showToast('❌ 输出编号配置无效');return null;}
@@ -4548,6 +4637,7 @@ async function suiteSaveOne({ key, blob, fileKey, rowNum, jobId }) {
 async function waitSuiteAcquired(taskId, timeoutMs = 600000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+        if (readSuiteAutoState()?.paused) throw Error('当前套图已暂停');
         const r = await suiteSend('suiteGetTask', { taskId, summary: true });
         if (!r.ok || !r.task) throw new Error('任务记录丢失');
         if (r.task.stage === 'acquired') {
@@ -4604,17 +4694,14 @@ async function suiteBadgeReady(fileKey, rowNum) {
     } catch (_) { return false; }
 }
 
+// 角标已取消：保留空实现，避免调用方改动（完成判定请看磁盘上的五张成品）。
 async function syncSuiteBadge(fileKey, rowNum) {
-    if (await suiteBadgeReady(fileKey, rowNum)) addSuiteGeneratedBadge(rowNum);
-    else {
-        const idx = products.findIndex(p => p.row === rowNum);
-        const card = idx >= 0 ? document.querySelector(`.product-card[data-idx="${idx}"]`) : null;
-        const badge = card && card.querySelector('.suite-generated-badge');
-        if (badge) badge.remove();
-    }
+    addSuiteGeneratedBadge(rowNum);
 }
 
 function suiteSetProgress({ jobId, fileKey, rowNum, phase, done, currentKey, paused }) {
+    const previous = readSuiteAutoState();
+    if (previous?.jobId === jobId && previous.paused) throw Error('当前套图已暂停');
     // 与颜色图一致的进度条（done/5）
     try {
         const wrap = document.getElementById('suiteProgressWrap');
@@ -4634,9 +4721,10 @@ function suiteSetProgress({ jobId, fileKey, rowNum, phase, done, currentKey, pau
 
 // 五步主流程：预检 → 冻结 → 按配置顺序执行 → 逐张保存 → 角标。
 // 参数 keys 可只给一个步骤（指定重生成），顺序始终按该类目当前配置顺序。
-async function runSuiteFiveJob({ keys, resume = false, targeted = false, stepsOverride = null } = {}) {
+async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted = false, stepsOverride = null } = {}) {
     if (typeof targetedRegenerationRunning !== 'undefined' && targetedRegenerationRunning && !targeted) return showToast('指定重生成正在执行');
     if (suiteTaskRunning) return null;
+    window.UnifiedTaskStarted?.();
     const product = currentProduct;
     if (!product || !product.row) { showToast('❌ 请先导入 Excel 并选择一个产品'); return null; }
     const fileKey = currentFileKey();
@@ -4646,6 +4734,18 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false, stepsOv
     suiteTaskRunning = true;
     if (btn) { btn.disabled = true; btn.textContent = '⏳ 预检中...'; }
     try {
+        // 先显示豆包页面，再做主图解码和任务快照等准备工作。
+        const page = await suiteSend('suitePreparePage', {}, 15000);
+        if (!page.ok) throw Error(page.error || '豆包页面打开失败');
+        if (restart) {
+            const active = await suiteSend('suiteListTasks', {fileKey,rowNum,activeOnly:true});
+            if (!active.ok) throw Error(active.error || '旧套图任务读取失败');
+            for (const task of active.tasks || []) {
+                const cancelled = await suiteSend('suiteCancel', {taskId:task.taskId,reason:'从当前产品重新生成整套'});
+                if (!cancelled.ok) throw Error(cancelled.error || '旧套图任务停止失败');
+            }
+            await clearSuiteFive(fileKey,rowNum);
+        }
         // ① 恢复任务一律使用任务启动时冻结的 Excel 行、步骤配置与产品主图，不取当前界面产品替代。
         const frozen = resume ? await readSuiteFive(fileKey, rowNum) : null;
         if (resume && (!frozen || !frozen.excelRowSpec || !frozen.main || !frozen.main.dataUrl)) {
@@ -4732,7 +4832,7 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false, stepsOv
         // 进度按五张最终成品统计（跨任务补齐也计入）。
         const total = SUITE_FIVE_TOTAL;
         const indexRecs = await SuiteCore.ResultStore().list(fileKey, rowNum).catch(() => []);
-        const doneSet = new Set((indexRecs || []).map(r => String(r.key)));
+        const doneSet = new Set(restart ? [] : (indexRecs || []).map(r => String(r.key)));
         let doneCount = SUITE_STEP_KEYS.filter(k => doneSet.has(k)).length;
         suiteSetProgress({ jobId, fileKey, rowNum, phase: 'preparing', done: doneCount });
 
@@ -4758,6 +4858,16 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false, stepsOv
             if(aiSteps.length){
                 const targetKeys=aiSteps.map(s=>String(s.key));
                 suiteSetProgress({jobId,fileKey,rowNum,phase:'generating',done:doneCount});
+                // 断点续跑：旧的合并任务若已结束（generated/失败/中断）或已不存在，就不能再等它，必须重新发起；
+                // 只有仍在执行中的旧任务才复用，避免空等到 600 秒超时。
+                if(five.groupTaskId){
+                    const prior=await suiteSend('suiteGetTask',{taskId:five.groupTaskId,summary:true});
+                    // 探测失败（扩展超时/重载）不能等同于“任务已结束”，否则会重复发起同一批生图；保守按存活处理
+                    const alive = (prior&&prior.ok)
+                        ? !!(prior.task&&!['completed','failed','interrupted','generated'].includes(prior.task.stage))
+                        : true;
+                    if(!alive){five.groupTaskId=null;five.groupKeys=null;}
+                }
                 if(!five.groupTaskId){
                     const prompt='根据以下提示词生成 '+aiSteps.length+' 张图片，每个编号对应一张，严格按顺序输出，不要拼图，不要在图片上写编号。\n\n'+aiSteps.map((s,i)=>(i+1)+'、步骤 '+s.key+' '+s.name+'\n'+prompts[s.key]).join('\n\n')+'\n\n请直接生成对应的图片。';
                     const created=await suiteSend('suiteCreate',{task:{fileKey,rowNum,productId:five.productId,mode:'batch-gen',expectCount:aiSteps.length,targetKeys,prompt,assets:[{color:'main',filename:`row${rowNum}_main.png`,url:mainDataUrl,fileKey,row:rowNum}],configSnapshot:{model:aiSteps[0].model||'5.0',ratio:aiSteps[0].ratio||'1:1'}}});
@@ -4767,7 +4877,8 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false, stepsOv
                     const run=await suiteSend('suiteRun',{taskId:five.groupTaskId},600000);if(!run.ok)throw Error(run.error||'整套生成请求失败');
                 }
                 const task=await waitSuiteAcquired(five.groupTaskId);
-                const recognized=await SuiteCore.recognize(task.images||[],five.groupKeys.map(key=>({key})),{expectCount:five.groupKeys.length});
+                const recognizedKeys=five.groupKeys||targetKeys;
+                const recognized=await SuiteCore.recognize(task.images||[],recognizedKeys.map(key=>({key})),{expectCount:recognizedKeys.length});
                 if(!recognized.ok)throw Error('整套生成结果识别失败：'+recognized.error);
                 for(const result of recognized.results){const blob=await suiteBlobFromDataUrl(result.url);if(!blob.size)throw Error(result.key+'生成结果为空');five.generated[result.key]={dataUrl:result.url,bytes:blob.size,taskId:five.groupTaskId};}
                 await persistSuiteFive(five);
@@ -4849,7 +4960,7 @@ async function runSuiteFiveJob({ keys, resume = false, targeted = false, stepsOv
         if (currentProduct && currentProduct.row === rowNum && currentFileKey() === fileKey) await renderSuiteImages(currentProduct);
         return null;
     } catch (e) {
-        // 失败保留已完成结果与冻结数据；重试只补未完成步骤，不重复消耗生图额度。
+        // 保留错误信息；用户点击“继续”会从本产品整套重新生成。
         const state = readSuiteAutoState();
         if (state && state.jobId) saveSuiteAutoState({ ...state, phase: 'error', paused: true });
         updateSuiteStatus(`❌ ${e.message}`);
@@ -5143,6 +5254,103 @@ function releaseSuiteObjectUrls() {
     suiteObjectUrls = [];
 }
 
+// ============ 成品图压缩（1MB 以内 JPG，直接覆盖） ============
+const SUITE_COMPRESS_TARGET = 1024 * 1024;
+function suiteCompressNames(row) {
+    return ['111', '222', '333', '444', '666', 'row' + row + '_white', 'row' + row + '_black', 'row' + row + '_gray', 'row' + row + '_navy'];
+}
+async function suiteCompressBlob(blob, target) {
+    const bmp = await createImageBitmap(blob);
+    const canvas = document.createElement('canvas');
+    try {
+        let scale = 1;
+        for (let round = 0; round < 8; round++) {
+            canvas.width = Math.max(64, Math.round(bmp.width * scale));
+            canvas.height = Math.max(64, Math.round(bmp.height * scale));
+            const g = canvas.getContext('2d');
+            g.fillStyle = '#ffffff'; g.fillRect(0, 0, canvas.width, canvas.height);
+            g.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+            for (const q of [0.92, 0.88, 0.84, 0.8, 0.75, 0.7, 0.62, 0.55]) {
+                const out = await new Promise(r => canvas.toBlob(r, 'image/jpeg', q));
+                if (out && out.size <= target) return out;
+            }
+            scale *= 0.85;
+        }
+        return null;
+    } finally { bmp.close(); canvas.width = canvas.height = 0; }
+}
+async function compressSuiteImages() {
+    if (typeof PageDirectories === 'undefined' || !PageDirectories.handles || !PageDirectories.handles.colorImgDir) return showToast('请先在「路径配置」选择产品图片目录');
+    if (!loadedFileName) return showToast('请先导入 Excel');
+    if (!products.length) return showToast('没有产品');
+    if (typeof ensurePsDirPermission === 'function') {
+        const perm = await ensurePsDirPermission();
+        if (perm && perm.ok === false) return showToast('产品图片目录未授权，无法压缩：' + (perm.reason || '请先在路径配置确认'));
+    }
+    if (!confirm('将把「' + loadedFileName + '」下全部已生成图片压到 1MB 以内，直接覆盖原图（PNG 会改存为同名 JPG 并删除旧 PNG）。确定继续？')) return;
+    if (suiteTaskRunning || (typeof suiteBatchRunning !== 'undefined' && suiteBatchRunning)) return showToast('请先暂停正在运行的套图任务，再压缩图片');
+    const btn = document.getElementById('suiteCompressBtn');
+    const oldLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '🗜️ 压缩中…'; }
+    const fileFolder = loadedFileName;
+    let done = 0, skipped = 0, savedBytes = 0; const failed = [];
+    // 统一进度条接管：压缩期间显示 已处理/总数，可停止
+    window.UnifiedTaskStarted?.();
+    window.SuiteCompressState = { running: true, done: 0, total: products.length * 9, current: '', cancel: false };
+    try {
+        for (const p of products) {
+            if (window.SuiteCompressState && window.SuiteCompressState.cancel) break;
+            const row = p.row;
+            const names = suiteCompressNames(row);
+            let hits = [];
+            try {
+                const got = await PageDirectories.dispatch({ action: 'pageReadSuite', fileFolder, rowNum: row, keys: names });
+                hits = (got && got.files) || [];
+            } catch (e) {
+                failed.push('行' + row + ' 读取失败：' + (e && e.message));
+                if (/授权/.test(String(e && e.message))) break;
+                continue;
+            }
+            for (const hit of hits) {
+                if (window.SuiteCompressState.cancel) break;
+                if (!hit || !hit.dataUrl) { window.SuiteCompressState.done++; continue; }
+                const name = String(hit.key);
+                window.SuiteCompressState.current = '行' + row + ' · ' + name;
+                const baseName = (hit.filename || '').toLowerCase();
+                // 已经是 jpg 且不超过 1MB 才跳过；PNG/WEBP 一律转（哪怕它本来就不大）
+                if (/[.]jpg$/.test(baseName) && hit.bytes <= SUITE_COMPRESS_TARGET) { skipped++; window.SuiteCompressState.done++; continue; }
+                try {
+                    const blob = await (await fetch(hit.dataUrl)).blob();
+                    const out = await suiteCompressBlob(blob, SUITE_COMPRESS_TARGET);
+                    if (!out) { failed.push(hit.filename + '（压不到 1MB）'); window.SuiteCompressState.done++; continue; }
+                    const dataUrl = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => rej(fr.error); fr.readAsDataURL(out); });
+                    await PageDirectories.dispatch({ action: 'pageWriteImage', fileFolder, rowNum: row, filename: name + '.jpg', dataUrl });
+                    // 写完 jpg 后把同名旧格式全部清掉（删不到会返回 ok:true，不会误报）
+                    for (const ext of ['png', 'jpeg', 'webp']) {
+                        await PageDirectories.dispatch({ action: 'pageDeleteFile', fileFolder, rowNum: row, filename: name + '.' + ext }).catch(() => {});
+                    }
+                    savedBytes += Math.max(0, hit.bytes - out.size);
+                    done++;
+                    window.SuiteCompressState.done++;
+                } catch (e) {
+                    failed.push(hit.filename + '：' + (e && e.message));
+                    window.SuiteCompressState.done++;
+                    if (/授权|权限/.test(String(e && e.message))) break;
+                }
+            }
+            updateSuiteStatus('🗜️ 压缩中：已完成 ' + done + ' 张（当前行 ' + row + '）');
+        }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = oldLabel || '🗜️ 压缩图片'; }
+        if (window.SuiteCompressState) { window.SuiteCompressState.running = false; window.SuiteCompressState.cancel = false; }
+    }
+    const mb = (savedBytes / 1048576).toFixed(1);
+    try { if (typeof renderSuiteImages === 'function' && currentProduct) await renderSuiteImages(currentProduct); } catch (_) {}
+    updateSuiteStatus('🗜️ 压缩完成：' + done + ' 张压到 1MB 内，' + skipped + ' 张跳过' + (failed.length ? '，' + failed.length + ' 张失败（详见控制台）' : '') + '，共省 ' + mb + 'MB');
+    showToast('✅ 压缩完成：' + done + ' 张，省 ' + mb + 'MB');
+    if (failed.length) console.warn('[压缩] 失败明细', failed);
+}
+
 async function renderSuiteImages(product) {
     const area = document.getElementById('suiteImagesArea');
     const grid = document.getElementById('suiteImagesGrid');
@@ -5234,26 +5442,44 @@ async function renderSuiteImages(product) {
         return;
     }
 
+    // 图片以磁盘为准：先按 <文件名>/rowN/<编号>.png 现读，读不到才回退旧缓存（兼容历史数据）。
+    const diskMap = {};
+    try {
+        if (typeof PageDirectories !== 'undefined' && PageDirectories.handles && PageDirectories.handles.colorImgDir) {
+            if (PageDirectories.ready && typeof PageDirectories.ready.then === 'function') await PageDirectories.ready.catch(() => {});
+            const got = await PageDirectories.dispatch({ action: 'pageReadSuite', fileFolder: loadedFileName || '', rowNum: row, keys: SUITE_OUTPUTS.map(o => o[0]) });
+            for (const f of (got && got.files) || []) if (f && f.dataUrl) diskMap[f.key] = f.dataUrl;
+        }
+    } catch (_) {}
+    if (stale()) return;
+
+    // 一张图都没有（且任务不在进行中）→ 整区隐藏，不留空编号占位
+    const TERM_EARLY = (typeof SuiteTaskStore !== 'undefined' && Array.isArray(SuiteTaskStore.TERMINAL))
+        ? SuiteTaskStore.TERMINAL : ['completed', 'failed', 'interrupted', 'generated'];
+    const hasAnyImage = Object.keys(diskMap).length > 0 || recs.some(r => r.blob && r.blob.size);
+    if (!hasAnyImage && (!t || TERM_EARLY.includes(t.stage))) {
+        area.style.display = 'none';
+        const stHide = document.getElementById('suiteStatusText');
+        if (stHide) stHide.textContent = '';
+        return;
+    }
+
     const cells = keys.map(key => {
         const r = byKey[key];
-        let url = '';
-        if (r && r.blob && r.blob.size) {
+        let url = diskMap[key] || '';
+        let fromDisk = !!diskMap[key];
+        if (!url && r && r.blob && r.blob.size) {
             url = URL.createObjectURL(r.blob);
             suiteObjectUrls.push(url);
         }
-        const meta = (r && r.meta) || {};
         const check = health.items.find(h => h.key === key);
-        // 删除文件后立刻反映缺失：磁盘核验明确缺失/损坏/被替换/读取错误时，
-        // 不显示 IndexedDB 缓存里的图片（缓存只是历史快照，不能冒充磁盘现状）。
-        // no-permission / cache-only 属于「无法核验」，不等于缺失，仍保留显示。
+        // 缓存图不得冒充磁盘：磁盘核验明确缺失/损坏时，不显示缓存；磁盘读到的则不受影响。
         const diskBad = check && ['missing', 'corrupt', 'replaced', 'error'].includes(check.status);
-        // 没有可显示的图（未生成 / 磁盘缺失等）→ 该项不渲染，不占位置
-        if (!(url && !diskBad)) return '';
-        return `<div class="color-img-item">
-            <img src="${url}" alt="${escapeHtml(key)} 套图" style="cursor:zoom-in;" onclick="openImageModal(this.src)">
-            <span class="color-name">${key}</span>
-        </div>`;
-    }).filter(Boolean);
+        if (url && !fromDisk && diskBad) url = '';
+        // 读不到就把编号留在原位（不再整块消失）
+        const img = url ? `<img src="${url}" alt="${escapeHtml(key)} 套图" style="cursor:zoom-in;" onclick="openImageModal(this.src)">` : '';
+        return `<div class="color-img-item${url ? '' : ' missing'}">${img}<span class="color-name">${key}</span></div>`;
+    });
     grid.innerHTML = cells.join('');
 
     // 没有任何可显示的图，且任务已终态（失败/中断/完成/已生成）→ 整区隐藏，和颜色图一样不占位置
@@ -5267,12 +5493,14 @@ async function renderSuiteImages(product) {
     }
 
     const st = document.getElementById('suiteStatusText');
-    // 状态数字改用「磁盘核验通过数」，不再用缓存条数（避免显示 5 张但只有 3 格）
-    const okCount = keys.filter(k => {
-        const h = health.items.find(x => x.key === k);
-        return h && h.status === 'verified';
-    }).length;
-    if (st) st.textContent = t ? `${t.stage}${t.error ? '｜' + t.error : ''} · 已核验 ${okCount}/${SUITE_OUTPUTS.length}` : `已核验 ${okCount}/${SUITE_OUTPUTS.length}`;
+    // 状态数字 = 磁盘上实际读到的张数（图以磁盘为准）
+    const okCount = Object.keys(diskMap).length;
+    // 只给人看人话：不显示 generated/failed 这类内部阶段名；完整阶段与错误打到控制台日志。
+    const STAGE_CN = { preparing: '准备中', generating: '生成中', processing: '后处理中', saving: '保存中', acquired: '已取回', generated: '', completed: '', failed: '未完成', interrupted: '已中断' };
+    const stageCn = (t && STAGE_CN[t.stage] !== undefined) ? STAGE_CN[t.stage] : '';
+    const errCn = t && t.error ? String(t.error).replace(/^(执行阶段|后处理|保存)[:：]\s*/, '') : '';
+    if (t && (t.stage || t.error)) console.warn(`[套图] row${row} stage=${t.stage || '-'} 磁盘=${okCount}/${SUITE_OUTPUTS.length}${t.error ? ' 错误=' + t.error : ''}`);
+    if (st) st.textContent = [stageCn, errCn, `磁盘已有 ${okCount}/${SUITE_OUTPUTS.length}`].filter(Boolean).join(' · ');
     // 「恢复已有结果」按钮已按用户要求移除：结果缺失时直接重新生成即可
 }
 
@@ -5335,388 +5563,12 @@ function escapeHtml(s) {
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-
-const AUDIT_DATA = {
-    blacklist: [],
-    materialList: [],
-    loaded: false
-};
-
-function loadAuditData() {
-    const baseDir = getBaseDir();
-    if (!baseDir) return;
-    
-    const promises = [
-        fetch(baseDir + '/品牌商标黑名单.txt').then(r => r.text()).catch(() => ''),
-        fetch(baseDir + '/材质大全.txt').then(r => r.text()).catch(() => '')
-    ];
-    
-    Promise.all(promises).then(([blacklistText, materialText]) => {
-        parseBlacklist(blacklistText);
-        parseMaterialList(materialText);
-        AUDIT_DATA.loaded = true;
-        console.log('✅ 审核数据加载完成:', AUDIT_DATA.blacklist.length, '条品牌词,', AUDIT_DATA.materialList.length, '条材质词');
-    }).catch(e => {
-        console.warn('⚠️ 审核数据加载失败:', e);
-    });
-}
-
-// 解析品牌商标黑名单文本为分级词条（🔴必换 / 🟡需确认）
-function parseBlacklist(text) {
-    AUDIT_DATA.blacklist = [];
-    if (!text) return;
-    
-    const lines = text.split('\n');
-    let currentSection = null;
-    
-    for (let line of lines) {
-        line = line.trim();
-        if (!line || line.startsWith('#') || line.startsWith('>') || line.startsWith('---')) continue;
-        
-        if (line.includes('第一级：注册商标材质词')) { currentSection = 'level1'; continue; }
-        if (line.includes('第二级：知名服装品牌名')) { currentSection = 'level2'; continue; }
-        if (line.includes('第三级：品牌暗示')) { currentSection = 'level3'; continue; }
-        if (line.includes('第五级：灰色地带')) { currentSection = 'level5'; continue; }
-        
-        if (currentSection === 'level1') {
-            const match = line.match(/^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|$/);
-            if (match) {
-                const raw = match[1].trim();
-                const company = match[2].trim();
-                const replacement = match[3].trim();
-                const note = match[4].trim();
-                const names = raw.split('/').map(n => n.trim()).filter(n => n);
-                names.forEach(name => {
-                    AUDIT_DATA.blacklist.push({
-                        word: name.replace(/[®™]/g, ''),
-                        original: name,
-                        level: 'high',
-                        type: 'material_brand',
-                        replacement: replacement,
-                        company: company,
-                        note: note
-                    });
-                });
-            }
-        } else if (currentSection === 'level2') {
-            const match = line.match(/^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|/);
-            if (match) {
-                const name = match[1].trim();
-                const chinese = match[2].trim();
-                const names = name.split('/').map(n => n.trim()).filter(n => n);
-                names.forEach(n => {
-                    AUDIT_DATA.blacklist.push({
-                        word: n.replace(/[®™]/g, ''),
-                        original: name,
-                        level: 'high',
-                        type: 'brand',
-                        chinese: chinese,
-                        replacement: ''
-                    });
-                });
-            }
-        } else if (currentSection === 'level3') {
-            const match = line.match(/- "([^"]+)"\s*→\s*(\S+)/);
-            if (match) {
-                AUDIT_DATA.blacklist.push({
-                    word: match[1].trim(),
-                    level: 'high',
-                    type: 'implication',
-                    replacement: match[2].trim()
-                });
-            }
-        } else if (currentSection === 'level5') {
-            const match = line.match(/^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|$/);
-            if (match) {
-                const word = match[1].trim();
-                const level = match[2].trim();
-                const names = word.split('/').map(n => n.trim()).filter(n => n);
-                names.forEach(n => {
-                    AUDIT_DATA.blacklist.push({
-                        word: n,
-                        level: level.includes('🔴') ? 'high' : 'medium',
-                        type: 'gray',
-                        replacement: match[3].trim(),
-                        note: match[4].trim()
-                    });
-                });
-            }
-        }
-    }
-}
-
-function parseMaterialList(text) {
-    AUDIT_DATA.materialList = new Set();
-    if (!text) return;
-    
-    const lines = text.split('\n');
-    for (let line of lines) {
-        line = line.trim();
-        if (!line || line.startsWith('#') || line.startsWith('>') || line.startsWith('---')) continue;
-        
-        const bulletMatch = line.match(/^[-*•]\s+(.+)$/);
-        if (bulletMatch) {
-            const content = bulletMatch[1].trim();
-            const parenMatch = content.match(/^(.+?)(?:\s*\(.+\))?$/);
-            const mainWord = parenMatch ? parenMatch[1].trim() : content;
-            AUDIT_DATA.materialList.add(mainWord.toLowerCase());
-            AUDIT_DATA.materialList.add(content.toLowerCase());
-        }
-        
-        const tableMatch = line.match(/^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|$/);
-        if (tableMatch) {
-            AUDIT_DATA.materialList.add(tableMatch[1].trim().toLowerCase());
-        }
-    }
-}
-
-function findBrandWords(text) {
-    if (!text || !AUDIT_DATA.loaded) return [];
-    const results = [];
-    const lowerText = text.toLowerCase();
-    
-    for (const item of AUDIT_DATA.blacklist) {
-        const lowerWord = item.word.toLowerCase();
-        if (lowerWord.length < 2) continue;
-        
-        const regex = new RegExp('\\b' + lowerWord.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&') + '\\b', 'gi');
-        let match;
-        while ((match = regex.exec(text)) !== null) {
-            results.push({
-                ...item,
-                found: match[0],
-                position: match.index,
-                context: text.substring(Math.max(0, match.index - 20), match.index + match[0].length + 20)
-            });
-        }
-    }
-    return results;
-}
-
-function checkMaterialWords(text) {
-    if (!text || !AUDIT_DATA.loaded) return [];
-    const results = [];
-    const tokens = text.split(/[，。、；：！？,.!?:;()\s]+/).filter(t => t.length >= 2);
-    
-    for (const token of tokens) {
-        const lowerToken = token.toLowerCase();
-        if (!AUDIT_DATA.materialList.has(lowerToken)) {
-            if (!containsAnySafeMaterial(lowerToken)) {
-                results.push({
-                    word: token,
-                    level: 'medium',
-                    type: 'unknown_material',
-                    reason: '不在材质大全列表中'
-                });
-            }
-        }
-    }
-    return results;
-}
-
-function containsAnySafeMaterial(text) {
-    for (const material of AUDIT_DATA.materialList) {
-        if (text.includes(material)) return true;
-    }
-    return false;
-}
-
-// 品牌词审核：扫描文案中的黑名单词并分级标记风险
-function auditProduct(product) {
-    const issues = [];
-    
-    const fieldsToCheck = [
-        { key: 'title', label: '标题', content: product.title },
-        { key: 'highlights', label: '卖点', content: product.highlights },
-        { key: 'faq', label: 'FAQ', content: product.faq },
-        { key: 'material', label: '材质', content: product.material },
-        { key: 'fabric_type', label: '面料类型', content: product.fabric_type },
-        { key: 'features', label: '产品特性', content: product.features },
-        { key: 'technics', label: '工艺', content: product.technics },
-        { key: 'design', label: '设计', content: product.design },
-    ];
-    
-    for (const field of fieldsToCheck) {
-        if (!field.content) continue;
-        
-        const brandIssues = findBrandWords(field.content);
-        for (const issue of brandIssues) {
-            issues.push({
-                row: product.row,
-                field: field.label,
-                type: 'brand',
-                level: issue.level,
-                word: issue.found,
-                original: issue.original,
-                replacement: issue.replacement,
-                note: issue.note || '',
-                context: issue.context
-            });
-        }
-        
-        if (['材质', '面料类型', '产品特性'].includes(field.label)) {
-            const materialIssues = checkMaterialWords(field.content);
-            for (const issue of materialIssues) {
-                issues.push({
-                    row: product.row,
-                    field: field.label,
-                    type: 'material',
-                    level: issue.level,
-                    word: issue.word,
-                    reason: issue.reason
-                });
-            }
-        }
-    }
-    
-    return issues;
-}
-
-function runAudit() {
-    if (!AUDIT_DATA.loaded) {
-        showToast('⚠️ 审核数据加载中，请稍候');
-        return;
-    }
-    
-    const startTime = Date.now();
-    const allIssues = [];
-    
-    for (const product of products) {
-        const issues = auditProduct(product);
-        if (issues.length > 0) {
-            allIssues.push(...issues);
-        }
-    }
-    
-    const duration = Date.now() - startTime;
-    console.log(`📊 审核完成，耗时 ${duration}ms，发现 ${allIssues.length} 个问题`);
-    
-    renderAuditReport(allIssues);
-}
-
-function renderAuditReport(issues) {
-    const container = document.getElementById('auditContent');
-    if (!container) return;
-    
-    const highIssues = issues.filter(i => i.level === 'high');
-    const mediumIssues = issues.filter(i => i.level === 'medium');
-    
-    let html = `
-        <div style="padding: 20px;">
-            <div style="display: flex; gap: 16px; margin-bottom: 24px;">
-                <div style="flex: 1; background: rgba(239,68,68,0.15); border-radius: 12px; padding: 16px; border: 1px solid rgba(239,68,68,0.3);">
-                    <div style="font-size: 28px; font-weight: bold; color: #ef4444;">${highIssues.length}</div>
-                    <div style="font-size: 13px; color: rgba(255,255,255,0.6);">🔴 一级风险</div>
-                </div>
-                <div style="flex: 1; background: rgba(234,179,8,0.15); border-radius: 12px; padding: 16px; border: 1px solid rgba(234,179,8,0.3);">
-                    <div style="font-size: 28px; font-weight: bold; color: #eab308;">${mediumIssues.length}</div>
-                    <div style="font-size: 13px; color: rgba(255,255,255,0.6);">🟡 二级风险</div>
-                </div>
-                <div style="flex: 1; background: rgba(34,197,94,0.15); border-radius: 12px; padding: 16px; border: 1px solid rgba(34,197,94,0.3);">
-                    <div style="font-size: 28px; font-weight: bold; color: #22c55e;">${products.length - new Set(issues.map(i => i.row)).size}</div>
-                    <div style="font-size: 13px; color: rgba(255,255,255,0.6);">🟢 安全通过</div>
-                </div>
-            </div>
-    `;
-    
-    if (highIssues.length > 0) {
-        html += `
-            <div style="margin-bottom: 24px;">
-                <h3 style="font-size: 16px; font-weight: bold; color: #ef4444; margin-bottom: 12px; display: flex; align-items: center;">
-                    <span style="margin-right: 8px;">🔴</span>一级风险（必须替换）
-                </h3>
-        `;
-        
-        const grouped = groupByRow(highIssues);
-        for (const [row, rowIssues] of Object.entries(grouped)) {
-            const product = products.find(p => p.row == row);
-            html += `
-                <div style="background: rgba(239,68,68,0.08); border-radius: 10px; padding: 14px; margin-bottom: 12px; border-left: 3px solid #ef4444;">
-                    <div style="font-size: 14px; font-weight: 600; margin-bottom: 10px; cursor: pointer;" onclick="selectProduct(${row})">
-                        行${row}：${product ? (product.title || '无标题') : '未知产品'}
-                    </div>
-            `;
-            
-            for (const issue of rowIssues) {
-                html += `
-                    <div style="font-size: 13px; margin-bottom: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                        <div style="color: #ef4444; font-weight: 500;">位置：${issue.field}</div>
-                        <div style="color: #fca5a5;">原词：${issue.word}</div>
-                        ${issue.replacement ? `<div style="color: #22c55e;">建议替换：${issue.replacement}</div>` : ''}
-                        ${issue.note ? `<div style="color: rgba(255,255,255,0.5); font-size: 12px;">${issue.note}</div>` : ''}
-                        <div style="color: rgba(255,255,255,0.4); font-size: 12px; margin-top: 4px;">...${issue.context || ''}...</div>
-                    </div>
-                `;
-            }
-            
-            html += '</div>';
-        }
-        html += '</div>';
-    }
-    
-    if (mediumIssues.length > 0) {
-        html += `
-            <div>
-                <h3 style="font-size: 16px; font-weight: bold; color: #eab308; margin-bottom: 12px; display: flex; align-items: center;">
-                    <span style="margin-right: 8px;">🟡</span>二级风险（需确认）
-                </h3>
-        `;
-        
-        const grouped = groupByRow(mediumIssues);
-        for (const [row, rowIssues] of Object.entries(grouped)) {
-            const product = products.find(p => p.row == row);
-            html += `
-                <div style="background: rgba(234,179,8,0.08); border-radius: 10px; padding: 14px; margin-bottom: 12px; border-left: 3px solid #eab308;">
-                    <div style="font-size: 14px; font-weight: 600; margin-bottom: 10px; cursor: pointer;" onclick="selectProduct(${row})">
-                        行${row}：${product ? (product.title || '无标题') : '未知产品'}
-                    </div>
-            `;
-            
-            for (const issue of rowIssues) {
-                html += `
-                    <div style="font-size: 13px; margin-bottom: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 6px;">
-                        <div style="color: #eab308; font-weight: 500;">位置：${issue.field}</div>
-                        <div style="color: #fde047;">${issue.type === 'material' ? '未知材质：' : '疑似品牌：'}${issue.word}</div>
-                        ${issue.reason ? `<div style="color: rgba(255,255,255,0.5); font-size: 12px;">${issue.reason}</div>` : ''}
-                        ${issue.note ? `<div style="color: rgba(255,255,255,0.5); font-size: 12px;">${issue.note}</div>` : ''}
-                    </div>
-                `;
-            }
-            
-            html += '</div>';
-        }
-        html += '</div>';
-    }
-    
-    if (issues.length === 0) {
-        html += `
-            <div style="text-align: center; padding: 60px 20px;">
-                <div style="font-size: 64px; margin-bottom: 16px;">🎉</div>
-                <div style="font-size: 18px; font-weight: bold; color: #22c55e;">所有产品审核通过！</div>
-                <div style="font-size: 14px; color: rgba(255,255,255,0.5); margin-top: 8px;">未发现品牌词风险和未知材质</div>
-            </div>
-        `;
-    }
-    
-    html += '</div>';
-    container.innerHTML = html;
-}
-
-function groupByRow(issues) {
-    return issues.reduce((acc, issue) => {
-        if (!acc[issue.row]) acc[issue.row] = [];
-        acc[issue.row].push(issue);
-        return acc;
-    }, {});
-}
-
 window.addEventListener('load', () => {
     initPsDirHandle();
     setupPsEditMessageListener();
     
     checkExtension();
     setupExtensionReconnect();
-    loadAuditData();
 });
 
 function buildFilteredHighlightsText() {
@@ -5840,7 +5692,15 @@ function startBatchColorChange() {
 }
 
 // 批量换色统一启动入口：一键换色与「指定重生成」共用
-function beginColorBatch(queueList, label, targeted=false) {
+function beginColorBatch(queueList, label, targeted=false, directoryReady=false) {
+    if(typeof PageDirectories!=='undefined'&&!directoryReady){
+        if(!PageDirectories.handles.colorImgDir)return showToast('请先在页面路径配置选择产品套图目录');
+        PageDirectories.permissions().then(p=>{
+            if(p.some(x=>x!=='granted'))return showToast('请在页面路径配置确认目录授权');
+            beginColorBatch(queueList,label,targeted,true);
+        }).catch(e=>showToast(e.message));return;
+    }
+    window.UnifiedTaskStarted?.();
     if(typeof targetedRegenerationRunning!=='undefined'&&targetedRegenerationRunning&&!targeted)return showToast("指定重生成正在执行");
     if (batchColorState && (batchColorState.inFlightRow || batchColorState.pendingAckRow)) {
         showToast('当前款尚未结束，未覆盖原换色任务'); return;
@@ -6000,7 +5860,13 @@ function toggleBatchColorRun() {
 }
 
 // 从上次停止 / 失败处继续
-function resumeColorBatch() {
+function resumeColorBatch(directoryReady=false) {
+    if(typeof PageDirectories!=='undefined'&&!directoryReady){
+        PageDirectories.permissions().then(p=>{
+            if(p.some(x=>x!=='granted'))return showToast('请在页面路径配置确认目录授权');
+            resumeColorBatch(true);
+        }).catch(e=>showToast(e.message));return;
+    }
     if (batchColorState && colorBatchFileKey() !== currentFileKey()) {
         showToast('请先切回任务所属 Excel，再继续换色'); return;
     }
@@ -6143,7 +6009,7 @@ async function startColorChangeForRows() {
     if (!products?.length) return showToast('⚠️ 请先上传 Excel');
     if (targetedRegenerationRunning || suiteTaskRunning || batchColorState?.running || batchColorState?.inFlightRow || batchColorState?.pendingAckRow) return showToast('⚠️ 请先完成或暂停当前任务');
     const previous=readSuiteAutoState();
-    if(previous&&previous.phase!=='completed'){renderSuiteAutoControls();return showToast('已有未完成套图任务，请点击顶部「查看任务」继续');}
+    if(previous&&previous.phase!=='completed'&&(suiteTaskRunning||(['preparing','generating','processing','saving'].includes(previous.phase)&&!previous.paused))){renderSuiteAutoControls();return showToast('已有未完成套图任务，请点击顶部「查看任务」继续');}
     if (!extensionInstalled) return showToast('⚠️ 请确认扩展已安装');
     const selection=await openTargetedRegenerationPanel();
     if(!selection)return;
@@ -6748,10 +6614,16 @@ function loadColorImagesFromExtension(rowNum) {
     const hasPC = (typeof window !== 'undefined') && !!window.PathConfig;
     const cfg = hasPC ? window.PathConfig.read() : {};
     const folder = (typeof loadedFileName === 'string' ? loadedFileName : '');
-    const hasPathMode = !!(cfg.colorImgDir && folder);
+    const hasPathMode = false; // 统一走页面授权目录，不再按另一份字符串地址读取。
 
 
     ['white', 'black', 'gray', 'navy'].forEach(color => {
+        if(typeof PageDirectories!=='undefined'){
+            PageDirectories.dispatch({action:'pageReadColor',fileFolder:folder,rowNum,color})
+                .then(r=>{if(stillCurrent())setColorImage(rowNum,color,r.dataUrl);})
+                .catch(()=>{if(stillCurrent())clearColorImage(rowNum,color);});
+            return;
+        }
         if (hasPathMode) {
             const abs = window.PathConfig.colorImagePath(rowNum, color, folder);
             if (!abs) { clearColorImage(rowNum, color); return; }
