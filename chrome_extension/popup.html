@@ -294,7 +294,7 @@ h3 {
             <option value="">曾经用过...</option>
         </select>
     </div>
-    <div class="hint" style="margin-top:4px;">选择「Polo发品_颜色图」文件夹后保存（句柄模式，浏览器重启后需再授权一次）；<br>也可直接把该文件夹的绝对路径粘贴到上面的输入框再保存（路径模式，<b>无需授权、不失效</b>）。</div>
+    <div class="hint" style="margin-top:4px;">推荐点击文件夹按钮选择「Polo发品_颜色图」后保存，扩展会直接读取该目录。绝对路径输入保留为本地服务兼容方式。</div>
     </div>
 </details>
 
@@ -340,6 +340,7 @@ h3 {
 <input type="file" id="import-config-input" accept=".json" style="display:none;">
 
 <button class="btn btn-primary" id="open-helper">📊 打开发品助手</button>
+<button class="btn btn-secondary" id="connect-helper">🔗 连接当前看板（首次使用／移动项目后）</button>
 <button class="btn btn-secondary" id="open-publish">🚀 打开发品页面</button>
 <button class="btn btn-secondary" id="paste-data">📋 从剪贴板粘贴数据</button>
 <div class="hint">
@@ -347,13 +348,14 @@ h3 {
     1. 打开发品助手.html选择产品<br>
     2. 点击"一键发品"自动跳转并填充<br>
     3. 或手动复制数据后点"粘贴数据"<br><br>
-    💡 换电脑迁移：在新机打开此弹窗 → 点"导入配置"上传旧机导出的 JSON
+    📁 目录统一在看板的「路径配置」中选择。
 </div>
+<style>
+/* 目录设置迁移至页面；旧控件留作历史配置兼容，不再提供第二套入口。 */
+.path-setting,#wizard-box,#export-config,#import-config{display:none!important;}
+</style>
+<div id="page-path-notice" class="hint">📁 所有目录统一在看板的「路径配置」中选择。本弹窗不再单独配置目录。</div>
 <script src="directory-store.js"></script>
-<script src="popup-directories.js"></script>
 <script src="popup.js"></script>
-<script src="popup-path-pickers.js"></script>
-<script src="popup-path-sections.js"></script>
-<script src="popup-script-directory.js"></script>
 </body>
 </html>

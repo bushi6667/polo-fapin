@@ -213,22 +213,13 @@ async function saveExtensionColorDirectory(dir) {
 document.getElementById('save-color-dir').addEventListener('click', async () => {
     if (window.PoloPathPickers?.['color-img-dir']?.validate() === false) return;
     try {
-    // 输入框里直接是绝对路径时，以输入为准（避免选择器 pending 状态把路径顶成句柄令牌）
+    // 通过文件夹按钮选择时保存真实目录句柄；手工输入绝对路径时保留兼容模式。
     const __input = document.getElementById('color-img-dir');
     const __typed = (__input && __input.value || '').trim();
     const __looksPath = /^[A-Za-z]:[\/]|^\\/.test(__typed);
-    const dir = __looksPath
-        ? __typed
-        : (window.PoloPathPickers?.['color-img-dir']
-            ? await window.PoloPathPickers['color-img-dir'].configurationValue()
-            : __typed);
-    // 统一路径模式：颜色图目录只接受绝对路径（纯字符串，永不失效、无需授权）。
-    // 句柄令牌（polo-dir:）每次重载/重启都会退回 prompt，已废弃。
-    if (typeof dir === 'string' && dir.startsWith('polo-dir:')) {
-        alert('请改为填写文件夹绝对路径，例如 C:\\Users\\你\\Downloads\\Polo发品_颜色图。路径模式无需授权、不会失效，套图也写入同一目录。');
-        return;
-    }
-    // 路径模式不需要任何权限：不再对历史句柄申请 readwrite（会把纯路径保存卡在授权弹窗）
+    const dir = window.PoloPathPickers?.['color-img-dir']
+        ? await window.PoloPathPickers['color-img-dir'].configurationValue()
+        : __typed;
     await saveExtensionColorDirectory(dir);await window.PoloPathPickers?.['color-img-dir']?.committed();alert(dir?'✅ 颜色图目录已保存':'目录已清空');}
     catch(e){alert('保存失败：'+e.message);}
 });
@@ -236,25 +227,47 @@ document.getElementById('color-img-dir-history').addEventListener('change',async
     if(!e.target.value)return;
     const labels = await chrome.storage.local.get('polo_directory_labels');
     window.PoloSavedColorDir = e.target.value;
-    document.getElementById('color-img-dir').value=labels.polo_directory_labels?.[e.target.value] || e.target.value.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+    document.getElementById('color-img-dir').value=PoloDirectories.isColorSelection(e.target.value)
+        ? (labels.polo_directory_labels?.[e.target.value] || '已授权目录')
+        : e.target.value;
     await window.PoloPathPickers?.['color-img-dir']?.useSaved(e.target.value);
     try{await saveExtensionColorDirectory(e.target.value);}catch(error){alert('保存失败：'+error.message);}
 });
 
 function loadColorImgDir() {
+    const input = document.getElementById('color-img-dir');
+    const initialValue = input.value;
     chrome.storage.local.get([COLOR_IMG_DIR_KEY, 'polo_directory_labels'], (result) => {
         if (result[COLOR_IMG_DIR_KEY]) {
             window.PoloSavedColorDir = result[COLOR_IMG_DIR_KEY];
-            document.getElementById('color-img-dir').value = result.polo_directory_labels?.[result[COLOR_IMG_DIR_KEY]] || result[COLOR_IMG_DIR_KEY].replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+            // 句柄配置显示目录名；手填路径显示完整路径。两者都不覆盖用户刚输入的内容。
+            if (input.value === initialValue) input.value = PoloDirectories.isColorSelection(result[COLOR_IMG_DIR_KEY])
+                ? (result.polo_directory_labels?.[result[COLOR_IMG_DIR_KEY]] || '已授权目录')
+                : result[COLOR_IMG_DIR_KEY];
         }
     });
 }
 
 loadColorImgDir();
 
+async function connectCurrentHelper() {
+    try {
+        const tabs=await chrome.tabs.query({});
+        const candidates=tabs.filter(tab=>{try{const u=new URL(tab.url);return u.protocol==='file:'&&decodeURIComponent(u.pathname).split('/').pop()==='发品助手.html';}catch(_){return false;}});
+        const active=candidates.find(tab=>tab.active);
+        const target=active||(candidates.length===1?candidates[0]:null);
+        if(!target){alert(candidates.length?'请先切换到要连接的看板，再点击连接':'请先在 Chrome 打开发品助手.html，再点击“连接当前看板”');return;}
+        const url=new URL(target.url);url.searchParams.delete('poloExtension');
+        await chrome.storage.local.set({[HELPER_PATH_KEY]:url.href.split('?')[0].split('#')[0]});
+        helperPath=url.href;
+        url.searchParams.set('poloExtension',chrome.runtime.id);
+        await chrome.tabs.update(target.id,{url:url.href,active:true});
+    } catch(e){alert('连接看板失败：'+e.message);}
+}
+document.getElementById('connect-helper')?.addEventListener('click',connectCurrentHelper);
 document.getElementById('open-helper').addEventListener('click', () => {
     if (!helperPath) {
-        alert('请先设置发品助手.html的本地路径');
+        connectCurrentHelper();
         return;
     }
     // 启动时传递当前扩展ID，助手记住后不再需要页面里的单独设置入口。

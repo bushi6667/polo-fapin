@@ -1,0 +1,20 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const tick=()=>new Promise(r=>setImmediate(r));
+(async()=>{
+ const els=new Map(),records={};let options;
+ const first={name:'Polo发品_颜色图',isSameEntry:async other=>other===first};
+ const second={name:'Polo发品_颜色图',isSameEntry:async other=>other===second};
+ for(const id of ['helper-path','color-img-dir'])for(const key of [id,'choose-'+id,id+'-selection'])els.set(key,{value:'',placeholder:'',textContent:'',addEventListener(event,fn){this[event]=fn;}});
+ let n=0;
+ let filePickerCalls=0,filePickerOptions;
+ const helperHandle={name:'发品助手.html',isSameEntry:async other=>other===helperHandle};
+ const window={showDirectoryPicker:async o=>{options=o;return first;},showOpenFilePicker:async o=>{filePickerCalls++;filePickerOptions=o;return [helperHandle];}};
+ const ctx={URL,window,chrome:{tabs:{query:async()=>[{url:'file:///C:/project/发品助手.html'}]},storage:{local:{get:async()=>({})}}},document:{getElementById:id=>els.get(id)},PoloDirectories:{pickerRecord:async(k,v)=>{if(v)records[k]=v;return records[k];},saveColorSelection:async handle=>{const r={handle,name:handle.name,path:'polo-dir:'+(++n)};records['color-img-dir']=r;return r;}}};
+ vm.runInNewContext(fs.readFileSync('chrome_extension/popup-path-pickers.js','utf8'),ctx);await tick();
+ const color=window.PoloPathPickers['color-img-dir'];await els.get('choose-color-img-dir').click();assert.equal(options.mode,'read');assert.equal(els.get('color-img-dir').value,first.name);assert.equal(color.validate(),true);
+ assert.equal(await color.configurationValue(),'polo-dir:1');await color.committed();
+ await els.get('choose-color-img-dir').click();assert.equal(options.startIn,first);assert.equal(els.get('color-img-dir').value,first.name);
+ window.showDirectoryPicker=async()=>second;await els.get('choose-color-img-dir').click();assert.equal(await color.configurationValue(),'polo-dir:2');assert.equal(records['color-img-dir'].handle,second);
+ const helper=window.PoloPathPickers['helper-path'];await els.get('choose-helper-path').click();assert.equal(helper.validate(),true);assert.equal(els.get('helper-path').value,'发品助手.html');assert.equal(filePickerCalls,1);assert.equal(await helper.configurationValue(),'C:\\project\\发品助手.html');await helper.committed();await els.get('choose-helper-path').click();assert.equal(filePickerCalls,2);assert.equal(filePickerOptions.startIn,helperHandle);
+ console.log('PASS 颜色目录：只显示名称、无需完整路径、只读授权、默认定位、同名目录以独立句柄绑定；助手路径原逻辑保留');
+})().catch(e=>{console.error(e);process.exitCode=1;});

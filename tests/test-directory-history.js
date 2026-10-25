@@ -1,0 +1,6 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const data=new Map();
+const indexedDB={open(){const r={};queueMicrotask(()=>{r.result={close(){},transaction(){let pending=[];const tx={objectStore(){return {get(key){const q={};queueMicrotask(()=>{q.result=data.get(key);q.onsuccess();});return q;},put(value,key){pending.push([key,value]);queueMicrotask(()=>{if(!pending)return;for(const [k,v]of pending)data.set(k,v);pending=null;tx.oncomplete();});}};}};return tx;}};r.onsuccess();});return r;}};
+const ctx={indexedDB};vm.createContext(ctx);vm.runInContext(fs.readFileSync('chrome_extension/directory-store.js','utf8'),ctx);
+function handle(identity){return {name:'extracted_images',identity,isSameEntry:async other=>identity===other.identity};}
+(async()=>{const a=handle('A'),b=handle('B'),a2=handle('A');await ctx.PoloDirectories.saveSelection(a);await ctx.PoloDirectories.saveSelection(b);assert.equal((await ctx.PoloDirectories.history()).length,2);await ctx.PoloDirectories.saveSelection(a2);assert.equal((await ctx.PoloDirectories.history()).length,2);assert.equal((await ctx.PoloDirectories.get()).identity,'A');assert.equal((await ctx.PoloDirectories.history())[1].handle.identity,'B');console.log('PASS 目录历史：同名不同目录保留、同目录去重、保存同步切换活动句柄');})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -1,45 +1,50 @@
-/* 路径配置 —— 网页是路径配置的唯一来源。
+/* 路径配置 —— 页面自己保存完整绝对路径，读取本地图片用 file:// 直读。
  *
- * 设计约束（对应验收要求）：
- *   1. 配置存在 localStorage（页面侧真源），同时同步给本地服务做读取白名单；
- *   2. 显示与保存一律使用完整绝对路径，绝不显示文件夹短名；
- *   3. `polo-dir:*` 句柄令牌不是路径，保存时判为不可用，要求填写完整路径；
- *   4. 所有本地文件读写经 http://127.0.0.1:8765，不用 fetch('file://…')；
- *   5. 服务未启动时明确提示，不回退 file://、不显示旧缓存。
+ * 关键点（不需要任何本地服务、不需要目录授权）：
+ *   1. 配置存 localStorage：切产品 / 重导 Excel / 刷新 / 重启浏览器都不丢；
+ *   2. 全流程只用完整绝对路径，绝不显示文件夹短名；
+ *   3. `polo-dir:*` 是旧句柄令牌，不是路径，保存时判为不可用；
+ *   4. 图片由浏览器按 file:// 直读（页面本身是 file:// 时可用），删文件即消失。
  *
- * 暴露：window.PathConfig { open, close, read, save, status, imageUrl, colorImagePath, serverUp, FIELDS }
+ * 暴露：window.PathConfig { open, close, read, saveAll, colorImagePath, toFileUrl, FIELDS }
  */
 (() => {
     'use strict';
 
     const STORAGE_KEY = 'polo_path_config_v1';
-    const SERVER = 'http://127.0.0.1:8765';
 
     const FIELDS = [
-        { key: 'colorImgDir', label: '产品套图目录', hint: '颜色图与套图成品（<文件名>/rowN/row1_white.png 等）' },
+        { key: 'colorImgDir', label: '产品图片目录', hint: '统一保存颜色图与套图成品（<Excel文件名>/rowN/）' },
         { key: 'imageDir', label: '产品原图目录', hint: '产品主图来源目录' },
-        { key: 'scriptDir', label: 'JS 脚本目录', hint: '后处理脚本所在目录' },
-        { key: 'suiteDir', label: '套图输出目录', hint: '留空则与产品套图目录一致' }
+        { key: 'scriptDir', label: 'JS 脚本目录', hint: '后处理脚本所在目录' }
     ];
 
     const KEY_BY_FIELD = FIELDS.reduce((m, f) => { m[f.key] = f.label; return m; }, {});
     const STATUS_TEXT = {
         unset: '未配置',
-        ok: '可用',
-        missing: '目录不存在',
-        'not-absolute': '不是绝对路径',
-        invalid: '需要填写完整路径',
-        'server-down': '本地服务未启动'
+        ok: '已配置（完整路径）',
+        'not-absolute': '需要完整绝对路径',
+        invalid: '这是旧句柄记录，请填完整路径'
     };
 
-    let state = null;          // { panel, original, view, scroll }
-    let serverState = 'unknown'; // 'up' | 'down' | 'unknown'
+    let state = null;
 
     function normalizePath(v) {
         const s = String(v === undefined || v === null ? '' : v).trim();
         if (!s) return '';
-        // 只去掉末尾多余分隔符，不改盘符、中文、空格、连字符
-        return s.replace(/[\\/]+$/, '');
+        return s.replace(/[\\/]+$/, '');   // 只去掉末尾分隔符，不改盘符/中文/空格/连字符
+    }
+
+    function isAbsolutePath(v) {
+        return /^[A-Za-z]:[\\/]/.test(v) || /^\\\\/.test(v);
+    }
+
+    function statusOf(v) {
+        const p = normalizePath(v);
+        if (!p) return 'unset';
+        if (/^polo-dir:/.test(p)) return 'invalid';
+        if (!isAbsolutePath(p)) return 'not-absolute';
+        return 'ok';
     }
 
     function read() {
@@ -57,31 +62,19 @@
         return out;
     }
 
-    function serverUp() { return serverState === 'up'; }
-
-    async function pingServer() {
-        try {
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 1500);
-            const r = await fetch(SERVER + '/path-config', { signal: ctrl.signal, cache: 'no-store' });
-            clearTimeout(timer);
-            serverState = r.ok ? 'up' : 'down';
-        } catch (_) { serverState = 'down'; }
-        return serverState;
-    }
-
-    // 本地服务读取本地图片的唯一入口：绝对路径 → 服务端校验白名单后返回二进制
-    function imageUrl(absPath, bust) {
-        const q = SERVER + '/local-image?path=' + encodeURIComponent(normalizePath(absPath));
-        return bust ? q + '&v=' + Date.now() : q;
-    }
-
     // 颜色图绝对路径：<产品套图目录>/<当前Excel对应目录>/rowN/rowN_<color>.png
     function colorImagePath(rowNum, color, fileFolder) {
         const base = read().colorImgDir;
         if (!base || !fileFolder) return '';
-        const sep = /\\/.test(base) && !/\//.test(base) ? '\\' : '/';
+        const sep = /^[A-Za-z]:\\/.test(base) ? '\\' : '/';
         return normalizePath(base) + sep + fileFolder + sep + 'row' + rowNum + sep + 'row' + rowNum + '_' + color + '.png';
+    }
+
+    // 绝对路径 → file:// URL，带时间戳强制回源（删文件立刻反映）
+    function toFileUrl(absPath) {
+        const p = String(absPath || '').split(String.fromCharCode(92)).join('/');
+        const url = p.startsWith('/') ? 'file://' + p : 'file:///' + p;
+        return url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
     }
 
     function chip(text, kind) {
@@ -97,92 +90,53 @@
         return 'bad';
     }
 
-    // file:// 页面保存配置：由扩展代发（扩展 Origin 为 chrome-extension://自身ID，服务端放行）
-    function saveViaExtension(cfg) {
-        return new Promise(resolve => {
-            try {
-                if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) { resolve(null); return; }
-                const extId = (typeof EXTENSION_ID === 'string' && EXTENSION_ID) || localStorage.getItem('polo_extension_id') || '';
-                if (!extId) { resolve({ ok: false, error: '未配置扩展 ID，无法通过扩展保存' }); return; }
-                chrome.runtime.sendMessage(extId, { action: 'savePathConfig', config: cfg }, r => {
-                    if (chrome.runtime.lastError) { resolve({ ok: false, error: chrome.runtime.lastError.message }); return; }
-                    resolve(r || null);
-                });
-            } catch (e) { resolve({ ok: false, error: (e && e.message) || '扩展调用失败' }); }
+    function renderStatuses(view) {
+        const cfg = read();
+        view.querySelectorAll('[data-path-key]').forEach(input => {
+            const key = input.dataset.pathKey;
+            const holder = view.querySelector('[data-status-for="' + key + '"]');
+            if (!holder) return;
+            // 输入框有改动时按输入值即时判定
+            const value = input.value && input.value !== cfg[key] ? input.value : cfg[key];
+            const selected = window.PageDirectories?.handles[key] || (key==='suiteDir'&&window.PageDirectories?.handles.colorImgDir);
+            const st = selected ? 'ok' : 'unset';
+            holder.innerHTML = '';
+            holder.appendChild(chip(selected ? '已选择（权限另行检查）' : '请点击选择目录', statusKind(st)));
+            holder.title = normalizePath(value) || '';
         });
     }
 
-    async function saveFromInputs(view) {
+    function saveFromInputs(view) {
+        window.PageDirectories.permissions().then(permissions=>{
+            if(permissions.some(p=>p!=='granted'))throw Error('部分目录尚未授权，请重新选择对应目录或确认浏览器权限');
+            const cfg={};view.querySelectorAll('[data-path-key]').forEach(input=>{cfg[input.dataset.pathKey]=input.value;});
+            writeLocal(cfg);renderStatuses(view);
+            view.querySelector('.path-config-message').textContent='目录选择已记住；生成、预览和上传统一使用本页选择的目录。';
+            if(typeof currentProduct!=='undefined'&&currentProduct)loadColorImagesFromExtension(currentProduct.row);
+        }).catch(e=>{view.querySelector('.path-config-message').textContent=e.message;});
+        return;
         const cfg = {};
         view.querySelectorAll('[data-path-key]').forEach(input => {
             cfg[input.dataset.pathKey] = normalizePath(input.value);
         });
         const message = view.querySelector('.path-config-message');
-        // 句柄令牌不是路径，明确拒绝而不是存下来当路径用
+        // 旧句柄令牌不是路径：明确拒绝，不能存下来当路径用
         const badToken = Object.keys(cfg).find(k => /^polo-dir:/.test(cfg[k]));
         if (badToken) {
-            message.textContent = '「' + KEY_BY_FIELD[badToken] + '」是旧的目录句柄令牌，不是路径，请填写完整绝对路径（例如 C:\\Users\\你\\Downloads\\Polo发品_颜色图）';
+            message.textContent = '「' + KEY_BY_FIELD[badToken] + '」是旧的目录句柄记录，不是路径。请填写完整绝对路径，例如 C:\\Users\\你\\Downloads\\Polo发品_颜色图';
             message.className = 'path-config-message is-error';
             return;
         }
-        writeLocal(cfg);
-        await pingServer();
-        if (!serverUp()) {
-            renderStatuses(view, cfg, 'server-down');
-            message.textContent = '已保存到页面，但本地服务未启动：启动方式在项目目录执行 node _server.js，然后回来点「刷新状态」。';
-            message.className = 'path-config-message is-error';
-            return;
-        }
-        let items = [];
-        try {
-            let data = null;
-            // ① 页面经 http://127.0.0.1:8765 打开：同源直连
-            try {
-                const r = await fetch(SERVER + '/path-config', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(cfg)
-                });
-                data = await r.json().catch(() => null);
-                if (r.status === 403) data = null;   // file:// 页面会被同源鉴权拒绝 → 走扩展
-            } catch (_) { data = null; }
-
-            // ② file:// 页面（Origin 为 null，服务端无法鉴别）：由扩展代发，服务端只放行扩展来源
-            if (!data || !data.ok) {
-                data = await saveViaExtension(cfg);
-            }
-            if (!data || !data.ok) throw new Error((data && data.error) || '保存失败');
-            items = data.items || [];
-            writeLocal(data.config || cfg);
-        } catch (e) {
-            message.textContent = '保存到本地服务失败：' + (e && e.message ? e.message : e);
-            message.className = 'path-config-message is-error';
-            return;
-        }
-        renderStatuses(view, read(), null, items);
-        const bad = items.filter(it => it.status === 'missing' || it.status === 'not-absolute' || it.status === 'invalid');
+        const saved = writeLocal(cfg);
+        renderStatuses(view);
+        const bad = Object.keys(saved).filter(k => saved[k] && statusOf(saved[k]) !== 'ok');
         message.textContent = bad.length
-            ? '已保存，但有 ' + bad.length + ' 项不可用：' + bad.map(it => KEY_BY_FIELD[it.key] + '（' + STATUS_TEXT[it.status] + '）').join('、')
-            : '已保存，路径全部可用。';
+            ? '已保存，但有 ' + bad.length + ' 项不是完整绝对路径：' + bad.map(k => KEY_BY_FIELD[k]).join('、')
+            : '已保存，刷新后仍然有效。';
         message.className = 'path-config-message' + (bad.length ? ' is-error' : ' is-ok');
         if (typeof window.loadColorImagesFromExtension === 'function' && window.currentProduct) {
             window.loadColorImagesFromExtension(window.currentProduct.row);
         }
-    }
-
-    function renderStatuses(view, cfg, overrideStatus, items) {
-        const byKey = {};
-        (items || []).forEach(it => { byKey[it.key] = it.status; });
-        view.querySelectorAll('[data-path-key]').forEach(input => {
-            const key = input.dataset.pathKey;
-            const holder = view.querySelector('[data-status-for="' + key + '"]');
-            if (!holder) return;
-            let status = overrideStatus || byKey[key];
-            if (!status) status = cfg[key] ? (serverUp() ? 'unknown' : 'server-down') : 'unset';
-            holder.innerHTML = '';
-            holder.appendChild(chip(STATUS_TEXT[status] || status, statusKind(status)));
-            holder.title = cfg[key] || '';
-        });
     }
 
     function buildView() {
@@ -190,11 +144,10 @@
         view.className = 'step-config-view path-config-view';
         view.innerHTML = `<header class="step-config-heading"><h2>📁 路径配置</h2>
                 <button class="step-close" data-command="close" aria-label="退出路径配置">×</button></header>
-            <div class="step-config-toolbar"><p>所有路径都用完整绝对路径，末尾斜杠自动去掉；本地文件由本地服务（127.0.0.1:8765）读写，不再依赖浏览器目录授权。</p></div>
+            <div class="step-config-toolbar"><p>目录统一在本页选择，扩展不再单独配置。首次迁移请逐项选择实际文件夹，刷新后保留；需要时点击保存确认授权。浏览器仅返回目录名称，不提供完整地址。</p></div>
             <div class="path-config-list"></div>
             <div class="path-config-message" role="status"></div>
             <footer class="step-config-footer"><button data-command="close">关闭</button>
-                <button data-command="refresh">刷新状态</button>
                 <button class="primary" data-command="save">保存</button></footer>`;
         const list = view.querySelector('.path-config-list');
         const cfg = read();
@@ -203,11 +156,12 @@
                 <input type="text" data-path-key="${f.key}" value="${(cfg[f.key] || '').replace(/"/g, '&quot;')}"
                     placeholder="${f.key === 'colorImgDir' ? 'C:\\Users\\你\\Downloads\\Polo发品_颜色图' : '完整绝对路径'}" spellcheck="false">
                 <div class="path-config-status" data-status-for="${f.key}"></div>
+                <button type="button" data-choose-directory="${f.key}">选择目录</button>
             </div>`).join('');
         return view;
     }
 
-    async function open() {
+    function open() {
         if (state) return;
         const panel = document.getElementById('detailPanel');
         if (!panel) return;
@@ -220,46 +174,21 @@
         panel.appendChild(view);
         window.UiPolish && window.UiPolish.enter && window.UiPolish.enter(view);
         view.addEventListener('click', (e) => {
+            const key=e.target?.dataset?.chooseDirectory;
+            if(key){window.PageDirectories.choose(key).then(record=>{
+                view.querySelector('[data-path-key="'+key+'"]').value=record.name;
+                const cfg=read();cfg[key]=record.name;writeLocal(cfg);renderStatuses(view);
+            }).catch(error=>{if(error.name!=='AbortError')view.querySelector('.path-config-message').textContent=error.message;});return;}
             const cmd = e.target && e.target.dataset ? e.target.dataset.command : '';
             if (cmd === 'close') close();
             else if (cmd === 'save') saveFromInputs(view);
-            else if (cmd === 'refresh') refreshStatuses(view);
         });
-        await refreshStatuses(view);
-    }
-
-    async function refreshStatuses(view) {
-        const cfg = read();
-        const message = view && view.querySelector('.path-config-message');
-        await pingServer();
-        if (!serverUp()) {
-            if (view) renderStatuses(view, cfg, 'server-down');
-            if (message) {
-                message.textContent = '本地服务未启动：在该项目目录执行 node _server.js（默认 http://127.0.0.1:8765），启动后点「刷新状态」。';
-                message.className = 'path-config-message is-error';
-            }
-            return;
-        }
-        let items = [];
-        try {
-            const r = await fetch(SERVER + '/path-config', { cache: 'no-store' });
-            const data = await r.json();
-            items = (data && data.items) || [];
-            if (data && data.config) {
-                // 页面为空而服务端有值 → 用服务端补齐（不覆盖页面已有值）
-                const merged = { ...data.config };
-                for (const f of FIELDS) if (cfg[f.key]) merged[f.key] = cfg[f.key];
-                writeLocal(merged);
-            }
-        } catch (_) {}
-        if (view) {
-            // 刷新只读：绝不在这里 POST，否则会用（可能为空的）页面值覆盖服务端白名单
-            renderStatuses(view, read(), null, items);
-            if (message && !message.textContent) {
-                message.textContent = '本地服务已连接。';
-                message.className = 'path-config-message is-ok';
-            }
-        }
+        view.addEventListener('input', () => renderStatuses(view));
+        view.querySelectorAll('[data-path-key]').forEach(input=>{input.readOnly=true;});
+        window.PageDirectories.ready.then(()=>{
+            view.querySelectorAll('[data-path-key]').forEach(input=>{const r=window.PageDirectories.records[input.dataset.pathKey];if(r)input.value=r.name;});renderStatuses(view);
+        });
+        renderStatuses(view);
     }
 
     function close() {
@@ -272,7 +201,7 @@
         panel.scrollTop = scroll || 0;
     }
 
-    // 首次加载：页面为空时从扩展迁移旧绝对路径（不覆盖页面已有值，不迁移 polo-dir 令牌）
+    // 首次加载：页面为空时，从扩展里已保存的完整绝对路径迁移过来（不迁移 polo-dir 令牌、不覆盖页面已有值）
     async function migrateFromExtensionOnce() {
         const cfg = read();
         if (cfg.colorImgDir) return;
@@ -288,29 +217,16 @@
                 } catch (_) { resolve(null); }
             });
             const dir = resp && resp.config && resp.config.colorImgDir;
-            if (!dir || /^polo-dir:/.test(dir) || !/^[A-Za-z]:[\\/]|^\\\\/.test(dir)) return;
-            const merged = { ...cfg, colorImgDir: dir };
-            writeLocal(merged);
-            // 迁移后立即同步服务端白名单，否则首次读图会 403；页面已有值不参与迁移，不会被覆盖
-            try {
-                await fetch(SERVER + '/path-config', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(merged)
-                });
-            } catch (_) {}
+            if (!dir || !isAbsolutePath(normalizePath(dir))) return;
+            writeLocal({ ...cfg, colorImgDir: normalizePath(dir) });
         } catch (_) {}
     }
 
     window.PathConfig = {
-        FIELDS, open, close, read, imageUrl, colorImagePath, serverUp,
-        serverState: () => serverState,
-        saveAll: (cfg) => writeLocal(cfg),
-        pingServer,
-        migrateFromExtensionOnce
+        FIELDS, open, close, read, saveAll: writeLocal, colorImagePath, toFileUrl,
+        normalizePath, statusOf, isAbsolutePath, migrateFromExtensionOnce
     };
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', migrateFromExtensionOnce);
-    } else {
-        migrateFromExtensionOnce();
-    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', migrateFromExtensionOnce);
+    else migrateFromExtensionOnce();
 })();
