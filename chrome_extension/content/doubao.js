@@ -120,6 +120,40 @@ function findChatInput() {
     return null;
 }
 
+// 定位「新对话 / 新建对话」按钮：只认可见元素，先按文案精确匹配，再退到 aria-label
+function findNewChatButton() {
+    const labels = ['新对话', '新建对话'];
+    const candidates = document.querySelectorAll('button, div[role="button"], a');
+    let loose = null;
+    for (const el of candidates) {
+        if (!el || el.offsetHeight <= 0) continue;
+        const txt = (el.innerText || '').trim();
+        const aria = (el.getAttribute('aria-label') || '').trim();
+        if (labels.includes(txt) || labels.includes(aria)) return el;
+        if (!loose && (labels.some(l => txt.includes(l)) || labels.some(l => aria.includes(l)))) loose = el;
+    }
+    return loose;
+}
+
+// 开一个新对话：让上一款（可能超时/失败）迟到的图不落进这一款的会话里
+// 找不到按钮就放弃（不阻断任务，也不抛错）
+async function startNewChat() {
+    try {
+        const btn = findNewChatButton();
+        if (!btn) {
+            log('未找到「新对话」按钮，沿用当前会话', 'warn');
+            return false;
+        }
+        nativeMouseClick(btn);
+        await sleep(1200 + Math.floor(Math.random() * 800));   // 等新会话输入框就绪
+        log('已切换到新对话');
+        return true;
+    } catch (e) {
+        log('切换新对话失败（忽略）: ' + e.message, 'warn');
+        return false;
+    }
+}
+
 // 定位「发送」按钮（按文本精确/包含匹配）
 function findSendButton() {
     const allBtns = document.querySelectorAll('button');
@@ -512,6 +546,10 @@ async function runColorTask(task, onAccepted) {
     const results = { success: false, step: '', images: [], downloads: [] };
 
     try {
+        // 上一款超时/失败后新派发的款：先开新对话，防迟到图串款（失败不阻断）
+        if (task && task.freshChat === true) await startNewChat();
+        if (colorTask !== task || !isProcessing) return;
+
         results.step = '切换图像生成模式';
         await switchToImageGenMode();
         await sleep(1000);

@@ -79,6 +79,11 @@ function createEnv(opts = {}) {
     let dispatched = 0;
     let beginCalls = 0;
     let storageGetCalls = 0;
+    // 新语义观测点：取消在途 / 同款重发 / 推进下一款 / 重发时是否要求开新对话
+    let pauseCalls = 0;
+    let sendCalls = 0;
+    let nextCalls = 0;
+    let freshChatAtDispatch = null;
     const timers = [];
     let pollEvent = opts.pollEvent || null;   // 轮询读到的持久化完成事件
 
@@ -102,7 +107,7 @@ function createEnv(opts = {}) {
             runtime: {
                 lastError: null,
                 sendMessage: (id, req, cb) => {
-                    if (req.action === 'pauseColorDispatch') { cb({ ok: true }); return; }
+                    if (req.action === 'pauseColorDispatch') { pauseCalls++; cb({ ok: true }); return; }
                     if (req.action === 'getColorTaskEvents') {
                         sandbox.chrome.storage.local.get([], events => cb({ ok: true, events })); return;
                     }
@@ -140,8 +145,16 @@ function createEnv(opts = {}) {
         updateBatchColorStatus: (m) => log.push('STATUS ' + m),
         updateBatchColorFill: () => {},
         setBatchColorToggle: () => {},
-        processNextBatchColor: () => { dispatched++; },
-        sendNextBatchColor: () => { dispatched++; },
+        processNextBatchColor: () => { dispatched++; nextCalls++; },
+        // 真实 sendNextBatchColor 在派发时一次性消费 freshChatNext（发品助手.html:6137-6138）；
+        // 桩只记录派发瞬间的取值并清位，供「重试同款也开新对话、且只消费一次」的断言使用。
+        sendNextBatchColor: () => {
+            dispatched++; sendCalls++;
+            if (sandbox.batchColorState) {
+                freshChatAtDispatch = sandbox.batchColorState.freshChatNext === true;
+                sandbox.batchColorState.freshChatNext = false;
+            }
+        },
         beginColorBatch: () => { beginCalls++; },
         buildRowPreviewLines: () => ['preview'],
         confirm: () => (opts.confirmAnswer !== undefined ? opts.confirmAnswer : !opts.confirmReject),
@@ -156,12 +169,17 @@ function createEnv(opts = {}) {
             downloads: ['white', 'black', 'gray', 'navy'].map(c => ({ ok: true, filename: `row1_${c}.png` }))
         })),
         extensionInstalled: true,
-        batchColorState: null
+        batchColorState: null,
+        // finishBatchColor 调用记录：[completed, reason]
+        __finishCalls: []
     };
     sandbox.globalThis = sandbox;
     const ctx = vm.createContext(sandbox);
     vm.runInContext('var batchColorState = null;', ctx);
     vm.runInContext(SRC, ctx, { filename: '发品助手.html:color-fns' });
+    // 包一层真实 finishBatchColor：只记录调用参数，行为完全不变
+    vm.runInContext('var __realFinishBatchColor = finishBatchColor;\n'
+        + 'finishBatchColor = function (completed, reason) { __finishCalls.push([completed, reason]); return __realFinishBatchColor(completed, reason); };', ctx);
 
     return {
         ctx,
@@ -169,6 +187,11 @@ function createEnv(opts = {}) {
         get dispatched() { return dispatched; },
         get beginCalls() { return beginCalls; },
         get storageGetCalls() { return storageGetCalls; },
+        get pauseCalls() { return pauseCalls; },
+        get sendCalls() { return sendCalls; },
+        get nextCalls() { return nextCalls; },
+        get freshChatAtDispatch() { return freshChatAtDispatch; },
+        get finishCalls() { return sandbox.__finishCalls; },
         setPollEvent: (e) => { pollEvent = e; },
         run: (expr) => vm.runInContext(expr, ctx),
         clearTimers: () => { for (const t of timers) { clearTimeout(t); clearInterval(t); } },
@@ -225,13 +248,30 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
     ok(!st.running && env.dispatched===1,'再次暂停有效');
     env.clearTimers();
 
+    // ---- 第一次超时：取消在途 → 同款重试 1 次（不暂停整批、不前进） ----
     const timeout=createEnv({timeoutMs:20}); const ts=mkState([421,422],{inFlightRow:421});
+    ts.executionId='CE1';
     timeout.setState(ts); timeout.ctx.products=ts.queue;
     timeout.run('setupBatchColorTimeout({row:421})'); await tick(40);
-    ok(!ts.running && ts.currentIndex===0 && ts.inFlightRow===null,'超时暂停在原款，不跳到下一款');
+    ok(ts.running===true && !ts.stopRequested,'第一次超时不暂停整批');
+    ok(ts.currentIndex===0 && ts.inFlightRow===null,'第一次超时不前进当前款');
+    ok(ts.retryOf===421,'第一次超时标记「同款重试」');
+    ok(timeout.pauseCalls===1,'超时先发 pauseColorDispatch 取消在途再重发');
+    ok(timeout.sendCalls===1 && timeout.nextCalls===0,'同款被重新派发（走重发通道，不是推进下一款）');
+    ok(timeout.freshChatAtDispatch===true && ts.freshChatNext===false,'重试同款也先开新对话，且标记只消费一次');
     ok(timeout.run('getColorTimeoutRows().length')===0,'无查询确认门槛');
-    timeout.run('resumeColorBatch()');
-    ok(ts.running && timeout.dispatched===1,'超时后继续直接重试'); timeout.clearTimers();
+
+    // ---- 第二次超时（同一 row 连续两次）：记失败 + 跳过 + 下一款开新对话 ----
+    ts.inFlightRow=421; ts.inFlightSince=Date.now(); ts.executionId='CE2';   // 模拟重试已发出
+    timeout.run('setupBatchColorTimeout({row:421})'); await tick(40);
+    ok(ts.failedRows.includes(421),'同款连续两次超时记入失败款');
+    ok(ts.currentIndex===1 && ts.inFlightRow===null,'第二次超时跳到下一款');
+    ok(ts.freshChatNext===true,'跳过后下一款先开新对话（防迟到图串款）');
+    ok(ts.retryOf===null,'重试标记已清，不会无限重试');
+    ok(timeout.pauseCalls===2,'两次超时各取消一次在途执行');
+    ok(timeout.finishCalls.filter(c=>c[0]===false).length===0,'二次超时未调用 finishBatchColor(false)（整批不暂停）');
+    ok(ts.running===true && timeout.nextCalls===1,'二次超时后继续派发下一款');
+    timeout.clearTimers();
 
     const restored=createEnv(); restored.ctx.products=[{row:486},{row:490}];
     restored.store.set(COLOR_BATCH_STATE_KEY, JSON.stringify({rows:[486,490],currentIndex:0,fileKey:'A文件_xlsx__',fileFolder:'A文件.xlsx',batchId:'OLD',inFlightRow:486,pendingAckRow:486,inFlightSince:Date.now()}));
@@ -245,19 +285,40 @@ const tick = (ms = 30) => new Promise(r => setTimeout(r, ms));
     closed.run("handleColorTaskStopped({batchId:'cb_TEST',executionId:'E'})");
     ok(!cs.running && cs.currentIndex===0 && cs.inFlightRow===null,'豆包关页后立即显示暂停'); closed.clearTimers();
 
-    const judge=createEnv(); const js=mkState([412,415]);judge.setState(js);
+    // ---- 报错类失败：不重试，直接记失败并跳款（整批继续） ----
+    const judge=createEnv(); const js=mkState([412,415],{inFlightRow:412}); js.executionId='J1';
+    judge.setState(js); judge.ctx.products=js.queue;
     ok(!judge.run("judgeColorTaskResult({downloads:[]},412).ok"),'无下载仍不能误报成功');
     judge.run("advanceBatchColorForRow(412,'message','cb_TEST',{downloads:[]})");
-    ok(!js.running && js.currentIndex===0 && js.successCount===0,'结果失败暂停在当前款，不误跳下一款');
-    judge.ctx.products=js.queue; judge.run('resumeColorBatch()');
-    ok(js.running && judge.dispatched===1 && js.currentIndex===0,'失败后直接继续重做当前款');
-    js.inFlightRow=412; js.lastAdvancedRow=null;
+    ok(js.failedRows.includes(412) && js.failCount===1,'报错类失败记入失败款');
+    ok(js.currentIndex===1 && js.inFlightRow===null,'报错类失败直接跳到下一款');
+    ok(js.running===true && !js.stopRequested,'报错类失败不暂停整批');
+    ok(js.retryOf===null && judge.sendCalls===0,'报错类失败不重试（无同款重发）');
+    ok(judge.finishCalls.filter(c=>c[0]===false).length===0,'报错类失败未调用 finishBatchColor(false)');
+    ok(js.freshChatNext===true,'跳过后下一款先开新对话（防迟到图串款）');
+    ok(judge.nextCalls===1,'失败后立即推进下一款');
+    // 补跑/重发同一款成功：失败记录被修正，且只入账一次
+    js.currentIndex=0; js.inFlightRow=412; js.inFlightSince=Date.now(); js.executionId='J2'; js.lastAdvancedRow=null;
     judge.run("advanceBatchColorForRow(412,'message',batchColorState.batchId,__results)");
     ok(js.successCount===1 && js.failCount===0 && js.failedRows.length===0,'重做成功后修正失败记录，仅入账一次');
     judge.run("advanceBatchColorForRow(412,'message',batchColorState.batchId,__results)");
     ok(js.successCount===1,'重复完成不双计');
     ok(!judge.run("judgeColorTaskResult({downloads:[{filename:'row999_white.png',ok:true}]},412).ok"),'其他行的下载不能冒充本行结果');
     judge.clearTimers();
+
+    // ---- 补跑一轮：收尾时把失败款追加到队尾，只补一次 ----
+    const sup=createEnv(); const ss=mkState([431,432],{inFlightRow:null});
+    ss.currentIndex=2; ss.successCount=1; ss.failedRows=[431]; ss.failCount=1;
+    sup.setState(ss); sup.ctx.products=[{row:431},{row:432}];
+    sup.run('finishBatchColor(true)');
+    ok(ss.queue.length===3 && ss.queue[2].row===431,'收尾时失败款追加到队尾补跑');
+    ok(ss.supplementDone===true && ss.failedRows.length===0,'补跑只登记一次并清空失败款记录');
+    ok(ss.running===true && sup.nextCalls===1,'补跑立即派发且整批保持运行');
+    ss.currentIndex=3; ss.inFlightRow=null; ss.running=true;
+    sup.run('finishBatchColor(true)');
+    ok(ss.queue.length===3 && ss.supplementDone===true,'第二次收尾不再追加补跑');
+    ok(ss.running===false,'补跑后正常收尾（running=false）');
+    sup.clearTimers();
     const legacy=createEnv({confirmReject:true}); legacy.ctx.products=[{row:412},{row:415}];
     legacy.run('setColorResumeRows([412,415]); resumeColorBatch()');
     ok(legacy.beginCalls===1,'仅有旧待办列表也直接继续，不弹确认'); legacy.clearTimers();

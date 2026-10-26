@@ -3795,6 +3795,9 @@ function restoreColorBatchState() {
         inFlightSince: 0,
         pendingAckRow: null,
         timedOutRows: [],
+        retryOf: null,
+        freshChatNext: false,
+        supplementDone: false,
         pausedReason: /内存|提交额度|监测不可用|Failed to fetch/i.test(snap.pausedReason || '')
             ? '上次任务已暂停，等待你继续'
             : (snap.pausedReason || (snap.inFlightRow ? '刷新后恢复：等待在途款结束' : '刷新后恢复'))
@@ -3868,16 +3871,21 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
             batchColorState.failedRows.push(rowNum);
             batchColorState.failCount++;
         }
-        // 失败/部分完成是明确终态：暂停并保留可处理行（不做"运行中却不推进"的悬空状态）
-        batchColorState.running = false;
-        batchColorState.stopRequested = false;
-        batchColorState.pausedReason = `row${rowNum} 换色失败（${verdict.reason}）`;
+        // 报错类失败不重试（重试只会空转）：记失败 → 跳过 → 继续下一款，整批结束后统一补跑
+        batchColorState.inFlightRow = null;
+        batchColorState.pendingAckRow = null;
+        batchColorState.inFlightSince = 0;
+        batchColorState.executionId = null;
+        batchColorState.currentTimeoutId = null;
+        batchColorState.retryOf = null;
+        batchColorState.currentIndex++;
+        batchColorState.freshChatNext = true;   // 下一款先开新对话，防上一款的迟到图串款
         saveColorBatchState();
         refreshColorResumeRowsFromState();
         updateBatchColorProgress();
-        updateBatchColorStatus('换色已暂停');
-        showToast(`❌ row${rowNum} 换色失败（${verdict.reason}），已暂停并放入「继续」列表`);
-        console.log(`🎨 失败入账: row${rowNum} (${source})`);
+        showToast(`❌ row${rowNum} 换色失败（${verdict.reason}），已跳过（整批结束后补跑）`);
+        console.log(`🎨 失败入账并跳过: row${rowNum} (${source})`);
+        processNextBatchColor();
         return;
     }
 
@@ -4634,7 +4642,9 @@ async function suiteSaveOne({ key, blob, fileKey, rowNum, jobId }) {
     return { filename: rec.filename || filename, bytes: rec.bytes, width: rec.width, height: rec.height, mode: resp.mode || 'filesystem', dirName: resp.dirName || '' };
 }
 
-async function waitSuiteAcquired(taskId, timeoutMs = 600000) {
+// 套图一次请求默认出 3 张（111/444 用产品主图，不消耗生图），正常 30~60 秒就有图。
+// 100 秒是「无图即判卡住」的上限（到点抛错让上层重试/跳行），不是生成任务的时长上限。
+async function waitSuiteAcquired(taskId, timeoutMs = 100000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         if (readSuiteAutoState()?.paused) throw Error('当前套图已暂停');
@@ -4859,7 +4869,7 @@ async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted
                 const targetKeys=aiSteps.map(s=>String(s.key));
                 suiteSetProgress({jobId,fileKey,rowNum,phase:'generating',done:doneCount});
                 // 断点续跑：旧的合并任务若已结束（generated/失败/中断）或已不存在，就不能再等它，必须重新发起；
-                // 只有仍在执行中的旧任务才复用，避免空等到 600 秒超时。
+                // 只有仍在执行中的旧任务才复用，避免空等到 waitSuiteAcquired 的 100 秒超时。
                 if(five.groupTaskId){
                     const prior=await suiteSend('suiteGetTask',{taskId:five.groupTaskId,summary:true});
                     // 探测失败（扩展超时/重载）不能等同于“任务已结束”，否则会重复发起同一批生图；保守按存活处理
@@ -5652,7 +5662,8 @@ function copyFaq() {
 
 const COLOR_PROMPT = '原图原样，只改衣服颜色，背景版型纹理光影不变，高清服装实拍 四张图片，一张白色，一张黑色，一张灰色，一张深藏青色 ，图片比例1：1，锐化不要太严重';
 const COLOR_NAMES = ['white', 'black', 'gray', 'navy'];
-const BATCH_COLOR_COMPLETE_TIMEOUT = 6 * 60 * 1000;
+// 单款等图超时：从派发回执起算（含切模式/上传/发送开销），实际留给生成约 90 秒
+const BATCH_COLOR_COMPLETE_TIMEOUT = 100 * 1000;
 
 let batchColorState = null;
 
@@ -5731,6 +5742,9 @@ function beginColorBatch(queueList, label, targeted=false, directoryReady=false)
         fileKey: currentFileKey(),   // 任务创建时绑定文件：切文件后不被接管
         fileFolder: loadedFileName || '默认',
         timedOutRows: [],       // 已判超时、等待人工确认的行（迟到完成只提示，不重复入账）
+        retryOf: null,          // 已重试过的行：再次超时即记失败跳过，不再无限重试
+        freshChatNext: false,   // 下一款派发前先在豆包开新对话（防迟到图串款）
+        supplementDone: false,  // 失败款补跑只做一轮
         pausedReason: ''
     };
     saveColorBatchState();
@@ -6121,6 +6135,9 @@ function sendNextBatchColor() {
     if (colorBatchFileKey() !== currentFileKey()) { finishBatchColor(false, '请切回任务所属 Excel 后继续'); return; }
     const imagePath = getMainImagePath(product.row);
     batchColorState.executionId = 'ce_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    // 本次派发是否要求豆包先开新对话（上一款超时/失败后置位），置位只消费一次
+    const freshChat = batchColorState.freshChatNext === true;
+    batchColorState.freshChatNext = false;
     const dispatchState = batchColorState, dispatchId = batchColorState.executionId;
     saveColorBatchState();
     chrome.runtime.sendMessage(EXTENSION_ID, {
@@ -6130,7 +6147,8 @@ function sendNextBatchColor() {
             batchId: batchColorState.batchId,
             executionId: dispatchId,
             fileKey: colorBatchFileKey(),
-            fileFolder: batchColorState.fileFolder || loadedFileName || '默认'   // 执行期内绑定，异步回调不再读当前文件
+            fileFolder: batchColorState.fileFolder || loadedFileName || '默认',   // 执行期内绑定，异步回调不再读当前文件
+            freshChat   // 豆包侧据此先开新对话，防上一款的迟到图被当成这一款
         }
     }, (response) => {
         if (batchColorState !== dispatchState || batchColorState.executionId !== dispatchId) return;
@@ -6159,14 +6177,59 @@ function sendNextBatchColor() {
     });
 }
 
+// 单款超时：不暂停整批。第一次超时取消在途后同款重发，第二次超时记失败并跳过。
 function setupBatchColorTimeout(product) {
     if (!batchColorState) return;
     if (batchColorState.currentTimeoutId) clearTimeout(batchColorState.currentTimeoutId);
     const state = batchColorState, executionId = state.executionId;
     state.currentTimeoutId = setTimeout(() => {
         if (batchColorState !== state || state.executionId !== executionId || state.inFlightRow !== product.row) return;
-        finishBatchColor(false);
-        showToast('换色超时，已暂停');
+        const isRetry = state.retryOf === product.row;
+        // 先取消在途执行（暂停派发通道，但不暂停批次）：否则豆包页仍在生成，重发会被判忙
+        const onCanceled = () => {
+            // 二次校验：期间这一款可能已正常完成并被推进，此时什么都不做
+            if (batchColorState !== state || state.inFlightRow !== product.row) return;
+            state.inFlightRow = null;
+            state.pendingAckRow = null;
+            state.inFlightSince = 0;
+            state.executionId = null;
+            state.currentTimeoutId = null;
+            if (isRetry) {
+                // 第二次超时：记失败、跳过、继续下一款，整批结束后统一补跑
+                if (!Array.isArray(state.failedRows)) state.failedRows = [];
+                if (state.failedRows.indexOf(product.row) < 0) {
+                    state.failedRows.push(product.row);
+                    state.failCount++;
+                }
+                state.retryOf = null;
+                state.currentIndex++;
+                state.freshChatNext = true;   // 下一款先开新对话，防上一款的迟到图串款
+                saveColorBatchState();
+                showToast(`❌ row${product.row} 重试后仍未出图，已跳过（整批结束后补跑）`);
+                console.log(`🎨 二次超时跳过: row${product.row}`);
+                processNextBatchColor();
+                return;
+            }
+            // 第一次超时：同款重发一次，不前进
+            state.retryOf = product.row;
+            // 重试同款也要先开新对话：上一轮被取消的执行可能仍在出图，
+            // 迟到图会落在本轮增量基线之后 → 颜色错位；由 sendNextBatchColor 一次性消费并清位。
+            state.freshChatNext = true;
+            saveColorBatchState();
+            showToast(`⏱ row${product.row} 超过 ${Math.round(BATCH_COLOR_COMPLETE_TIMEOUT / 1000)} 秒未出图，重试 1 次`);
+            sendNextBatchColor();
+        };
+        // 发消息前先同步校验一次：完成消息可能与超时同时到达，
+        // 若这一款已被推进/已被新一款接管，则连 pauseColorDispatch 都不发，避免取消掉新执行。
+        if (batchColorState !== state || state.executionId !== executionId || state.inFlightRow !== product.row) return;
+        try {
+            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'pauseColorDispatch' }, () => {
+                void chrome.runtime.lastError;
+                onCanceled();
+            });
+        } catch (_) {
+            onCanceled();
+        }
     }, BATCH_COLOR_COMPLETE_TIMEOUT);
 }
 
@@ -6192,13 +6255,27 @@ function stopBatchColorChange() {
     if (!batchColorState) return;
     batchColorState.stopRequested = true;
     updateBatchColorStatus('⏸ 正在暂停...');
-    // 立即收尾：扩展侧没有取消通道，若只设标记，推进只能等单款超时（最长 6 分钟），表现为「卡住」
+    // 立即收尾：扩展侧没有取消通道，若只设标记，推进只能等单款超时（最长 100 秒），表现为「卡住」
     // finishBatchColor 内部会清超时、停轮询、恢复按钮
     finishBatchColor(false);
 }
 
 function finishBatchColor(completed, reason) {
     if (!batchColorState) return;
+    // 补跑一轮：整批跑完、没有在途款、还没补跑过且存在失败款 → 把失败款排到队尾再跑一遍
+    if (completed && batchColorState.running && !batchColorState.inFlightRow
+        && !batchColorState.supplementDone && (batchColorState.failedRows || []).length) {
+        const byRow = new Map((products || []).map(p => [p.row, p]));
+        const extra = batchColorState.failedRows.map(r => byRow.get(r)).filter(Boolean);
+        batchColorState.failedRows = [];
+        batchColorState.failCount = 0;
+        batchColorState.supplementDone = true;
+        extra.forEach(p => batchColorState.queue.push(Object.assign({}, p, { _idx: batchColorState.queue.length })));
+        saveColorBatchState();
+        if (extra.length) showToast(`🔁 补跑 ${extra.length} 款失败款`);
+        processNextBatchColor();
+        return;
+    }
     if (!completed) {
         const state = batchColorState;
         const row = state.inFlightRow || state.pendingAckRow;
