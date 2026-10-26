@@ -24,12 +24,20 @@ globalThis.PoloDirectories = (() => {
      if (dir.name !== 'Polo发品_颜色图') dir = await dir.getDirectoryHandle('Polo发品_颜色图');
      dir = await dir.getDirectoryHandle(fileFolder);
      dir = await dir.getDirectoryHandle('row'+rowNum);
-     const file = await (await dir.getFileHandle('row'+rowNum+'_'+color+'.png')).getFile();
-     if (!file.size) throw new Error('颜色图为空');
+     // 颜色图落盘 png / jpg 混存（压缩后转存 jpg）：逐个后缀试，命中即用，不固定某一种。
+     let file = null;
+     let seenEmpty = false;
+     for (const ext of ['png','jpg','jpeg','webp']) {
+         try { const f = await (await dir.getFileHandle('row'+rowNum+'_'+color+'.'+ext)).getFile(); if (f.size) { file = f; break; } seenEmpty = true; }
+         catch (e) { if (e && e.name !== 'NotFoundError') throw e; }
+     }
+     if (!file) throw new Error(seenEmpty ? '颜色图为空（row'+rowNum+'_'+color+'）' : '颜色图文件不存在（row'+rowNum+'_'+color+'.png / .jpg / .jpeg / .webp）');
      const bytes = new Uint8Array(await file.arrayBuffer());
      let binary = '';
      for (let i=0;i<bytes.length;i+=8192) binary += String.fromCharCode(...bytes.subarray(i,i+8192));
-     return 'data:'+(file.type||'image/png')+';base64,'+btoa(binary);
+     const name = String(file.name || '');
+     const type = file.type || (/\.png$/i.test(name) ? 'image/png' : /\.webp$/i.test(name) ? 'image/webp' : 'image/jpeg');
+     return 'data:' + type + ';base64,' + btoa(binary);
  }
  // 路径选择器只存自己的定位句柄，不改变PS活动目录。
  async function pickerRecord(key, value) {

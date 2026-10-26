@@ -1557,7 +1557,11 @@ async function uploadColorImageViaBlob(colorKey, colorLabel, itemIndex, imageUrl
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         
         const blob = await resp.blob();
-        const file = new File([blob], `row_color_${colorKey}.png`, { type: 'image/png' });
+        // 颜色图磁盘上 png/jpg 混存：按响应真实类型决定后缀与 MIME，不再一律当 png。
+        const mime = String(blob.type || '').toLowerCase();
+        if (mime && !/^image\//.test(mime)) throw new Error('颜色图响应不是图片：' + mime);
+        const ext = mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : '.jpg';
+        const file = new File([blob], `row_color_${colorKey}${ext}`, { type: mime === 'image/png' || mime === 'image/webp' ? mime : 'image/jpeg' });
         log(`✅ 下载完成: ${Math.round(blob.size / 1024)}KB`, 'success');
 
         const items = document.querySelectorAll('.posting-field-color .item, .item[role="item"], .posting-field-color-select .item');

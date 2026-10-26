@@ -19,7 +19,7 @@
     async function read({fileKey,rowNum,keys}){
         if(!fileKey||!Number.isInteger(rowNum)||rowNum<1||!Array.isArray(keys)||!keys.length||keys.some(k=>!['111','444','222','333','666'].includes(k)))throw Error('上传图片请求身份或编号无效');
         const folder=(typeof loadedFileName!=='undefined'&&loadedFileName)?loadedFileName:'';
-        // 磁盘优先：<文件名>/rowN/<编号>.png；读不到才回落到索引里的旧缓存（兼容历史数据）
+        // 磁盘优先：<文件名>/rowN/<编号>.png 或 .jpg（两种后缀都试）；读不到才回落到索引里的旧缓存（兼容历史数据）
         let diskFiles=null;
         if(typeof PageDirectories!=='undefined'&&PageDirectories.dispatch&&folder){
             try{
@@ -35,7 +35,7 @@
                 files.push({key,dataUrl:await uploadCopy(blob),fromDisk:true});
                 continue;
             }
-            const reason=(hit&&hit.error)?hit.error:('磁盘上没有 '+folder+'/row'+rowNum+'/'+key+'.png');
+            const reason=(hit&&hit.error)?hit.error:('磁盘上没有 '+folder+'/row'+rowNum+'/'+key+'.png / '+key+'.jpg');
             if(!store)throw Error('第 '+rowNum+' 行 '+key+'：'+reason);
             const record=await store.get(fileKey,rowNum,key);
             if(!record?.blob||!record.meta?.verified)throw Error('第 '+rowNum+' 行 '+key+'：'+reason+'（也没有可用的旧缓存）');

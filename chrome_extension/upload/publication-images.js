@@ -25,10 +25,16 @@
         const spec=plan(product,kind),fileKey=product._publishFileKey,rowNum=product.row;
         if(!fileKey||!Number.isInteger(rowNum)||rowNum<1)throw Error('产品缺少原始文件与行号，不能上传');
         const generated=await readGenerated({fileKey,rowNum,keys:spec.keys});
+        // 磁盘上的成品可能是 png 也可能是 jpg（压缩后转存 jpg）：文件名跟着真实类型走，两种都收。
+        const extension=dataUrl=>{
+            const mime=String(dataUrl||'').match(/^data:image\/(jpeg|jpg|png|webp);base64,/i);
+            const type=mime?mime[1].toLowerCase():'jpeg';
+            return type==='png'?'.png':type==='webp'?'.webp':'.jpg';
+        };
         const files=spec.keys.map(key=>{
             const file=generated.find(f=>f.key===key);
             if(!file||!/^data:image\/(jpeg|png|webp);base64,/.test(file.dataUrl||''))throw Error('缺少本产品生成图 '+key);
-            return {...file,name:key+'.jpg'};
+            return {...file,name:key+extension(file.dataUrl)};
         });
         for(let i=0;i<spec.bank.length;i++){
             const blob=await readBank('assets/publication-bank/'+spec.category+'/'+(i+1)+'.jpg');

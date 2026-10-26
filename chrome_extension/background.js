@@ -3477,6 +3477,8 @@ async function uploadDoubaoImage(tabId, imagePath) {
         const fileName=decodeURIComponent(String(imagePath||'').split(/[\\/]/).pop().split('?')[0]);
         const source=await pageDirectoryRequest({action:'readPsImage',fileName});
         if(!source.ok||!source.dataUrl)throw Error(source.error||'页面产品原图读取失败');
+        // 磁盘上 png/jpg 混存：页面读图会按实际命中的后缀回报文件名，上传用真实名，避免类型与后缀对不上。
+        const actualName=source.filename||fileName;
         const injected=await chrome.scripting.executeScript({target:{tabId:targetId},func:async(dataUrl,name)=>{
             const input=document.querySelector('input[type="file"]');
             if(!input)throw Error('未找到豆包文件输入框');
@@ -3485,7 +3487,7 @@ async function uploadDoubaoImage(tabId, imagePath) {
             input.files=transfer.files;
             input.dispatchEvent(new Event('input',{bubbles:true}));
             input.dispatchEvent(new Event('change',{bubbles:true}));return true;
-        },args:[source.dataUrl,fileName]});
+        },args:[source.dataUrl,actualName]});
         if(!injected[0]?.result)throw Error('豆包图片上传未成功');
         return {ok:true};
 

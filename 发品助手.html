@@ -6372,6 +6372,10 @@ function openPhotopea(rowNum) {
                 let r=await psDirectoryMessage({action:'readPsImage',fileName});
                 if(!r.ok && !/权限|授权/.test(r.error || '') && fileName===imgFileName){fileName=pngFileName;r=await psDirectoryMessage({action:'readPsImage',fileName});}
                 if(!r.ok)throw new Error(r.error);
+                // 磁盘上 png/jpg 混存：扩展读图会带回实际命中的文件名，按真实名打开并保存，避免写出重复副本。
+                if(r.filename)fileName=r.filename;
+                // 目录桥返回的是 dataUrl（不带字节数组 data）；直接用 dataUrl，避免读成空图。
+                if(r.dataUrl){openPhotopeaWithExtension(r.dataUrl,fileName,rowNum);return;}
                 const reader=new FileReader();reader.onload=()=>openPhotopeaWithExtension(reader.result,fileName,rowNum);
                 reader.readAsDataURL(new Blob([new Uint8Array(r.data)],{type:r.type}));return;
             }
@@ -6392,12 +6396,17 @@ function openPhotopea(rowNum) {
             try {
                 fileHandle = await psEditDirHandle.getFileHandle(fileName);
             } catch (e) {
-                if (fileName === imgFileName) {
-                    fileHandle = await psEditDirHandle.getFileHandle(pngFileName);
-                    fileName = pngFileName;
-                } else {
-                    throw e;
+                if (!e || e.name !== 'NotFoundError') throw e;
+                // 磁盘上 png/jpg 混存：同名换其它图片后缀再试，命中哪个就按哪个打开与保存。
+                const base = String(fileName).replace(/\.(png|jpe?g|webp)$/i, '');
+                let last = e;
+                for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
+                    const candidate = base + '.' + ext;
+                    if (candidate === fileName) continue;
+                    try { fileHandle = await psEditDirHandle.getFileHandle(candidate); fileName = candidate; last = null; break; }
+                    catch (err) { last = err; }
                 }
+                if (last) throw last;
             }
             const file = await fileHandle.getFile();
             psPageSaveRows.add(rowNum);

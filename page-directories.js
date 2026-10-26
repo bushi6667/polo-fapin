@@ -67,6 +67,24 @@
         }
         throw last || Error('图片不存在：'+base);
     }
+    // 磁盘上 png / jpg 混存：调用方给的名字可能带错后缀（如 row3_main.jpg 实际是 .png）。
+    // 先按原名读（原名的优先级最高）；缺失或空文件时才换同名其它图片后缀，
+    // 并把实际命中的文件名带回给调用方。全部失败时抛最初那条错误，保留真实原因（空/缺失）。
+    const IMAGE_FILE_RE=/\.(png|jpe?g|webp)$/i;
+    async function readImageAny(key,name){
+        const raw=String(name||'');
+        let first=null;
+        try{
+            const got=await readImage(key,raw);
+            return Object.assign(got,{ext:(raw.match(IMAGE_FILE_RE)||[,''])[1].toLowerCase(),filename:segments(raw).at(-1)});
+        }catch(e){
+            first=e;
+        }
+        // 授权/权限/解码/非法路径等错误必须原样上抛，不能当成「换后缀」的理由
+        if(!/不存在|为空/.test(String(first&&first.message))||!IMAGE_FILE_RE.test(raw))throw first;
+        try{ return await readFirst(key,raw.replace(IMAGE_FILE_RE,'')); }
+        catch(_){ throw first; }
+    }
     async function hash(blob){return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await blob.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('');}
     async function writeImage(key,path,blob){
         if(!blob.size||blob.size>100*1024*1024)throw Error('图片大小无效');
@@ -93,7 +111,7 @@
         case 'listScriptDirectory':return scripts();
         case 'readScriptDirectory':{const files=scriptSnapshots.get(r.revision);if(!files)throw Error('脚本目录已更新，请重新添加JS');if(!Array.isArray(r.paths)||r.paths.length>200)throw Error('脚本选择无效');return {ok:true,scripts:r.paths.map(path=>{const f=files.find(x=>x.path===path);if(!f)throw Error('所选脚本不在目录中');return {...f,sourceDirectory:records.scriptDir.name,sourceRevision:r.revision};})};}
         case 'psDirectoryStatus':{const h=handles.imageDir;return {ok:true,configured:!!h,name:h?.name||'',permission:h?await h.queryPermission({mode:'readwrite'}):'prompt'};}
-        case 'readPsImage':return readImage('imageDir',r.fileName);
+        case 'readPsImage':return readImageAny('imageDir',r.fileName);
         case 'writePsImage':return {ok:true,...await writeImage('imageDir',r.fileName,new Blob([new Uint8Array(r.data)],{type:r.format==='png'?'image/png':'image/jpeg'}))};
         case 'pageReadColor':return readFirst('colorImgDir',r.fileFolder+'/row'+r.rowNum+'/row'+r.rowNum+'_'+r.color);
         // 套图成品按磁盘现读：<文件名>/rowN/<编号>.png（一次拿多张，缺哪张就少哪张，不抛错中断）
