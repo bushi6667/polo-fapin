@@ -2086,6 +2086,17 @@ async function handleSharedAction(request, sendResponse, sender) {
                 const deadline=Date.now()+600000;
                 while(Date.now()<deadline){
                     wt=await toTab('suite-poll',{baselineUrls:sd.baselineUrls||bl.baselineUrls,expectCount:t.expectCount||5});
+                    // 豆包额度耗尽（内容脚本每轮顺手判定）：立刻失败，不让整批空等 10 分钟
+                    const quotaHit=(wt&&wt.result&&wt.result.quota&&wt.result.quota.exhausted)?wt.result.quota
+                        :((wt&&wt.quota&&wt.quota.exhausted)?wt.quota
+                        :((wt&&wt.success===false&&/额度已用完/.test(String(wt.error||'')))?{exhausted:true,text:String(wt.error||''),resumeAt:null}:null));
+                    if(quotaHit){
+                        // 页面侧统一口径：任务 error 文本含「额度已用完」即视为额度耗尽、暂停整批
+                        const quotaError='QUOTA_EXHAUSTED：额度已用完'+(quotaHit.resumeAt?`（预计 ${quotaHit.resumeAt} 恢复）`:'');
+                        await SuiteTaskStore.fail(taskId,quotaError,{quota:quotaHit}).catch(()=>{});
+                        reply({ok:false,error:quotaError,quota:quotaHit});
+                        return;
+                    }
                     if(!wt?.success||wt.result?.ready)break;
                     await new Promise(resolve=>setTimeout(resolve,2000));
                 }
@@ -3094,6 +3105,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     sendResponse({ ok: false, error: '执行身份不匹配，已拒绝' });
                     return;
                 }
+                // 额度耗尽判定（豆包内容脚本回传）：只在命中时附加，未命中时载荷结构与原来完全一致
+                const quota = (request.quota && request.quota.exhausted === true) ? {
+                    exhausted: true,
+                    text: String(request.quota.text || '').slice(0, 200),
+                    resumeAt: request.quota.resumeAt ? String(request.quota.resumeAt).slice(0, 40) : null
+                } : null;
                 // 同一份不可变终态载荷：存储事件与所有通知通道共用，贯穿结果与执行/文件身份
                 const payload = Object.freeze({
                     rowNum,
@@ -3103,6 +3120,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                     execStartedAt: exec.startedAt || 0,
                     executionId: exec.executionId || null,
                     results: request.results || null,
+                    ...(quota ? { quota } : {}),
                     timestamp: Date.now()
                 });
                 if (exec.state === 'finished') { sendResponse({ ok: false, error: '重复完成消息' }); return; }
@@ -3693,7 +3711,9 @@ async function notifyColorTaskComplete(rowNum, batchId, payload) {
         fileFolder: payload.fileFolder || '',
         execStartedAt: payload.execStartedAt || 0,
         executionId: payload.executionId || null,
-        timestamp: payload.timestamp
+        timestamp: payload.timestamp,
+        // 额度耗尽只在命中时附带，未命中不改变通知结构（页面旧逻辑零影响）
+        ...(payload.quota ? { quota: payload.quota } : {})
     } : {};
     if (assistantPort) {
         try {

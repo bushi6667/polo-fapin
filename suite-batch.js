@@ -54,11 +54,28 @@ async function suiteBatchRunRowOnce(row,restart){
     const keys=new Set(records.filter(r=>r.blob?.size>0).map(r=>String(r.key)));
     return SUITE_STEP_KEYS.every(key=>keys.has(key));
 }
+// 豆包额度用完：整批暂停，不是这一行失败。
+// runSuiteFiveJob 会吞掉异常、只把 phase:'error'（及 error 文案）写进自动状态，所以从状态里读，不看 catch。
+// 命中后：行不前进（恢复后重跑它）、不记 failed、不进补跑轮（额度问题补跑必败）。
+function suiteBatchQuotaPause(row){
+    const state=readSuiteAutoState();
+    if(!state||state.fileKey!==suiteBatchState.fileKey||state.rowNum!==row||state.phase!=='error')return null;
+    const text=String(state.error||'');
+    if(!/额度\s*[,，]?\s*已\s*用完/.test(text))return null;
+    const hit=/预计\s*(.+?)\s*恢复/.exec(text);
+    const resumeAt=hit?hit[1].trim():'';
+    const reason='豆包额度已用完'+(resumeAt?'（预计 '+resumeAt+' 恢复）':'');
+    suiteBatchState.paused=true;
+    suiteBatchState.pausedReason=reason;
+    saveSuiteBatch();
+    showToast('⚠️ '+reason+'，队列已暂停');
+    return {resumeAt,reason};
+}
 async function runSuiteBatch(){
     if(suiteBatchRunning||!suiteBatchState)return;
     if(suiteBatchState.fileKey!==currentFileKey()){showToast('请导入套图队列所属 Excel 后继续');return;}
     window.UnifiedTaskStarted?.();
-    suiteBatchRunning=true;suiteBatchState.paused=false;saveSuiteBatch();
+    suiteBatchRunning=true;suiteBatchState.paused=false;suiteBatchState.pausedReason='';saveSuiteBatch();
     try{
         while(suiteBatchState.index<suiteBatchState.rows.length&&!suiteBatchState.paused){
             if(currentFileKey()!==suiteBatchState.fileKey)throw Error('Excel 已切换，套图队列已暂停');
@@ -67,6 +84,8 @@ async function runSuiteBatch(){
             if(complete){suiteBatchState.index++;saveSuiteBatch();continue;}
             // 用户主动暂停不算失败：当前行保留待续跑，不能登记失败也不能跳过。
             if(suiteBatchState.paused)break;
+            // 豆包额度用完：整批暂停，当前行保留待续跑（不记失败、不前进、不补跑）。
+            if(suiteBatchQuotaPause(row))break;
             suiteBatchMarkFailed(row);
             await suiteBatchDropRow(row);
             suiteBatchState.index++;saveSuiteBatch();
@@ -82,7 +101,10 @@ async function runSuiteBatch(){
                 try{complete=await suiteBatchRunRow(row,true);}
                 catch(e){showToast('⚠️ 行'+row+' 补跑失败：'+e.message);}
                 if(complete)suiteBatchState.failed=suiteBatchState.failed.filter(r=>r!==row);
-                else await suiteBatchDropRow(row);   // 仍失败：保留在 failed，不再补跑
+                else{
+                    if(suiteBatchQuotaPause(row))break;   // 补跑时同样遇到额度用完：整批暂停
+                    await suiteBatchDropRow(row);         // 仍失败：保留在 failed，不再补跑
+                }
                 saveSuiteBatch();
             }
         }

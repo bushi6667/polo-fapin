@@ -3683,7 +3683,8 @@ function handleColorTaskComplete(request) {
     if (batchColorState && batchColorState.executionId && request.executionId !== batchColorState.executionId) return;
     console.log('🎨 收到换色完成消息:', rowNum, batchId || '', results ? '含结果' : '无结果');
     handleColorTaskAccepted(request);
-    advanceBatchColorForRow(rowNum, 'message', batchId, results);
+    // quota 由内容脚本判定并随完成消息带回（未命中额度时不存在该字段）
+    advanceBatchColorForRow(rowNum, 'message', batchId, results, request.quota);
 }
 
 // 统一推进入口：消息触发和轮询兜底都走这里，靠 lastAdvancedRow 去重防双触发
@@ -3807,14 +3808,15 @@ function restoreColorBatchState() {
         if (idx >= 0) batchColorState.currentIndex = idx;
     }
     batchColorState.executionId = null;
-    batchColorState.pausedReason = '';
+    // 不要在这里清空 pausedReason：刷新后状态栏仍要能显示「额度已用完（预计 … 恢复）」，
+    // 且 resumeColorBatch 靠它判断「额度暂停 → 继续时换新对话」。队列停在哪一款由 currentIndex 决定，与此无关。
     setColorTimeoutRows([]);
     refreshColorResumeRowsFromState();
     saveColorBatchState();
     showBatchColorProgress();
     updateBatchColorProgress();
     restoreBatchColorUI();
-    updateBatchColorStatus('换色已暂停');
+    updateBatchColorStatus('换色已暂停' + (batchColorState.pausedReason ? ` · ${batchColorState.pausedReason}` : ''));
     return true;
 }
 
@@ -3823,7 +3825,7 @@ function refreshColorResumeRowsFromState() {
     setColorResumeRows(computeColorResumeRows());
 }
 
-function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
+function advanceBatchColorForRow(rowNum, source, msgBatchId, results, quota) {
     if (!batchColorState) return;
     // ① 任务标识校验：批量任务必须有标识，且必须匹配。
     //    缺标识的消息一律拒绝（旧任务同行的迟到消息不得冒充新任务完成）；
@@ -3856,6 +3858,24 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results) {
     batchColorState.inFlightRow = null;
     batchColorState.pendingAckRow = null;
     batchColorState.inFlightSince = 0;
+
+    // ③b 豆包额度用完（内容脚本判定，quota 字段可选）：整批暂停，不是这一款失败。
+    //     不记 failedRows（切号/等恢复后还要重跑本款）、不前进 currentIndex；继续时先重跑本款。
+    if (quota && quota.exhausted) {
+        if (batchColorState.currentTimeoutId) {
+            clearTimeout(batchColorState.currentTimeoutId);
+            batchColorState.currentTimeoutId = null;
+        }
+        // 停在本款：继续时先重跑它（而不是从别的失败款起跑）
+        const quotaIdx = batchColorState.queue.findIndex(p => p.row === rowNum);
+        if (quotaIdx >= 0) batchColorState.currentIndex = quotaIdx;
+        const resumeAt = String(quota.resumeAt || '').trim();
+        const reason = '豆包额度已用完' + (resumeAt ? `（预计 ${resumeAt} 恢复）` : '');
+        console.warn(`⏸ row${rowNum} 豆包额度已用完，整批暂停 (${source})`);
+        finishBatchColor(false, reason);
+        showToast('⏸ ' + reason + '，整批已暂停');
+        return;
+    }
 
     // ④ 结果判定：执行结束 ≠ 成功。四色目标必须逐项确认，部分完成按失败处理并保留可处理行
     const REQUIRED_COLORS = ['white', 'black', 'gray', 'navy'];
@@ -4971,10 +4991,12 @@ async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted
         return null;
     } catch (e) {
         // 保留错误信息；用户点击“继续”会从本产品整套重新生成。
+        // error 文案同时写入自动状态：套图队列靠它识别「豆包额度已用完」并整批暂停（runSuiteFiveJob 会吞异常）。
         const state = readSuiteAutoState();
-        if (state && state.jobId) saveSuiteAutoState({ ...state, phase: 'error', paused: true });
-        updateSuiteStatus(`❌ ${e.message}`);
-        showToast(`❌ ${e.message}`);
+        const errText = String((e && e.message) || e || '');
+        if (state && state.jobId) saveSuiteAutoState({ ...state, phase: 'error', paused: true, error: errText });
+        updateSuiteStatus(`❌ ${errText}`);
+        showToast(`❌ ${errText}`);
         return null;
     } finally {
         suiteStatusOwner = null;
@@ -5900,7 +5922,11 @@ function resumeColorBatch(directoryReady=false) {
     if (batchColorState) {
         const state = batchColorState;
         // 兼容旧缓存中的在途/超时记录：当前款重新执行，不等待旧引擎。
-        const pausedRow = state.inFlightRow || state.pendingAckRow || getColorTimeoutRows()[0] || (state.failedRows || [])[0];
+        // 额度暂停不是本款故障：继续时先重跑当前款（失败款另有整批末尾补跑）。
+        const quotaPaused = /额度/.test(state.pausedReason || '');
+        const pausedRow = state.inFlightRow || state.pendingAckRow || getColorTimeoutRows()[0]
+            || (quotaPaused && state.queue[state.currentIndex] ? state.queue[state.currentIndex].row : 0)
+            || (state.failedRows || [])[0];
         const idx = state.queue.findIndex(p => p.row === pausedRow);
         if (idx >= 0) state.currentIndex = idx;
         state.inFlightRow = null; state.pendingAckRow = null; state.inFlightSince = 0;
@@ -5911,6 +5937,10 @@ function resumeColorBatch(directoryReady=false) {
         state.timedOutRows = [];
         state.batchId = 'bc_' + Date.now() + '_' + Math.random().toString(36).slice(2);
         state.pausedReason = '';
+        // 额度恢复后必须换新对话（复用 freshChatNext，由 sendNextBatchColor 一次性消费）。
+        // 否则上一轮的额度气泡残留在旧对话里，内容脚本「最后一条气泡文本变化即算本轮新增」
+        // 会把它当成本轮证据 → 点继续几秒内又弹「额度已用完」，反复继续都推不动。
+        if (quotaPaused) state.freshChatNext = true;
         state.stopRequested = false;
         state.running = true;
         // 先让旧执行失效，再重新派发；不弹额外确认框。
@@ -6082,7 +6112,7 @@ function startBatchColorPolling() {
                 if (batchColorState.inFlightRow === evt.rowNum) {
                     console.log(`🎨 轮询兜底捕获完成事件: row${evt.rowNum}`);
                     batchColorState.lastProcessedTimestamp = evt.timestamp;
-                    advanceBatchColorForRow(evt.rowNum, 'poll', evt.batchId, evt.results);
+                    advanceBatchColorForRow(evt.rowNum, 'poll', evt.batchId, evt.results, evt.quota);
                 }
             });
         } catch (e) {
@@ -6283,7 +6313,7 @@ function finishBatchColor(completed, reason) {
         if (idx >= 0) state.currentIndex = idx;
         state.running = false; state.stopRequested = true;
         state.inFlightRow = null; state.pendingAckRow = null; state.inFlightSince = 0;
-        state.executionId = null; state.pausedReason = '';
+        state.executionId = null; state.pausedReason = reason || '';
         if (state.currentTimeoutId) clearTimeout(state.currentTimeoutId);
         state.currentTimeoutId = null;
         stopBatchColorPolling();
@@ -6291,7 +6321,7 @@ function finishBatchColor(completed, reason) {
         refreshColorResumeRowsFromState(); saveColorBatchState();
         try { chrome.runtime.sendMessage(EXTENSION_ID, { action: 'pauseColorDispatch' }, () => { void chrome.runtime.lastError; }); } catch (_) {}
         restoreBatchColorUI(); updateBatchColorProgress();
-        updateBatchColorStatus('换色已暂停');
+        updateBatchColorStatus(reason ? `换色已暂停 · ${reason}` : '换色已暂停');
         return;
     }
     const finishedState = batchColorState;
@@ -6379,7 +6409,7 @@ function updateBatchColorProgress() {
     let status;
     if (batchColorState.running) status = `换色中 ${current}/${total}${batchColorState.inFlightRow ? ` · row${batchColorState.inFlightRow}` : ''}`;
     else if (current >= total && !(batchColorState.failedRows || []).length) status = `换色已结束 · 成功 ${batchColorState.successCount} 款`;
-    else status = '换色已暂停';
+    else status = '换色已暂停' + (batchColorState.pausedReason ? ` · ${batchColorState.pausedReason}` : '');
     if (colorBatchFileKey() !== currentFileKey()) status = `原文件「${batchColorState.fileFolder || '默认'}」：${status}`;
     updateBatchColorStatus(status);
 }

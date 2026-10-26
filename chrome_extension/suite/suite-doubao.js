@@ -22,7 +22,9 @@ const SuiteDoubao = (() => {
         bound: null,              // { taskId, fileKey, rowNum, executionId }
         baselineUrls: [],
         sending: false,
-        sent: false
+        sent: false,
+        quotaSnapshot: null,      // 额度检测的时间边界快照（suite-baseline 时记录）
+        quotaHits: 0              // 额度连续命中次数（与换色侧同口径：连续 2 次才算，未命中清零）
     };
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -125,6 +127,156 @@ const SuiteDoubao = (() => {
             for (const k of strip) u.searchParams.delete(k);
             return u.origin + u.pathname + (u.searchParams.toString() ? '?' + u.searchParams.toString() : '');
         } catch (_) { return url; }
+    }
+
+    /* ---------- 额度耗尽检测 ----------
+       content/doubao.js 与 suite-doubao.js 是两个不同的注入入口，各自的函数作用域独立，
+       因此这里保留一份等价实现（不要跨文件复用，否则任一侧被单独注入就会失效）。
+       时间边界：suite-baseline（发送前）调用 markQuotaBaseline() 记录当时的消息节点数/
+       最后一条消息文本/已存在的提示条文本；之后只认「新增或原地更新」的内容，
+       避免历史消息里出现过「额度已用完」导致整套图都被误判。
+       退化：无快照或节点数变少（会话被重建/恢复已有结果）时一律不判（返回 null），
+       即「宁漏不误」——此时最后几条消息/提示条都可能还是上一轮遗留的旧证据。 */
+
+    // 归一化：去掉所有空白 + 全角转半角，避免「额度 ， 已用完」「额度\u00a0已用完」漏判
+    function normalizeQuotaText(t) {
+        return String(t || '').replace(/[\s\u00a0]+/g, '').replace(/，/g, ',').replace(/：/g, ':');
+    }
+
+    // 命中规则（按优先级）：① /额度,?已用完/ ② 兜底 /升级到标准套餐/ 且 /预计.*恢复/
+    function isQuotaExhaustedText(t) {
+        const n = normalizeQuotaText(t);
+        if (!n) return false;
+        if (/额度,?已用完/.test(n)) return true;
+        return /升级到标准套餐/.test(n) && /预计.*恢复/.test(n);
+    }
+
+    // 恢复时间：原样返回「10月25日03:24」（不转 Date）
+    function parseQuotaResumeAt(t) {
+        try {
+            const m = normalizeQuotaText(t).match(/预计(.{2,30}?)恢复/);
+            return m ? m[1] : null;
+        } catch (_) { return null; }
+    }
+
+    function collectQuotaMessageNodes() {
+        try {
+            const sels = ['.chat-message', '[class*="message-item"]', '[class*="msg-content"]',
+                '[class*="message"]', '[class*="chat-item"]', '[class*="conversation-item"]',
+                'div[data-message-id]', 'div[data-testid*="message"]'];
+            for (const sel of sels) {
+                const found = document.querySelectorAll(sel);
+                if (found && found.length) return Array.from(found);
+            }
+        } catch (_) {}
+        return [];
+    }
+
+    // 排除：输入框内的文本（刚输入的提示词）与我们自己注入的节点
+    function isQuotaExcludedNode(el) {
+        try {
+            if (!el) return true;
+            if (typeof el.closest === 'function') {
+                if (el.closest('textarea, [contenteditable="true"], [role="textbox"]')) return true;
+                if (el.closest('[data-polo-injected="1"]')) return true;
+            }
+            return false;
+        } catch (_) { return true; }
+    }
+
+    function isQuotaVisibleNode(el) {
+        try {
+            if (!el) return false;
+            if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) return false;
+            if (typeof el.offsetHeight === 'number' && el.offsetHeight === 0) return false;
+            return true;
+        } catch (_) { return false; }
+    }
+
+    function collectQuotaNoticeTexts() {
+        const out = [];
+        try {
+            const sels = ['[role="alert"]', '[role="alertdialog"]', '[role="dialog"]',
+                '[class*="toast"]', '[class*="notice"]', '[class*="banner"]', '[class*="warning"]',
+                '[class*="quota"]', '[class*="limit"]', '[class*="upgrade"]', '[class*="modal"]'];
+            for (const sel of sels) {
+                let list = [];
+                try { list = Array.from(document.querySelectorAll(sel) || []); } catch (_) { continue; }
+                for (const el of list) {
+                    if (!isQuotaVisibleNode(el) || isQuotaExcludedNode(el)) continue;
+                    const t = String(el.innerText || el.textContent || '').trim();
+                    if (!t || t.length > 500) continue;
+                    if (out.indexOf(t) < 0) out.push(t);
+                }
+            }
+        } catch (_) {}
+        return out;
+    }
+
+    function markQuotaBaseline() {
+        try {
+            S.quotaHits = 0;   // 新的一轮重新计连续命中
+            const nodes = collectQuotaMessageNodes();
+            S.quotaSnapshot = {
+                count: nodes.length,
+                lastText: nodes.length ? String(nodes[nodes.length - 1].innerText || '').slice(0, 300) : '',
+                notices: collectQuotaNoticeTexts(),
+                at: Date.now()
+            };
+        } catch (_) {
+            S.quotaSnapshot = null;
+        }
+        return S.quotaSnapshot;
+    }
+
+    // 返回 null 或 { exhausted:true, text, resumeAt }
+    function detectQuotaExhausted() {
+        try {
+            const nodes = collectQuotaMessageNodes();
+            const snap = S.quotaSnapshot;
+            let candidates = [];
+            if (snap && typeof snap.count === 'number' && nodes.length >= snap.count) {
+                candidates = nodes.slice(snap.count);
+                // 同一条气泡原地更新（豆包常把回复写进最后一个节点）：文本变了也算新增
+                if (snap.count > 0) {
+                    const prev = nodes[snap.count - 1];
+                    const prevText = String((prev && prev.innerText) || '').slice(0, 300);
+                    if (prevText && prevText !== snap.lastText) candidates.unshift(prev);
+                }
+            } else {
+                // 退化：无快照，或节点数变少（会话被重建/换新对话/长对话虚拟化）→ 基线不可信。
+                // 取舍：漏判的代价是退回「100 秒超时 / 任务记录失败」兜底（用户再点一次继续即可）；
+                // 误判的代价是整批莫名停住、反复继续都推不动，后者更糟。
+                // 所以直接返回 null：既不扫最后 3 条消息，也不扫提示条（两者都可能是上一轮残留）。
+                return null;
+            }
+
+            for (let i = candidates.length - 1; i >= 0; i--) {
+                const el = candidates[i];
+                if (isQuotaExcludedNode(el)) continue;
+                const text = String((el && el.innerText) || '');
+                if (!isQuotaExhaustedText(text)) continue;
+                return { exhausted: true, text: text.trim().slice(0, 200), resumeAt: parseQuotaResumeAt(text) };
+            }
+
+            const known = (snap && Array.isArray(snap.notices)) ? snap.notices : [];
+            for (const t of collectQuotaNoticeTexts()) {
+                if (known.indexOf(t) >= 0) continue;   // 发送前就存在的提示条不算本轮证据
+                if (!isQuotaExhaustedText(t)) continue;
+                return { exhausted: true, text: t.slice(0, 200), resumeAt: parseQuotaResumeAt(t) };
+            }
+            return null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    // 额度判定统一口径（与换色侧一致）：连续 2 次命中才算额度用完，命中 +1、未命中清零。
+    // 一次瞬时提示条（toast 刚好在渲染/消失）不足以判死整套图任务。
+    function quotaHitStreak() {
+        const hit = detectQuotaExhausted();
+        S.quotaHits = (hit && hit.exhausted) ? (S.quotaHits || 0) + 1 : 0;
+        return S.quotaHits >= 2 ? hit : null;
     }
 
     /* ---------- 上传素材 ---------- */
@@ -265,6 +417,10 @@ const SuiteDoubao = (() => {
         let last = [];
         while (Date.now() < deadline) {
             await sleep(2000);
+            const quotaHit = quotaHitStreak();   // 等图阶段同样顺手判额度（连续 2 次命中才算）
+            if (quotaHit && quotaHit.exhausted) {
+                return { ok: false, images: [], rawCount: 0, dedupedByUrlKey: 0, mergedGroups: 0, baselineCount: base.length, quota: quotaHit };
+            }
             // 豆包在视口外保留SVG占位图；逐张滚入视口触发真实图片加载。
             for(const image of document.querySelectorAll('img')) {
                 if(String(image.className||'').startsWith('image-') && String(image.currentSrc||image.src||'').startsWith('data:image/svg')) {
@@ -325,6 +481,8 @@ const SuiteDoubao = (() => {
 
     /* ---------- 消息入口 ---------- */
     async function pollNewImages(baselineUrls,expectCount) {
+        const quotaHit=quotaHitStreak();   // 每轮轮询顺手判额度：连续 2 次命中才让任务失败
+        if(quotaHit&&quotaHit.exhausted)return {ready:false,count:0,quota:quotaHit};
         for(const image of document.querySelectorAll('img'))if(String(image.className||'').startsWith('image-')&&String(image.src||'').startsWith('data:image/svg')){image.scrollIntoView({block:'center',behavior:'instant'});await sleep(400);}
         const base=baselineUrls||S.baselineUrls;
         const baseKeys=new Set(base.map(contentKeyOf));
@@ -344,13 +502,18 @@ const SuiteDoubao = (() => {
                 if (a === 'suite-probe') { sendResponse(Object.assign({ success: true }, probe())); return; }
                 if(a==='suite-recover-bind') {
                     if(S.bound&&S.bound.taskId!==request.binding?.taskId)throw new Error('豆包页已绑定其他任务，不能恢复到此对话');
-                    S.bound=request.binding;S.sent=true;S.baselineUrls=request.baselineUrls||[];sendResponse({success:true});return;
+                    S.bound=request.binding;S.sent=true;S.baselineUrls=request.baselineUrls||[];
+                    // 恢复场景取不到「发送前」快照 → 清空后等价于「额度检测关闭」：
+                    // 退化路径已改为直接返回 null（宁漏不误），不会把历史额度气泡当成这一轮的证据。
+                    S.quotaHits=0;S.quotaSnapshot=null;
+                    sendResponse({success:true});return;
                 }
                 if (a === 'suite-baseline') {
                     if (S.bound && S.bound.taskId === request.binding?.taskId && S.sent) throw new Error('该任务已经发送，拒绝重置发送状态');
                     S.bound = request.binding || null;
                     S.sent = false;
                     S.baselineUrls = getAllImageUrls();
+                    markQuotaBaseline();    // 额度检测的时间边界：发送前快照
                     sendResponse({ success: true, baselineUrls: S.baselineUrls });
                     return;
                 }
@@ -375,7 +538,7 @@ const SuiteDoubao = (() => {
         return true;
     });
 
-    globalThis.SuiteDoubao = { probe, verifySettings, getAllImageUrls, materializeImages, uploadAssets, typePrompt, sendOnce, waitForNewImages, findInput, findSendButton };
+    globalThis.SuiteDoubao = { probe, verifySettings, getAllImageUrls, materializeImages, uploadAssets, typePrompt, sendOnce, waitForNewImages, pollNewImages, findInput, findSendButton, detectQuotaExhausted, markQuotaBaseline };
     log('套图执行器已注入');
 })();
 }

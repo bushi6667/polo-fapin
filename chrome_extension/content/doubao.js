@@ -372,6 +372,167 @@ function getLastMessageInfo() {
     return { count: msgs.length, text: text.slice(0, 120), hasLoading, isAI, isUser };
 }
 
+// ============================================================
+// 豆包额度耗尽检测（「近 7 天额度已用完」/「当前时段额度已用完」）
+//
+// 时间边界：发送提示词前调用 markQuotaBaseline() 记录当时的
+//   ① 消息节点数量 + 最后一条消息文本
+//   ② 已存在的提示条/toast 文本
+// 之后只在「新增/原地更新」的内容里找额度字样，避免历史消息里出现过
+// 这几个字导致每一款都被判额度。
+// 退化策略：拿不到快照（或会话被重建、节点数变少）时一律不判（返回 null），
+//   即「宁漏不误」——此时最后几条消息和提示条都可能是上一轮遗留的旧证据。
+// 任何异常都返回 null —— 额度检测绝不能影响生图主流程。
+// ============================================================
+
+// 状态用 var：内容脚本被重复注入时不因重复声明抛错
+var quotaSnapshot = null;
+
+// 归一化：去掉所有空白 + 全角转半角，避免「额度 ， 已用完」「额度\u00a0已用完」漏判
+function normalizeQuotaText(t) {
+    return String(t || '').replace(/[\s\u00a0]+/g, '').replace(/，/g, ',').replace(/：/g, ':');
+}
+
+// 命中规则（按优先级）：① /额度,?已用完/ ② 兜底 /升级到标准套餐/ 且 /预计.*恢复/
+function isQuotaExhaustedText(t) {
+    const n = normalizeQuotaText(t);
+    if (!n) return false;
+    if (/额度,?已用完/.test(n)) return true;
+    return /升级到标准套餐/.test(n) && /预计.*恢复/.test(n);
+}
+
+// 恢复时间：从原文抓「预计 … 恢复」，原样返回（如「10月25日03:24」，不转 Date）
+function parseQuotaResumeAt(t) {
+    try {
+        const n = normalizeQuotaText(t);
+        const m = n.match(/预计(.{2,30}?)恢复/);
+        return m ? m[1] : null;
+    } catch (_) { return null; }
+}
+
+// 对话消息节点（与 getLastMessageInfo 用同一组选择器，两处对「消息」的定义保持一致）
+function collectQuotaMessageNodes() {
+    try {
+        const sels = [
+            '.chat-message',
+            '[class*="message-item"]',
+            '[class*="msg-content"]',
+            '[class*="message"]',
+            '[class*="chat-item"]',
+            '[class*="conversation-item"]',
+            'div[data-message-id]',
+            'div[data-testid*="message"]',
+        ];
+        for (const sel of sels) {
+            const found = document.querySelectorAll(sel);
+            if (found && found.length) return Array.from(found);
+        }
+    } catch (_) {}
+    return [];
+}
+
+// 排除：输入框内的文本（刚输入的提示词）与我们自己注入的节点
+function isQuotaExcludedNode(el) {
+    try {
+        if (!el) return true;
+        if (typeof el.closest === 'function') {
+            if (el.closest('textarea, [contenteditable="true"], [role="textbox"]')) return true;
+            if (el.closest('[data-polo-injected="1"]')) return true;
+        }
+        return false;
+    } catch (_) { return true; }
+}
+
+function isQuotaVisibleNode(el) {
+    try {
+        if (!el) return false;
+        if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) return false;
+        if (typeof el.offsetHeight === 'number' && el.offsetHeight === 0) return false;
+        return true;
+    } catch (_) { return false; }
+}
+
+// 提示条 / toast / 弹窗：类名随站点改版，语义属性与常见类名段一起找
+function collectQuotaNoticeTexts() {
+    const out = [];
+    try {
+        const sels = [
+            '[role="alert"]', '[role="alertdialog"]', '[role="dialog"]',
+            '[class*="toast"]', '[class*="notice"]', '[class*="banner"]', '[class*="warning"]',
+            '[class*="quota"]', '[class*="limit"]', '[class*="upgrade"]', '[class*="modal"]',
+        ];
+        for (const sel of sels) {
+            let list = [];
+            try { list = Array.from(document.querySelectorAll(sel) || []); } catch (_) { continue; }
+            for (const el of list) {
+                if (!isQuotaVisibleNode(el) || isQuotaExcludedNode(el)) continue;
+                const t = String(el.innerText || el.textContent || '').trim();
+                if (!t || t.length > 500) continue;
+                if (out.indexOf(t) < 0) out.push(t);
+            }
+        }
+    } catch (_) {}
+    return out;
+}
+
+// 发送前调用：记录本轮的时间边界快照（发送失败/超时后只用它之后的内容判定）
+function markQuotaBaseline() {
+    try {
+        const nodes = collectQuotaMessageNodes();
+        quotaSnapshot = {
+            count: nodes.length,
+            lastText: nodes.length ? String(nodes[nodes.length - 1].innerText || '').slice(0, 300) : '',
+            notices: collectQuotaNoticeTexts(),
+            at: Date.now()
+        };
+    } catch (_) {
+        quotaSnapshot = null;
+    }
+    return quotaSnapshot;
+}
+
+// 返回 null 或 { exhausted:true, text, resumeAt }
+function detectQuotaExhausted() {
+    try {
+        const nodes = collectQuotaMessageNodes();
+        const snap = quotaSnapshot;
+        let candidates = [];
+        if (snap && typeof snap.count === 'number' && nodes.length >= snap.count) {
+            candidates = nodes.slice(snap.count);
+            // 同一条气泡原地更新（豆包常把回复写进最后一个节点）：文本变了也算新增
+            if (snap.count > 0) {
+                const prev = nodes[snap.count - 1];
+                const prevText = String((prev && prev.innerText) || '').slice(0, 300);
+                if (prevText && prevText !== snap.lastText) candidates.unshift(prev);
+            }
+        } else {
+            // 退化：无快照，或节点数变少（会话被重建/换新对话/长对话虚拟化）→ 基线不可信。
+            // 取舍：漏判的代价是退回「100 秒超时 / 任务记录失败」兜底（用户再点一次继续即可）；
+            // 误判的代价是整批莫名停住、反复继续都推不动（还要手动删对话），后者更糟。
+            // 所以这里直接返回 null：既不扫最后 3 条消息，也不扫提示条（两者都可能是上一轮残留）。
+            return null;
+        }
+
+        for (let i = candidates.length - 1; i >= 0; i--) {
+            const el = candidates[i];
+            if (isQuotaExcludedNode(el)) continue;
+            const text = String((el && el.innerText) || '');
+            if (!isQuotaExhaustedText(text)) continue;
+            return { exhausted: true, text: text.trim().slice(0, 200), resumeAt: parseQuotaResumeAt(text) };
+        }
+
+        const knownNotices = (snap && Array.isArray(snap.notices)) ? snap.notices : [];
+        for (const t of collectQuotaNoticeTexts()) {
+            if (knownNotices.indexOf(t) >= 0) continue;   // 发送前就存在的提示条不算本轮证据
+            if (!isQuotaExhaustedText(t)) continue;
+            return { exhausted: true, text: t.slice(0, 200), resumeAt: parseQuotaResumeAt(t) };
+        }
+        return null;
+    } catch (_) {
+        return null;
+    }
+}
+
 // 轮询等待图片生成完成：以现有图为基准，检测到 >= minImages 张新图即返回；
 // 超时（默认 10 分钟）返回已检测到的新图（可能不足）
 async function waitForGenerationComplete(timeout = 600000, minImages = 4) {
@@ -435,6 +596,7 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
     const startTime = Date.now();
     let allNewUrls = [];
     let lastImageCount = 0;
+    let quotaHitStreak = 0;   // 额度耗尽连续命中次数（避免偶发误判打断正常生成）
 
     while (Date.now() - startTime < timeout) {
         await sleep(2000);
@@ -444,6 +606,16 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
             throw new Error('豆包生成失败：出了点问题，请稍后重试');
         }
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
+
+        // 额度耗尽：等图阶段连续 2 次命中才提前结束（结果为空，由 runColorTask 统一判定并回传）
+        if (elapsed >= 30 && typeof detectQuotaExhausted === 'function') {
+            const quotaHit = detectQuotaExhausted();
+            quotaHitStreak = (quotaHit && quotaHit.exhausted) ? quotaHitStreak + 1 : 0;
+            if (quotaHitStreak >= 2) {
+                log('⚠️ 检测到豆包额度已用完，提前结束等图', 'warn');
+                break;
+            }
+        }
 
         const currentUrls = getAllImageUrls();
         const newUrls = currentUrls.filter(u => {
@@ -566,6 +738,8 @@ async function runColorTask(task, onAccepted) {
         if (colorTask !== task || !isProcessing) return;
 
         results.step = '发送消息';
+        // 时间边界：记录发送前的消息/提示快照，之后只认新增内容里的额度字样
+        if (typeof markQuotaBaseline === 'function') markQuotaBaseline();
         await sendMessage();
         if (colorTask !== task || !isProcessing) return;
 
@@ -580,19 +754,32 @@ async function runColorTask(task, onAccepted) {
         results.error = e.message;
     }
 
+    // 额度耗尽判定：只在本轮一张图都没取到时做（取到图说明额度没拦住，避免误判）
+    let quota = null;
+    if (!results.success && typeof detectQuotaExhausted === 'function') {
+        const q = detectQuotaExhausted();
+        if (q && q.exhausted) {
+            quota = { exhausted: true, text: q.text, resumeAt: q.resumeAt || null };
+            log('⚠️ 豆包额度已用完' + (q.resumeAt ? `（预计 ${q.resumeAt} 恢复）` : ''), 'warn');
+        }
+    }
+
     if (colorTask !== task || !isProcessing) return;
     isProcessing = false;
     // 任务完成后停止心跳
     stopHeartbeatForColorTask();
 
-    chrome.runtime.sendMessage({
+    const completeMessage = {
         action: 'colorTaskComplete',
         results: results,
         rowNum: rowNum,
         // 由【本执行任务自身】携带批量标识返回：后台不得从可变的 pendingColorTask 反推身份
         batchId: (task && task.batchId) || null,
         executionId: task && task.executionId
-    }).catch(() => {});
+    };
+    // 未命中额度时不加该字段，保持旧消息结构（不影响旧逻辑）
+    if (quota) completeMessage.quota = quota;
+    chrome.runtime.sendMessage(completeMessage).catch(() => {});
 
     return results;
 }
@@ -677,6 +864,7 @@ async function runAiEditTask(task) {
 // 页面顶部居中 toast 提示
 function showToast(msg) {
     const toast = document.createElement('div');
+    toast.setAttribute('data-polo-injected', '1');   // 额度检测不得把我们自己注入的节点当页面提示
     toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.8);color:#fff;padding:10px 20px;border-radius:8px;font-size:14px;z-index:99999;';
     toast.textContent = msg;
     document.body.appendChild(toast);
