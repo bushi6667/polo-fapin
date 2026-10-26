@@ -132,11 +132,16 @@ const SuiteDoubao = (() => {
     /* ---------- 额度耗尽检测 ----------
        content/doubao.js 与 suite-doubao.js 是两个不同的注入入口，各自的函数作用域独立，
        因此这里保留一份等价实现（不要跨文件复用，否则任一侧被单独注入就会失效）。
-       时间边界：suite-baseline（发送前）调用 markQuotaBaseline() 记录当时的消息节点数/
-       最后一条消息文本/已存在的提示条文本；之后只认「新增或原地更新」的内容，
+       时间边界：suite-baseline（发送前）调用 markQuotaBaseline() 记录当时的锚点文本
+       （最后一条可见消息）+ 节点数（仅兜底）/已存在的提示条文本；之后用「文本锚点」
+       定位：找到仍含快照末条文本的节点，只认它之后「新增或原地追加」的内容，
        避免历史消息里出现过「额度已用完」导致整套图都被误判。
-       退化：无快照或节点数变少（会话被重建/恢复已有结果）时一律不判（返回 null），
+       不用节点数量做基线——命中数随渲染抖动（同一会话几秒内 29→1、93→19）。
+       退化：无快照、或锚点文本彻底找不到（会话被重建/清空）时一律不判（返回 null），
        即「宁漏不误」——此时最后几条消息/提示条都可能还是上一轮遗留的旧证据。 */
+
+    // 锚点文本截断长度：快照存文本与判定比文本必须同一口径，否则截断差异会被误当成「变长」
+    const QUOTA_ANCHOR_MAX = 200;
 
     // 归一化：去掉所有空白 + 全角转半角，避免「额度 ， 已用完」「额度\u00a0已用完」漏判
     function normalizeQuotaText(t) {
@@ -159,17 +164,38 @@ const SuiteDoubao = (() => {
         } catch (_) { return null; }
     }
 
+    // 额度检测专用：只用精确稳定的选择器，div[data-message-id] > .chat-message > [class*="message-item"]
+    // 禁用 [class*="message"]（命中容器/气泡外层/内层段落，数量抖动）、
+    // [class*="chat-item"] 与 [class*="conversation-item"]（命中侧边栏会话列表）
     function collectQuotaMessageNodes() {
         try {
-            const sels = ['.chat-message', '[class*="message-item"]', '[class*="msg-content"]',
-                '[class*="message"]', '[class*="chat-item"]', '[class*="conversation-item"]',
-                'div[data-message-id]', 'div[data-testid*="message"]'];
-            for (const sel of sels) {
+            const precise = ['div[data-message-id]', '.chat-message', '[class*="message-item"]'];
+            for (const sel of precise) {
+                const found = document.querySelectorAll(sel);
+                if (found && found.length) return Array.from(found);
+            }
+            const loose = ['[class*="msg-content"]', 'div[data-testid*="message"]'];
+            for (const sel of loose) {
                 const found = document.querySelectorAll(sel);
                 if (found && found.length) return Array.from(found);
             }
         } catch (_) {}
         return [];
+    }
+
+    // 快照锚点文本：最后一个「有文本且可见」的节点，截断到 QUOTA_ANCHOR_MAX
+    function lastQuotaMessageText(nodes) {
+        let fallback = '';
+        for (let i = nodes.length - 1; i >= 0; i--) {
+            const el = nodes[i];
+            if (!el) continue;
+            const t = String(el.innerText || '');
+            if (!t) continue;
+            if (!fallback) fallback = t;
+            if (!isQuotaVisibleNode(el)) continue;
+            return t.slice(0, QUOTA_ANCHOR_MAX);
+        }
+        return fallback.slice(0, QUOTA_ANCHOR_MAX);
     }
 
     // 排除：输入框内的文本（刚输入的提示词）与我们自己注入的节点
@@ -219,7 +245,7 @@ const SuiteDoubao = (() => {
             const nodes = collectQuotaMessageNodes();
             S.quotaSnapshot = {
                 count: nodes.length,
-                lastText: nodes.length ? String(nodes[nodes.length - 1].innerText || '').slice(0, 300) : '',
+                lastText: lastQuotaMessageText(nodes),
                 notices: collectQuotaNoticeTexts(),
                 at: Date.now()
             };
@@ -232,24 +258,36 @@ const SuiteDoubao = (() => {
     // 返回 null 或 { exhausted:true, text, resumeAt }
     function detectQuotaExhausted() {
         try {
-            const nodes = collectQuotaMessageNodes();
             const snap = S.quotaSnapshot;
-            let candidates = [];
-            if (snap && typeof snap.count === 'number' && nodes.length >= snap.count) {
-                candidates = nodes.slice(snap.count);
-                // 同一条气泡原地更新（豆包常把回复写进最后一个节点）：文本变了也算新增
-                if (snap.count > 0) {
-                    const prev = nodes[snap.count - 1];
-                    const prevText = String((prev && prev.innerText) || '').slice(0, 300);
-                    if (prevText && prevText !== snap.lastText) candidates.unshift(prev);
+            if (!snap) return null;                        // 无快照 → 不判
+            const nodes = collectQuotaMessageNodes();
+            const needle = String(snap.lastText || '');
+
+            // ① 文本锚点：找仍包含快照末条文本的节点（从后往前 = 取最后一个匹配，
+            //    文本重复时靠后的那个才最接近快照的末条消息，避免把上一轮旧气泡算成本轮证据）
+            let anchorIdx = -1;
+            if (needle) {
+                for (let i = nodes.length - 1; i >= 0; i--) {
+                    const t = String((nodes[i] && nodes[i].innerText) || '');
+                    if (t && t.indexOf(needle) >= 0) { anchorIdx = i; break; }
                 }
+                // 锚点彻底找不到 → 会话被换掉/清空，基线不可信 → 宁漏不误
+                if (anchorIdx < 0) return null;
             } else {
-                // 退化：无快照，或节点数变少（会话被重建/换新对话/长对话虚拟化）→ 基线不可信。
-                // 取舍：漏判的代价是退回「100 秒超时 / 任务记录失败」兜底（用户再点一次继续即可）；
-                // 误判的代价是整批莫名停住、反复继续都推不动，后者更糟。
-                // 所以直接返回 null：既不扫最后 3 条消息，也不扫提示条（两者都可能是上一轮残留）。
-                return null;
+                // 快照时没有可作锚点的文本：只能按位置兜底，节点数变少时依旧不判
+                const baseCount = (typeof snap.count === 'number' && snap.count > 0) ? snap.count : 0;
+                if (nodes.length < baseCount) return null;
+                anchorIdx = baseCount - 1;
             }
+
+            // ② 从锚点之后开始扫；锚点节点原地追加了内容（比快照长）时把它自己也纳入
+            let from = anchorIdx + 1;
+            if (anchorIdx >= 0) {
+                const anchorEl = nodes[anchorIdx];
+                const cur = String((anchorEl && anchorEl.innerText) || '').slice(0, QUOTA_ANCHOR_MAX);
+                if (cur && cur !== needle) from = anchorIdx;
+            }
+            const candidates = nodes.slice(Math.max(0, from));
 
             for (let i = candidates.length - 1; i >= 0; i--) {
                 const el = candidates[i];

@@ -299,6 +299,77 @@ function suiteEnv(options) {
         ok(env.sandbox.suiteBatchQuotaPause(3) === null, '归一化：其它行残留额度错误不误伤当前行');
     }
 
+    // ---- 6) 额度检测基线：文本锚点（真机上节点数会在几秒内 29→1，不能因此漏判） ----
+    // 生产逻辑在 chrome_extension/content/doubao.js，suite-doubao.js 是同源副本（本组只校验换色侧，
+    // 套图侧同一份逻辑由 tests/manual/quota-probe.js + 真机探针覆盖）。
+    {
+        const DOUBAO = fs.readFileSync(path.join(__dirname, '..', 'chrome_extension/content/doubao.js'), 'utf8')
+            .split('\n').map(l => l.replace(/\r$/, ''));
+        function doubaoFn(name) {
+            const s = DOUBAO.findIndex(l => new RegExp('^function ' + name + '\\s*\\(').test(l));
+            const e = DOUBAO.findIndex((l, i) => i > s && l === '}');
+            if (s < 0 || e < 0) throw new Error('未找到函数: ' + name);
+            return DOUBAO.slice(s, e + 1).join('\n');
+        }
+        const page = { nodes: [], noise: {} };
+        const mkNode = t => ({ innerText: t, offsetHeight: 20, getClientRects: () => [{}], closest: () => null });
+        const doc = {
+            querySelectorAll: sel => (sel === 'div[data-message-id]' ? page.nodes.slice() : (page.noise[sel] || [])),
+            querySelector: () => null
+        };
+        const sb = { console: { log() {} }, document: doc };
+        vm.createContext(sb);
+        vm.runInContext(['var QUOTA_ANCHOR_MAX = 200;', 'var quotaSnapshot = null;',
+            'normalizeQuotaText', 'isQuotaExhaustedText', 'parseQuotaResumeAt',
+            'collectQuotaMessageNodes', 'lastQuotaMessageText', 'isQuotaExcludedNode',
+            'isQuotaVisibleNode', 'collectQuotaNoticeTexts', 'markQuotaBaseline', 'detectQuotaExhausted'
+        ].map(x => (x.indexOf('var ') === 0 ? x : doubaoFn(x))).join('\n\n'), sb);
+        const mark = () => vm.runInContext('markQuotaBaseline()', sb);
+        const detect = () => vm.runInContext('detectQuotaExhausted()', sb);
+        const collect = () => vm.runInContext('collectQuotaMessageNodes()', sb);
+
+        const ANCHOR = 'AI：第一轮 5 张图已生成';
+        const QUOTA = '额度已用完，预计 10 月 26 日 09:00 恢复';
+        for (let i = 1; i <= 29; i++) page.nodes.push(mkNode(i === 29 ? ANCHOR : '历史消息 ' + i));
+        const snap = mark();
+        ok(snap.count === 29 && snap.lastText === ANCHOR, '锚点基线：快照存的是最后一条消息文本', String(snap.lastText));
+
+        // 渲染抖动：节点数骤降到 2（锚点 + 新增额度气泡）→ 仍必须判出额度
+        page.nodes = [mkNode(ANCHOR), mkNode(QUOTA)];
+        const hit = detect();
+        ok(!!(hit && hit.exhausted), '锚点基线：29→2 仍判出额度（不再因数量变少 null）', JSON.stringify(hit));
+        ok(!!(hit && hit.resumeAt === '10月26日09:00'), '锚点基线：resumeAt 解析正确', hit && hit.resumeAt);
+
+        // 锚点原地追加额度文案（豆包把回复写进同一个气泡）→ 命中
+        page.nodes = [mkNode('用户：出 5 张图'), mkNode('AI：正在生成…')];
+        mark();
+        page.nodes[1].innerText = 'AI：正在生成…\n' + QUOTA;
+        ok(!!(detect() || {}).exhausted, '锚点基线：锚点节点原地追加额度文案也命中');
+
+        // 锚点被删（真换会话）→ null，宁漏不误
+        page.nodes = [mkNode('用户：出 5 张图'), mkNode('AI：正在生成…')];
+        mark();
+        page.nodes = [mkNode('完全不同的会话'), mkNode('另一个问题')];
+        ok(detect() === null, '锚点基线：锚点消失（换会话）→ 不判');
+
+        // 无新增 / 无额度文案 → 不判
+        page.nodes = [mkNode(ANCHOR)];
+        mark();
+        page.nodes = [mkNode(ANCHOR), mkNode('AI：图 1 好了')];
+        ok(detect() === null, '锚点基线：只有普通新增消息 → 不判');
+
+        // 选择器：抖动/侧边栏选择器一律不采（数量基线不稳的根因）
+        page.nodes = [];
+        page.noise = {
+            '[class*="message"]': new Array(29).fill(0).map(() => mkNode('x')),
+            '[class*="conversation-item"]': new Array(96).fill(0).map(() => mkNode('侧边栏')),
+            '[class*="chat-item"]': new Array(96).fill(0).map(() => mkNode('侧边栏'))
+        };
+        ok(collect().length === 0, '锚点基线：不采 [class*="message"]/chat-item/conversation-item', String(collect().length));
+        page.nodes = [mkNode('a'), mkNode('b')];
+        ok(collect().length === 2, '锚点基线：优先用 div[data-message-id]');
+    }
+
     console.log(`通过 ${pass}，失败 ${fail}`);
     if (fail) console.log('失败项：' + failures.join(' / '));
     process.exit(fail ? 1 : 0);
