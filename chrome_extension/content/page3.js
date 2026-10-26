@@ -1649,7 +1649,6 @@ async function fillColorsPage3(product) {
     }
 
     let uploadedCount = 0;
-    let changed = false;
     const getColorInputs = () => Array.from(document.querySelectorAll('.posting-field-color-select input[role="colorCombobox"]')).filter(el => el.getBoundingClientRect().height > 0);
     if (getColorInputs().length > colorList.length) return ['⚠️ 颜色规格超过4行，请先核对多余行'];
 
@@ -1674,7 +1673,6 @@ async function fillColorsPage3(product) {
         }
 
         if (targetInput.value !== color.label) {
-            changed = true;
             targetInput.scrollIntoView({ block: 'center' });
             await realClick(targetInput);
             targetInput.focus();
@@ -1701,6 +1699,21 @@ async function fillColorsPage3(product) {
                 await sleep3(600);
                 targetInput = getColorInputs()[i];
             }
+            // 关闭颜色下拉浮层：Next 浮层不响应 blur（只认 Esc / 外部 mousedown），
+            // 不关的话浮层一直展开，会挡住并误点下一行的输入框
+            // （不要改用 common.js 的 closeOverlays：部分测试沙箱只加载本文件片段会 ReferenceError）
+            try {
+                targetInput = getColorInputs()[i] || targetInput;
+                if (targetInput) targetItem = targetInput.closest('.item, [role="item"]') || targetItem;
+                (targetInput || document.body).dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', code:'Escape', keyCode:27, bubbles:true}));
+                await sleep3(80);
+                // 浮层监听的是 mousedown，click 未必够；用 mousedown+mouseup+click 模拟真实点击，避免误伤其它 click 处理
+                const t = document.body;
+                t.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+                t.dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+                t.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+                await sleep3(150);
+            } catch (_) {}
             if (!targetInput || targetInput.value !== color.label) {
                 results.push(`⚠️ ${color.label} 文字未生效，当前值: ${targetInput?.value || '空'}`);
                 continue;
@@ -1733,7 +1746,7 @@ async function fillColorsPage3(product) {
         let imagePath = pathResult?.path;
         
         if (!imagePath && pathResult?.url) {
-            log(`� ${color.label} 无本地路径，直接用Blob方式上传...`, 'warn');
+            log(`ℹ️ ${color.label} 无本地路径，直接用Blob方式上传...`, 'warn');
             const blobRes = await uploadColorImageViaBlob(color.key, color.label, i, pathResult.url);
             if (blobRes?.ok) {
                 uploadedCount++;
@@ -1850,7 +1863,10 @@ async function fillColorsPage3(product) {
     const complete = actual.length === colorList.length && actual.every((input, index) =>
         input.value === colorList[index].label && Array.from(input.closest('.item, [role="item"]')?.querySelectorAll('.value-preview.uploaded img') || []).some(img => img.getAttribute('src')));
     results.push(`${complete ? '✅' : '⚠️'} 颜色规格: ${complete ? '4种文字和图片已核对' : '文字或图片仍有缺项'}，本次上传 ${uploadedCount} 张图`);
-    if (changed && complete) results.push(...await fillBatchQtyPage3(product));
+    // 批量库存不在这里跑：fillAllPage3 在 fill_colors 之后本来就有独立的
+    // fill_batch_qty 步骤，重复执行时第二遍可能落在被颜色筛选后的表上。
+    // 这里只给提示，让单独执行"填颜色"时用户知道库存由 10000 步骤统一填。
+    results.push('ℹ️ 批量库存由「批量编辑10000」步骤统一执行');
     return results;
 }
 
@@ -1873,16 +1889,34 @@ async function fillSizesPage3(product) {
         await sleep3(300);
     }
     const szMap = {'S':'S','M':'M','L':'L','XL':'Xl','2XL':'2 XL','3XL':'3 XL'};
+    // 归一化比较：页面文案可能是 'Xl' / '2 XL'，配置里是 'XL' / '2XL'
+    const norm = t => String(t || '').replace(/\s+/g, '').toLowerCase();
+    // 必须保留全局扫描（按 .next-checkbox-group 限定在本页结构不稳定），
+    // 但要排除表头/筛选浮层里的同名复选框：.next-checkbox-wrapper 是通用类，
+    // 表头筛选浮层里也有同名项，误点会把 SKU 表筛掉
+    const inFilterLayer = el => !!el.closest('thead, .next-table-header, .next-overlay-wrapper, .next-table-fixed, [class*="filter"]');
+    // 统计实际命中数：原本已选中 + 本次新勾都算命中，避免"一个都没勾却报成功"
+    const hitSizes = [];
     defaultSizes.forEach(s => {
         const cb = szMap[s] || s;
+        let hit = false;
         document.querySelectorAll('.next-checkbox-wrapper .next-checkbox-label').forEach(l => {
-            if ((l.innerText || '').trim() === cb) {
+            if (inFilterLayer(l)) return;
+            if (norm(l.innerText) === norm(cb)) {
                 const wrapper = l.closest('.next-checkbox-wrapper');
-                if (wrapper && !wrapper.classList.contains('checked')) wrapper.click();
+                if (wrapper) {
+                    hit = true;
+                    if (!wrapper.classList.contains('checked')) wrapper.click();
+                }
             }
         });
+        if (hit) hitSizes.push(s);
     });
-    results.push(`✅ 尺码: ${defaultSizes.join(', ')}`);
+    if (hitSizes.length > 0) {
+        results.push(`✅ 尺码: ${defaultSizes.join(', ')}（共 ${hitSizes.length}/${defaultSizes.length}）`);
+    } else {
+        results.push('⚠️ 尺码未勾选任何一项，请手动检查（可能是筛选浮层排除过宽）');
+    }
     return results;
 }
 
@@ -2302,13 +2336,10 @@ async function fillLadderPricePage3(product) {
 //   2. 不同页面结构触发方式不同
 //   3. 只输入不触发的话值不会应用到SKU行
 // 解决方案:
-//   1. 在表头 .th-skuStock-input 的批量编辑框逐字输入10000
-//   2. 多种触发方式降级尝试:
-//      - 点击表格body空白区域
-//      - 点击输入框右侧空白
-//      - 按Tab键
-//      - 按Enter键
-//   3. 每次触发后等待500ms检测是否生效
+//   1. 用 setInputValue（原生 value setter）整段写入 10000，避免 React 判为未变化
+//   2. 提交降级: Tab 移焦 → Enter/confirm → blur
+//      （不要用坐标盲点点击：会点开颜色列下拉，导致 SKU 表被筛选）
+//   3. 每次触发后检测是否生效
 // ============================================================
 async function fillBatchQtyPage3(product) {
     const results = [];
@@ -2353,57 +2384,36 @@ async function fillBatchQtyPage3(product) {
     batchInput.focus();
     await sleep3(200);
     
-    // 清空现有值
-    batchInput.value = '';
-    batchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    // 清空 + 写入完整值：必须走原生 value setter（setInputValue），
+    // 直接赋值会被 React value tracker 判定为"值未变化"，onChange 不触发
+    setInputValue(batchInput, '');
     await sleep3(100);
+    setInputValue(batchInput, targetQty);
+    // setInputValue 内部已派发 input + change（common.js:89-90），此处不再重复派发 change，
+    // 只保留原来的 100ms + 200ms 间隔，等受控组件回填完成
+    await sleep3(300);
     
-    // 逐字输入数量
-    for (const ch of targetQty) {
-        batchInput.value += ch;
-        batchInput.dispatchEvent(new Event('input', { bubbles: true }));
-        await sleep3(8);
-    }
-    batchInput.dispatchEvent(new Event('change', { bubbles: true }));
-    
-    await sleep3(200);
-    
-    // 点击空白处确认输入并触发批量映射
-    // 点击表格下方或旁边的空白区域
-    const rect = batchInput.getBoundingClientRect();
-    // 尝试点击表格body区域
-    const tableBody = document.querySelector('.virtualized-table-body, .sku .virtualized-table-body');
-    if (tableBody) {
-        const bodyRect = tableBody.getBoundingClientRect();
-        // 点击表格body的空白处（第一行的左侧）
-        const clickX = bodyRect.left + 50;
-        const clickY = bodyRect.top + 50;
-        const el = document.elementFromPoint(clickX, clickY);
-        if (el) {
-            log('🖱️ 点击表格空白处触发映射...', 'info');
-            await realClick(el);
-            await sleep3(500);
-        }
-    }
-    
-    // 如果上面没成功，尝试点击批量编辑输入框右边的空白
-    if (!tableBody || !document.querySelector('.cell-skuStock input[value="10000"]')) {
-        // 点击输入框右边的区域
-        const rightX = rect.right + 100;
-        const rightY = rect.top + rect.height / 2;
-        const rightEl = document.elementFromPoint(rightX, rightY);
-        if (rightEl && rightEl !== batchInput && !batchInput.contains(rightEl)) {
-            log('🖱️ 点击输入框右侧触发映射...', 'info');
-            await realClick(rightEl);
-            await sleep3(500);
-        }
-    }
-    
-    // 尝试按Tab键
+    // ⚠️ 这里绝不能用坐标盲点点击来"失焦"或触发映射：
+    //   1. 合成 click 不会移动焦点，对"失焦"没有任何作用；
+    //   2. 真鼠标点击会把焦点交给表格最左列（颜色格）并打开颜色下拉，
+    //      导致 SKU 表被颜色筛选，批量数量只作用于被筛选出的行。
+    // 因此只用 Tab 移焦 + Enter/confirm 提交 + blur。
     batchInput.focus();
     await sleep3(100);
     nativeKeyPress('Tab');
     await sleep3(300);
+    
+    // Tab 可能把焦点送进旁边的可编辑单元格，先让它失焦，
+    // 免得后面的 pressEnter/confirmInput 把值提交到错误单元格
+    const activeAfterTab = document.activeElement;
+    if (activeAfterTab && activeAfterTab !== batchInput && (
+        activeAfterTab.tagName === 'INPUT' ||
+        activeAfterTab.tagName === 'TEXTAREA' ||
+        activeAfterTab.isContentEditable
+    )) {
+        activeAfterTab.blur();
+        await sleep3(150);
+    }
     
     // 尝试按Enter键
     pressEnter(batchInput);

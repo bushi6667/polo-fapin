@@ -110,18 +110,6 @@ function pressEnter(el) {
     confirmInput(el);
 }
 
-// 点击元素右侧空白处（用于收起弹出层/失焦）
-function clickBlankNear(el) {
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const x = rect.left + rect.width + 50;
-    const y = rect.top + rect.height / 2;
-    const blank = document.elementFromPoint(x, y);
-    if (blank && blank !== el) {
-        blank.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
-    }
-}
-
 // 原生鼠标事件序列点击（坐标中心 + mousedown/mouseup/click），模拟真人操作
 function nativeMouseClick(el) {
     if (!el) return false;
