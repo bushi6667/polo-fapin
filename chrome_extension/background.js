@@ -228,9 +228,20 @@ const PUBLISH_LEGACY_UPLOADED_KEY = 'polo_publish_legacy_uploaded'; // 旧 uploa
 const PUBLISH_TICK_MS = 30000;                          // 运行期资源巡检间隔上限
 
 const PUBLISH_DEFAULTS = {
-    batchSize: 50,          // 每批固定预填 50 款
+    batchSize: 50,          // 每批款数默认值（用户可在界面上改）
     rowTimeoutMs: 600000    // 单行超时 10 分钟
 };
+const PUBLISH_BATCH_MIN = 1;    // 每批最少 1 款
+const PUBLISH_BATCH_MAX = 500;  // 每批最多 500 款
+
+// 每批款数收敛：空/非数字 → 默认 50；小于 1 → 1；大于 500 → 500；其余原样
+function clampBatchSize(v) {
+    if (v === null || v === undefined || v === '') return PUBLISH_DEFAULTS.batchSize;
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n)) return PUBLISH_DEFAULTS.batchSize;
+    if (n < PUBLISH_BATCH_MIN) return PUBLISH_BATCH_MIN;
+    return Math.min(PUBLISH_BATCH_MAX, n);
+}
 
 let publishTickTimer = null;
 
@@ -330,7 +341,9 @@ async function canOpenPublishPage(t, opts) {
 async function getPublishSettings() {
     return new Promise((resolve) => {
         chrome.storage.local.get(PUBLISH_SETTINGS_KEY, (r) => {
-            const settings = { ...PUBLISH_DEFAULTS, ...(r[PUBLISH_SETTINGS_KEY] || {}), batchSize: 50 };
+            const saved = r[PUBLISH_SETTINGS_KEY] || {};
+            const settings = { ...PUBLISH_DEFAULTS, ...saved };
+            settings.batchSize = clampBatchSize(saved.batchSize);   // 用户设几就是几（夹到 1-500）
             delete settings.pageLimit;
             resolve(settings);
         });
@@ -341,7 +354,8 @@ async function setPublishSettings(patch) {
     return withPublishLock(async () => {
         const cur = await getPublishSettings();
         const next = { ...cur, ...patch };
-        next.batchSize = 50;
+        // 只有明确传了 batchSize 才改；不传则保留当前值（不再无条件覆盖成 50）
+        next.batchSize = clampBatchSize((patch && patch.batchSize !== undefined) ? patch.batchSize : cur.batchSize);
         delete next.pageLimit;
         next.rowTimeoutMs = Math.max(60000, parseInt(next.rowTimeoutMs, 10) || PUBLISH_DEFAULTS.rowTimeoutMs);
         await new Promise(r => chrome.storage.local.set({ [PUBLISH_SETTINGS_KEY]: next }, r));
@@ -360,21 +374,24 @@ async function setPublishSettings(patch) {
 
 // ---------- 任务持久化 ----------
 async function loadPublishTask() {
-    return new Promise((resolve) => {
-        chrome.storage.local.get(PUBLISH_TASK_KEY, (r) => {
-            const task = r[PUBLISH_TASK_KEY] || null;
-            if (task) {
-                task.batchSize = 50;
-                delete task.pageLimit;
-                if (task.state === 'paused' && ['memory', 'monitorFail', 'pageLimit'].includes(task.pauseReason)) {
-                    task.pauseReason = 'manual';
-                    task.pauseDetail = '上次任务已暂停，等待你继续（每批 50 款，无需内存服务）';
-                    task.resourceBlockDetail = '';
-                }
-            }
-            resolve(task);
-        });
+    const task = await new Promise((resolve) => {
+        chrome.storage.local.get(PUBLISH_TASK_KEY, (r) => resolve(r[PUBLISH_TASK_KEY] || null));
     });
+    if (!task) return null;
+    delete task.pageLimit;
+    if (task.batchSize === undefined || task.batchSize === null) {
+        // 老任务没有该字段：用当前设置值补上（不再强制改成 50）
+        const s = await getPublishSettings();
+        task.batchSize = s.batchSize;
+    } else {
+        task.batchSize = clampBatchSize(task.batchSize);
+    }
+    if (task.state === 'paused' && ['memory', 'monitorFail', 'pageLimit'].includes(task.pauseReason)) {
+        task.pauseReason = 'manual';
+        task.pauseDetail = `上次任务已暂停，等待你继续（每批 ${task.batchSize} 款，无需内存服务）`;
+        task.resourceBlockDetail = '';
+    }
+    return task;
 }
 
 async function savePublishTask(task) {
@@ -2395,7 +2412,7 @@ async function handleSharedAction(request, sendResponse, sender) {
             if (publishStoppedSince(epochAtRequest)) {
                 task.state = 'paused'; task.pauseReason = 'manual'; task.pauseDetail = '创建期间收到停止请求';
                 await savePublishTask(task); await broadcastPublishState();
-                return { ok: true, count: rows.length, taskId: task.taskId, batchSize: 50 };
+                return { ok: true, count: rows.length, taskId: task.taskId, batchSize: task.batchSize };
             }
             beginPublishRunIntentFrom(epochAtRequest);
             console.log(`📋 发品任务已创建 ${task.taskId}，共 ${task.total} 款，批次 ${task.batchSize}`);
@@ -2755,7 +2772,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
     if (request.action === 'setPublishSettings') {
-        setPublishSettings(request.patch || {}).then(s => sendResponse({ ok: true, settings: s }));
+        setPublishSettings(request.patch || {})
+            .then(s => sendResponse({ ok: true, settings: s }))
+            .catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'getDiagLog') {

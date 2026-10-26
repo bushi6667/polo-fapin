@@ -601,6 +601,25 @@ body::after {
     color: var(--accent);
     font-weight: 600;
 }
+/* 每批款数：用户自己填，1-500 */
+.batch-size-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: rgba(255,255,255,0.6);
+}
+.batch-size-field input {
+    width: 56px;
+    padding: 3px 6px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(0,0,0,0.25);
+    color: inherit;
+    font-size: 12px;
+    text-align: center;
+}
+.batch-size-field input:disabled { opacity: 0.45; cursor: not-allowed; }
+.batch-size-field input:focus { outline: none; border-color: var(--accent); }
 .batch-publish-btn {
     padding: 6px 14px;
     border: none;
@@ -1728,6 +1747,13 @@ body::after {
                             <span>跳过已保存</span>
                         </div>
                         <span class="batch-count">已选 <strong id="selectedCount">0</strong> 个</span>
+                        <label class="batch-size-field" id="pubBatchSizeField"
+                               title="每批发几款（1-500）。改的是下一批，不会打断当前批次">
+                            <span>每批</span>
+                            <input type="number" id="pubBatchSize" min="1" max="500" step="1" value="50"
+                                   aria-label="每批款数（1-500）" />
+                            <span>款</span>
+                        </label>
                     </div>
                     <button class="batch-publish-btn" id="batchPublishBtn" disabled onclick="batchPublish()">批量发品</button>
                 </div>
@@ -2741,7 +2767,7 @@ function toggleSelectAll() {
     });
 }
 
-// 批量发品：产品快照与队列在一次请求中创建；固定每批 50 款
+// 批量发品：产品快照与队列在一次请求中创建；每批款数由设置（1-500）决定
 function batchPublish() {
     window.UnifiedTaskStarted?.();
     const selectedProducts = getSelectedProducts();
@@ -2795,7 +2821,7 @@ function batchPublish() {
             window.UnifiedPublishProgress?.({phase:'idle'});
             if (chrome.runtime.lastError || !resp) { showToast('❌ 无法启动发品任务'); refreshPublishState(); return; }
             if (!resp.ok) { showToast('❌ ' + (resp.error || '无法启动发品任务')); refreshPublishState(); return; }
-            showToast(`🚀 发品任务已启动：共 ${selectedProducts.length} 款，每批 50 款`);
+            showToast(`🚀 发品任务已启动：共 ${selectedProducts.length} 款，每批 ${resp.batchSize || 50} 款`);
             refreshPublishState();
         });
     } catch (e) {
@@ -3551,7 +3577,7 @@ function renderPublishState(s) {
             btn.title = '当前行页面已失效，请先「↻ 重试当前行」或「⏭ 跳过当前行」';
         } else {
             btn.textContent = '▶ 继续下一批'; btn.disabled = false;
-            btn.title = '继续下一批（50 款）';
+            btn.title = `继续下一批（${s.batchSize || s.settingsBatchSize || 50} 款）`;
         }
     }
     // 仅"当前行卡住"时提供重试 / 明确跳过
@@ -3562,8 +3588,46 @@ function renderPublishState(s) {
     const inp = publishBatchInput();
     if (inp) {
         if (document.activeElement !== inp) inp.value = String(s.batchSize || s.settingsBatchSize || 50);
-        inp.disabled = true;
-        inp.title = '每批固定 50 款';
+        inp.disabled = running;
+        inp.title = running
+            ? '运行中不改当前批次；改了下一批生效（暂停后可编辑）'
+            : '每批发几款（1-500）。改的是下一批，不会打断当前批次';
+        // 赋值而非 addEventListener：重绘时覆盖同一属性，不会累积监听
+        inp.onchange = (typeof onPublishBatchSizeChange === 'function') ? onPublishBatchSizeChange : null;
+    }
+}
+
+// 每批款数：空/非数字回退当前值，小于 1 夹到 1，大于 500 夹到 500，再写回扩展设置
+function onPublishBatchSizeChange() {
+    const inp = publishBatchInput();
+    if (!inp) return;
+    const cur = Number((lastPublishState && (lastPublishState.settingsBatchSize || lastPublishState.batchSize)) || 50) || 50;
+    const raw = String(inp.value === null || inp.value === undefined ? '' : inp.value).trim();
+    let v = parseInt(raw, 10);
+    if (raw === '' || !Number.isFinite(v)) {     // 空 / 非数字 → 回退当前值，不发请求
+        inp.value = String(cur);
+        showToast(`⚠️ 每批需填 1-500 的整数，已恢复为 ${cur} 款`);
+        return;
+    }
+    if (v < 1) v = 1;                             // 0 / 负数 → 1（与扩展侧口径一致）
+    if (v > 500) v = 500;
+    inp.value = String(v);
+    if (v === cur) return;                        // 没变化，不写库也不打扰
+    try {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'setPublishSettings', patch: { batchSize: v } }, (r) => {
+            if (chrome.runtime.lastError || !r || !r.ok) {
+                showToast('❌ 每批款数保存失败，已恢复为 ' + cur + ' 款');
+                inp.value = String(cur);
+                return;
+            }
+            const saved = Number((r.settings && r.settings.batchSize) || v) || v;
+            inp.value = String(saved);
+            showToast(`✅ 每批 ${saved} 款（下一批生效）`);
+            refreshPublishState();
+        });
+    } catch (e) {
+        showToast('❌ ' + e.message + '，已恢复为 ' + cur + ' 款');
+        inp.value = String(cur);
     }
 }
 
@@ -3626,10 +3690,10 @@ function exportDiagLog() {
     } catch (e) { showToast('❌ ' + e.message); }
 }
 
-// 每批固定 50 款，不再提供批次大小设置。
+// 每批款数输入框：具体值由扩展状态（publishState）驱动，这里不写死
 function initPublishBatchInput() {
     const inp = publishBatchInput();
-    if (inp) { inp.value = '50'; inp.disabled = true; }
+    if (inp) inp.onchange = onPublishBatchSizeChange;
 }
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => { initPublishBatchInput(); refreshPublishState(); });
