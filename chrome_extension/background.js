@@ -1742,6 +1742,86 @@ async function suiteVerifyOutput(request) {
     return await suiteVerifyViaDownloads(plan, mapped);
 }
 
+// ---------- 豆包账号（切号 / 列账号 / 读额度）：转发到豆包内容脚本 ----------
+// 只做转发与结果回包，不参与任何换色/套图状态流转。
+// 切号会让豆包整页重载，重载会销毁旧文档里的消息通道（sendMessage 抛
+// "The message port closed before a response was received."）。这时既不能当失败
+// （页面其实已经切过去了），也不能当成功（没核对过），所以等 tab 重载完成后用
+// doubaoListAccounts 读一次当前账号名复核，把真实结果回给调用方。
+function doubaoAccountSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function waitDoubaoTabReloaded(tabId, timeout = 25000) {
+    const start = Date.now();
+    let sawLoading = false;
+    while (Date.now() - start < timeout) {
+        let tab = null;
+        try { tab = await chrome.tabs.get(tabId); } catch (_) { return false; }
+        if (!tab) return false;
+        if (tab.status === 'loading') sawLoading = true;
+        if (sawLoading && tab.status === 'complete') return true;
+        // 重载太快、没抓到 loading：给 3s 观察窗后按「已加载完」处理
+        if (!sawLoading && tab.status === 'complete' && Date.now() - start > 3000) return true;
+        await doubaoAccountSleep(250);
+    }
+    return false;
+}
+
+// 通道被重载关闭后的复核：等重载 → 再等 2s（与内容脚本一致）→ 轮询读账号名比对。
+// 豆包冷重载常 >4s，新文档的内容脚本要过一会儿才挂上监听，所以最多轮询 10 次 × 1s。
+async function recoverDoubaoAccountSwitch(tabId, name) {
+    try {
+        const reloaded = await waitDoubaoTabReloaded(tabId);
+        if (!reloaded) return { ok: false, reloaded: false, error: '切号后未等到页面重载完成（页面可能已关闭或未重载）' };
+        await doubaoAccountSleep(2000);
+        let list = null, wallStreak = 0;
+        for (let i = 0; i < 10; i++) {
+            list = await chrome.tabs.sendMessage(tabId, { action: 'doubaoListAccounts' }).catch(() => null);
+            const wall = !!(list && list.loginWall === true);
+            wallStreak = wall ? wallStreak + 1 : 0;
+            if (list && list.ok) break;          // 账号列表读到了：名字可读也可能仍是登录墙，交给下面判
+            if (wallStreak >= 2) break;          // 连续两次登录墙才认（单次可能是重载瞬间的过渡页），认了就不再空耗 8s
+            if (i < 9) await doubaoAccountSleep(1000);   // 新文档的内容脚本可能还没就绪
+        }
+        // 登录墙优先于一切：ok:true 的名字可读的墙也不能当切号成功
+        if (list && list.loginWall === true) {
+            return { ok: false, needLogin: true, reloaded: true, error: '该账号需要重新登录' };
+        }
+        if (!list || !list.ok) {
+            return { ok: false, reloaded: true, error: '重载后读不到账号列表：' + ((list && list.error) || '内容脚本无响应') };
+        }
+        if (list.current === name) return { ok: true, name, reloaded: true };
+        return { ok: false, reloaded: true, actual: list.current || '',
+            error: '切换后用户名不匹配（实际：' + (list.current || '未知') + '）' };
+    } catch (e) {
+        return { ok: false, reloaded: true, error: e.message };
+    }
+}
+
+async function relayDoubaoAccountAction(request) {
+    try {
+        if (request.action === 'doubaoSwitchAccount' && (typeof request.name !== 'string' || !request.name.trim())) {
+            return { ok: false, error: '缺少账号名' };
+        }
+        const tab = await findDoubaoTab();
+        if (!tab) return { ok: false, error: '未找到豆包页面' };
+        const payload = { action: request.action };
+        if (request.action === 'doubaoSwitchAccount') payload.name = request.name.trim();
+        try {
+            const resp = await chrome.tabs.sendMessage(tab.id, payload);
+            return resp || { ok: false, error: '豆包页面无返回' };
+        } catch (e) {
+            const msg = String((e && e.message) || '');
+            const channelClosed = /message port closed|Receiving end does not exist|message channel closed|Could not establish connection/i.test(msg);
+            if (request.action === 'doubaoSwitchAccount' && channelClosed) {
+                return await recoverDoubaoAccountSwitch(tab.id, payload.name);
+            }
+            return { ok: false, error: '豆包页面未响应：' + msg };
+        }
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+}
+
 // 共享动作分发器：处理 onMessage/onMessageExternal 的 17 种业务动作
 // （saveProductData/saveBatchProducts/getProductByRow/openPublishPage/…/getConfig），
 // 各动作内直接操作 storage 与目录配置并 sendResponse
@@ -1755,6 +1835,11 @@ async function handleSharedAction(request, sendResponse, sender) {
         const helper=String(sender.url||'').split('?')[0].split('#')[0];
         await chrome.storage.local.set({polo_helper_path:helper});
         sendResponse({ok:true});return true;
+    }
+    // ---------- 豆包账号：切号 / 列账号 / 读额度（发品助手 file:// 页可直接调用） ----------
+    if (request.action === 'doubaoSwitchAccount' || request.action === 'doubaoListAccounts' || request.action === 'doubaoQuotaPercent') {
+        relayDoubaoAccountAction(request).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
     }
     if (request.action === 'suitePreparePage') {
         try {

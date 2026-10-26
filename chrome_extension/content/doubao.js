@@ -858,6 +858,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ ok: true, isProcessing, task: colorTask });
         return true;
     }
+    // ---------- 账号原语（只对调用方负责，不参与任何轮询/自动流程） ----------
+    if (request.action === 'doubaoListAccounts') {
+        listDoubaoAccounts().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'doubaoQuotaPercent') {
+        readQuotaPercent().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'doubaoSwitchAccount') {
+        switchDoubaoAccount(request.name).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
 });
 
 // AI 改图变体：切换模式 + 上传图片 + 输提示词，但【不自动发送】，
@@ -908,6 +921,518 @@ function showToast(msg) {
     toast.textContent = msg;
     document.body.appendChild(toast);
     setTimeout(() => toast.remove(), 3000);
+}
+
+// ============================================================
+// 豆包账号切换（底层原语：只提供「能被调用 / 能切换 / 能回报」，不含自动流程）
+//
+// 已确认事实：
+//   ① 长时间未登录的账号切过去会要求重新登录（弹登录墙/扫码）→ 必须如实回报 needLogin，
+//      绝不能把「落在登录墙」当成切换成功
+//   ② 切号后页面会整页重新加载 → 重载会销毁本文件的 JS 环境与消息通道，
+//      所以 background 侧对「通道被关闭」另有一条复核路径（见 background.js）
+//   ③ 账号名由用户自己改成互不相同 → 直接按名字匹配即可，不依赖顺序/下标
+//
+// DOM 契约（只认 data-testid / role / data-slot，禁用每次渲染都变的 radix-:modern-js-* id）：
+//   头像按钮   img[data-testid="chat_header_avatar_button"] 所在的 button
+//   一级菜单   [data-testid="chat_header_menu"]
+//   账号行     div[role="menuitem"][data-testid="avatar_menu_account_row"]
+//   更多账号   [data-slot="dropdown-menu-sub-trigger"] 且文案含「更多账号」
+//   （添加账号 avatar_menu_add_account / 退出登录 setup_logout 本文件不点，留作后续接线）
+// ============================================================
+
+var DOUBAO_MENU_SEL = '[data-testid="chat_header_menu"]';
+var DOUBAO_ACCOUNT_ROW_SEL = 'div[role="menuitem"][data-testid="avatar_menu_account_row"]';
+// 行尾套餐字样（如「体验套餐」）：名字与套餐常挤在同一个 span 里，必须切开
+var DOUBAO_PLAN_TAIL_RE = /[\s·|]*((?:体验|标准|专业|旗舰|高级|基础|免费)套餐|免费版|体验版|标准版|专业版|旗舰版|会员版)\s*$/;
+
+function isDoubaoVisible(el) {
+    try {
+        if (!el) return false;
+        if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) return false;
+        if (typeof el.offsetHeight === 'number' && el.offsetHeight <= 0) return false;
+        return true;
+    } catch (_) { return false; }
+}
+
+// 头像按钮：优先 img[data-testid=chat_header_avatar_button] 的 button 祖先
+function findDoubaoAvatarButton() {
+    try {
+        const img = document.querySelector('img[data-testid="chat_header_avatar_button"]');
+        const host = img || document.querySelector('[data-testid="chat_header_avatar_button"]');
+        if (!host) return null;
+        const btn = (typeof host.closest === 'function' && host.closest('button')) || host;
+        return isDoubaoVisible(btn) ? btn : null;
+    } catch (_) { return null; }
+}
+
+// 去掉行尾套餐字样（名字/套餐同 span 时用）
+function stripDoubaoPlanTail(text) {
+    try {
+        const t = String(text || '').trim();
+        const m = t.match(DOUBAO_PLAN_TAIL_RE);
+        return m ? t.slice(0, t.length - m[0].length).trim() : t;
+    } catch (_) { return ''; }
+}
+
+// 当前账号名：优先读头像按钮上的名字（打开菜单时它就是当前账号），不依赖 ✓ 图标
+function readDoubaoHeaderName() {
+    try {
+        const btn = findDoubaoAvatarButton();
+        if (!btn) return '';
+        let raw = String(btn.innerText || '').trim();
+        if (!raw) {
+            const img = btn.querySelector('img');
+            const alt = img ? String(img.getAttribute('alt') || '').trim() : '';
+            if (alt && !/^(头像|avatar|user\s*avatar)$/i.test(alt)) raw = alt;
+        }
+        if (!raw) raw = String(btn.getAttribute('aria-label') || btn.getAttribute('title') || '').trim();
+        const first = raw.split('\n').map(s => s.trim()).filter(Boolean)[0] || '';
+        return stripDoubaoPlanTail(first.replace(/^(当前账号|账号)[:：]?/, '').trim());
+    } catch (_) { return ''; }
+}
+
+function isAccountMenuOpen() {
+    try {
+        const el = document.querySelector(DOUBAO_MENU_SEL);
+        return !!el && isDoubaoVisible(el);
+    } catch (_) { return false; }
+}
+
+async function waitAccountMenuClosed(ms) {
+    try {
+        const start = Date.now();
+        while (Date.now() - start < ms) {
+            if (!isAccountMenuOpen()) return true;
+            await sleep(80);
+        }
+        return !isAccountMenuOpen();
+    } catch (_) { return false; }
+}
+
+// 账号行/子菜单触发器是 radix menu item：真实选中走 pointerup（再跟 click），
+// 只发 mouse 事件可能整条链都不触发。这里补 pointerdown/pointerup，
+// 原 nativeMouseClick 一个字不改（生图主流程继续用它）。
+function activateDoubaoTarget(el) {
+    if (!el) return false;
+    try {
+        const rect = el.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const base = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+        // pointerType 缺省是 ''（构造器不认鼠标），radix 会同时认 pointerup 和 click → 同一行被选两次。
+        // 显式声明鼠标指针，事件序列保持不变（鼠标路径仍靠 click 收尾）。
+        const pointerExtra = { pointerType: 'mouse', pointerId: 1, isPrimary: true, buttons: 1 };
+        const PointerCtor = (typeof PointerEvent === 'function') ? PointerEvent : MouseEvent;
+        const fire = (type, Ctor, extra) => {
+            try { el.dispatchEvent(new Ctor(type, extra ? Object.assign({}, base, extra) : base)); } catch (_) {}
+        };
+        fire('pointerdown', PointerCtor, pointerExtra);
+        fire('mousedown', MouseEvent);
+        fire('pointerup', PointerCtor, pointerExtra);
+        fire('mouseup', MouseEvent);
+        fire('click', MouseEvent);
+        return true;
+    } catch (e) {
+        try { el.click(); return true; } catch (_) { return false; }
+    }
+}
+
+// 打开一级账号菜单：点头像 → 等 [data-testid=chat_header_menu] 可见，超时 3s 返回 false
+async function openAccountMenu() {
+    try {
+        if (isAccountMenuOpen()) return true;
+        const btn = findDoubaoAvatarButton();
+        if (!btn) { log('未找到头像按钮，无法打开账号菜单', 'warn'); return false; }
+        nativeMouseClick(btn);
+        const start = Date.now();
+        while (Date.now() - start < 3000) {
+            if (isAccountMenuOpen()) { await sleep(150); return true; }   // 再多等 150ms 让账号行渲染完
+            await sleep(100);
+        }
+        log('账号菜单 3s 内未出现', 'warn');
+        return false;
+    } catch (e) {
+        log('打开账号菜单异常: ' + e.message, 'warn');
+        return false;
+    }
+}
+
+// 关闭账号菜单：先 Esc（与页面其它浮层同一关法），关不掉再点空白。
+// 只派发指针事件、不调 el.click()，避免真的触发页面上某个按钮（不影响输入框与主流程）
+async function closeAccountMenu() {
+    try {
+        if (!isAccountMenuOpen()) return true;
+        const fireEsc = (type) => {
+            try {
+                document.body.dispatchEvent(new KeyboardEvent(type, {
+                    key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true
+                }));
+            } catch (_) {}
+        };
+        fireEsc('keydown');
+        await sleep(80);
+        fireEsc('keyup');
+        if (await waitAccountMenuClosed(700)) return true;
+
+        const blank = { bubbles: true, cancelable: true, clientX: 2, clientY: 2, button: 0, view: window };
+        for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+            try {
+                const Ev = (t.indexOf('pointer') === 0 && typeof PointerEvent === 'function') ? PointerEvent : MouseEvent;
+                document.body.dispatchEvent(new Ev(t, blank));
+            } catch (_) {}
+        }
+        if (await waitAccountMenuClosed(700)) return true;
+        log('账号菜单未关闭（不阻断后续操作）', 'warn');
+        return false;
+    } catch (_) {
+        return false;
+    }
+}
+
+// 单行解析：名字取「第一个有文本的 span」，并切出行尾套餐字样
+function parseDoubaoAccountRow(row) {
+    try {
+        let name = '';
+        for (const sp of row.querySelectorAll('span')) {
+            const t = String(sp.innerText || sp.textContent || '').trim();
+            if (t) { name = t; break; }
+        }
+        const full = String(row.innerText || '').trim();
+        if (!name) name = (full.split('\n')[0] || '').trim();
+
+        let plan = '';
+        const tail = name.match(DOUBAO_PLAN_TAIL_RE);
+        if (tail) {
+            plan = tail[1];
+            name = name.slice(0, name.length - tail[0].length).trim();
+        }
+        if (!plan && full) {
+            for (const line of full.split('\n').map(s => s.trim()).filter(Boolean)) {
+                if (!line || line === name || line === '✓') continue;
+                if (line.indexOf(name) >= 0) {
+                    const left = line.replace(name, '').trim();
+                    if (left && left !== '✓') plan = left;
+                } else if (/套餐|会员|版$/.test(line)) {
+                    plan = line;
+                }
+                if (plan) break;
+            }
+        }
+        return { name, plan };
+    } catch (_) { return { name: '', plan: '' }; }
+}
+
+function collectDoubaoAccountRows() {
+    const out = [];
+    try {
+        for (const row of document.querySelectorAll(DOUBAO_ACCOUNT_ROW_SEL)) {
+            if (!isDoubaoVisible(row)) continue;
+            const parsed = parseDoubaoAccountRow(row);
+            if (!parsed.name) continue;
+            parsed.el = row;
+            out.push(parsed);
+        }
+    } catch (_) {}
+    return out;
+}
+
+function findDoubaoMoreAccountsTrigger() {
+    try {
+        for (const el of document.querySelectorAll('[data-slot="dropdown-menu-sub-trigger"]')) {
+            if (!isDoubaoVisible(el)) continue;
+            if (String(el.innerText || el.textContent || '').indexOf('更多账号') >= 0) return el;
+        }
+    } catch (_) {}
+    return null;
+}
+
+async function waitDoubaoAccountRowsAbove(min, ms) {
+    try {
+        const start = Date.now();
+        while (Date.now() - start < ms) {
+            if (collectDoubaoAccountRows().length > min) return true;
+            await sleep(100);
+        }
+        return false;
+    } catch (_) { return false; }
+}
+
+function dispatchDoubaoHover(el) {
+    for (const t of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'pointermove', 'mousemove']) {
+        try {
+            const Ev = (t.indexOf('pointer') === 0 && typeof PointerEvent === 'function') ? PointerEvent : MouseEvent;
+            el.dispatchEvent(new Ev(t, { bubbles: !/enter$/.test(t), cancelable: true, view: window }));
+        } catch (_) {}
+    }
+}
+
+// 展开「更多账号」子菜单：不同版本靠 click 或 hover 触发，两种都试，以「行数变多」为成功信号
+async function expandDoubaoMoreAccounts(trigger) {
+    const before = collectDoubaoAccountRows().length;
+    try {
+        activateDoubaoTarget(trigger);
+        if (await waitDoubaoAccountRowsAbove(before, 1200)) return collectDoubaoAccountRows();
+        dispatchDoubaoHover(trigger);
+        if (await waitDoubaoAccountRowsAbove(before, 1500)) return collectDoubaoAccountRows();
+    } catch (e) {
+        log('展开「更多账号」异常: ' + e.message, 'warn');
+    }
+    return collectDoubaoAccountRows();
+}
+
+// 当前账号解析：先按名字比对头像上的名字；名字读不到时退化用「菜单里唯一带图标的那一行」
+function resolveDoubaoCurrentName(rows, headerName) {
+    let current = String(headerName || '').trim();
+    try {
+        if (!current || !rows.some(r => r.name === current)) {
+            const withIcon = rows.filter(r => r.el && r.el.querySelector('svg'));
+            if (withIcon.length === 1) current = withIcon[0].name;
+        }
+    } catch (_) {}
+    return current;
+}
+
+// 列账号：打开菜单 → 一级行 → 有「更多账号」再展开收集子菜单行 → 关闭菜单
+// loginWall：与 ok 独立。ok:false + loginWall:true 表示「页面是登录墙，压根读不到账号」，
+// 调用方（background 复核）必须按 needLogin 报，不能报成「读不到账号列表」。
+async function listDoubaoAccounts() {
+    try {
+        const opened = await openAccountMenu();
+        if (!opened) {
+            return { ok: false, error: '未能打开账号菜单（未找到头像按钮或菜单未出现）', loginWall: detectLoginWall().needLogin };
+        }
+        await sleep(200);
+
+        const headerName = readDoubaoHeaderName();
+        const rows = collectDoubaoAccountRows();
+
+        // 子菜单行与一级行同一个 data-testid：只能靠「展开前已见过的名字」去重
+        const trigger = findDoubaoMoreAccountsTrigger();
+        if (trigger) {
+            const seen = new Set(rows.map(r => r.name));
+            for (const r of await expandDoubaoMoreAccounts(trigger)) {
+                if (seen.has(r.name)) continue;
+                seen.add(r.name);
+                rows.push(r);
+            }
+        }
+
+        const current = resolveDoubaoCurrentName(rows, headerName);
+        await closeAccountMenu();
+        const loginWall = detectLoginWall().needLogin;   // 菜单关掉后再判，避免浮层干扰弱特征
+
+        if (!rows.length) return { ok: false, error: '账号菜单里没有读到账号行', loginWall };
+        return {
+            ok: true,
+            current: current || '',
+            loginWall,
+            accounts: rows.map(r => ({
+                name: r.name,
+                plan: r.plan || '',
+                isCurrent: !!current && r.name === current
+            }))
+        };
+    } catch (e) {
+        await closeAccountMenu();
+        return { ok: false, error: e.message, loginWall: detectLoginWall().needLogin };
+    }
+}
+
+// 「近 7 天消耗消耗 100%」：文案可能重复「消耗」、可能跨 span 换行。
+// 先抹掉所有空白，再从「近7天消耗」之后最多 12 个非数字字符内抓百分数。
+function parseDoubaoQuotaPercent(text) {
+    try {
+        const flat = String(text || '').replace(/[\s\u00a0]+/g, '');
+        const m = flat.match(/近7天消耗\D{0,12}?(\d{1,3})%/);
+        if (!m) return null;
+        const v = parseInt(m[1], 10);
+        return (Number.isFinite(v) && v >= 0 && v <= 100) ? v : null;
+    } catch (_) { return null; }
+}
+
+// 读额度百分比：只在被调用时开一次菜单（不进任何轮询循环）
+async function readQuotaPercent() {
+    try {
+        const opened = await openAccountMenu();
+        if (!opened) {
+            return { ok: false, error: '未能打开账号菜单（未找到头像按钮或菜单未出现）', loginWall: detectLoginWall().needLogin };
+        }
+        const menu = document.querySelector(DOUBAO_MENU_SEL);
+        const text = String((menu && menu.innerText) || '');
+        await closeAccountMenu();
+        const loginWall = detectLoginWall().needLogin;
+        const percent = parseDoubaoQuotaPercent(text);
+        if (percent === null) return { ok: false, error: '账号菜单里没读到「近 7 天消耗 …%」', loginWall };
+        return { ok: true, percent, loginWall };
+    } catch (e) {
+        await closeAccountMenu();
+        return { ok: false, error: e.message, loginWall: detectLoginWall().needLogin };
+    }
+}
+
+// 登录墙识别：强特征不看输入框，弱特征（单个「登录」）必须配合「没有输入框/有登录按钮」
+var DOUBAO_LOGIN_STRONG = ['扫码登录', '手机号登录', '验证码登录', '密码登录', '登录后继续', '登录/注册', '请先登录'];
+var DOUBAO_LOGIN_WEAK = ['请登录', '立即登录', '登录'];
+
+function findDoubaoLoginButton() {
+    try {
+        for (const el of document.querySelectorAll('button, [role="button"], a')) {
+            if (!isDoubaoVisible(el)) continue;
+            const t = String(el.innerText || el.textContent || '').trim();
+            if (!t || t.length > 12) continue;
+            if (/^(立即登录|登录|扫码登录|登录\/注册|手机号登录)$/.test(t)) return el;
+        }
+    } catch (_) {}
+    return null;
+}
+
+function detectLoginWall() {
+    try {
+        const compact = String((document.body && document.body.innerText) || '').replace(/[\s\u00a0]+/g, '');
+        for (const s of DOUBAO_LOGIN_STRONG) {
+            if (compact.indexOf(s) >= 0) return { needLogin: true, hint: '页面出现「' + s + '」' };
+        }
+        const hasInput = !!findChatInput();
+        const loginBtn = findDoubaoLoginButton();
+        // 弱特征（单个「登录/请登录」）必须配合「输入框消失」才算登录墙，
+        // 否则正常页面里任何一处带「登录」的小字都会被误判成墙 → 会挡住切号
+        for (const s of DOUBAO_LOGIN_WEAK) {
+            if (compact.indexOf(s) >= 0 && !hasInput) {
+                return { needLogin: true, hint: '页面出现「' + s + '」且输入框消失' };
+            }
+        }
+        if (!hasInput && loginBtn) return { needLogin: true, hint: '聊天输入框消失且存在登录按钮' };
+        return { needLogin: false, hint: '' };
+    } catch (_) {
+        return { needLogin: false, hint: '' };   // 识别失败不得阻断调用方
+    }
+}
+
+// 等切号后的整页重载：href 变化 / 消息节点归零 / readyState loading→complete，
+// 三者任一命中即认为已重载；最长 25s。
+// 注意：整页重载会销毁本文件，实际调用中这里常常等不到返回，
+//       由 background.js 的通道关闭复核路径兜底。
+async function waitDoubaoPageReload(beforeHref, beforeCount, timeout) {
+    try {
+        const start = Date.now();
+        let sawLoading = false;
+        while (Date.now() - start < timeout) {
+            try {
+                if (location.href !== beforeHref) return true;
+                const rs = document.readyState;
+                if (rs === 'loading') sawLoading = true;
+                else if (sawLoading && rs === 'complete') return true;
+                if (beforeCount > 0 && collectQuotaMessageNodes().length === 0) return true;
+            } catch (_) {}
+            await sleep(200);
+        }
+        return false;
+    } catch (_) { return false; }
+}
+
+// 重载后复核当前账号：先读头像（不必开菜单），读不到再开菜单按名字/图标兜底
+async function readCurrentDoubaoAccountName() {
+    try {
+        const direct = readDoubaoHeaderName();
+        if (direct) return direct;
+        const list = await listDoubaoAccounts();
+        if (list && list.ok && list.current) return list.current;
+    } catch (_) {}
+    return '';
+}
+
+// 切号安全阀：套图（suite-doubao.js 的 IIFE）不设 isProcessing，只能靠它自己在用的
+// DOM 忙类判忙。选择器与套图保持一致（[class*="generating"], [class*="typing"]），可见才算忙。
+var DOUBAO_BUSY_SEL = '[class*="generating"], [class*="typing"]';
+
+function isDoubaoBusyInDom() {
+    try {
+        for (const el of document.querySelectorAll(DOUBAO_BUSY_SEL)) {
+            if (isDoubaoVisible(el)) return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
+// 完整切号流程：登录墙 → 找行 → 同号判断 → 点击 → 等重载 → 再查登录墙 → 复核用户名
+async function switchDoubaoAccount(name) {
+    const target = String(name == null ? '' : name).trim();
+    try {
+        if (!target) return { ok: false, error: '缺少账号名' };
+        // 换色/改图执行中（isProcessing）或套图生成中（DOM 忙）都不能切号：
+        // 整页重载会把执行中的任务连页面一起销毁
+        if (isProcessing || isDoubaoBusyInDom()) {
+            return { ok: false, busy: true, error: '豆包正在生成中，暂不切换账号' };
+        }
+
+        // a) 已经是登录墙：如实回报，不做任何点击
+        const wall = detectLoginWall();
+        if (wall.needLogin) return { ok: false, needLogin: true, error: '当前页已是登录墙', hint: wall.hint };
+
+        // b) 打开菜单，先一级行找，找不到再展开「更多账号」
+        const opened = await openAccountMenu();
+        if (!opened) return { ok: false, error: '未能打开账号菜单（未找到头像按钮或菜单未出现）' };
+        await sleep(200);
+
+        const headerName = readDoubaoHeaderName();
+        const rows = collectDoubaoAccountRows();
+        let hit = rows.find(r => r.name === target) || null;
+        if (!hit) {
+            const trigger = findDoubaoMoreAccountsTrigger();
+            if (trigger) {
+                const seen = new Set(rows.map(r => r.name));
+                for (const r of await expandDoubaoMoreAccounts(trigger)) {
+                    if (seen.has(r.name)) continue;
+                    seen.add(r.name);
+                    rows.push(r);
+                }
+                hit = rows.find(r => r.name === target) || null;
+            }
+        }
+        if (!hit) {
+            await closeAccountMenu();
+            return { ok: false, error: '未找到账号：' + target, accounts: rows.map(r => r.name) };
+        }
+
+        // c) 目标就是当前账号：不切，明确回 sameAccount
+        const current = resolveDoubaoCurrentName(rows, headerName);
+        if (current && current === target) {
+            await closeAccountMenu();
+            return { ok: false, sameAccount: true, current, error: '已经是该账号' };
+        }
+
+        // d) 点目标行 → 等重载（最长 25s）→ 再额外等 2s 让输入框出现
+        //    点之前再判一次忙：从入口到找到账号行可能已过去数秒，期间套图可能刚开跑
+        if (isProcessing || isDoubaoBusyInDom()) {
+            await closeAccountMenu();
+            return { ok: false, busy: true, error: '豆包正在生成中，暂不切换账号' };
+        }
+        const beforeHref = location.href;
+        const beforeCount = collectQuotaMessageNodes().length;
+        activateDoubaoTarget(hit.el);
+        const reloaded = await waitDoubaoPageReload(beforeHref, beforeCount, 25000);
+        await sleep(2000);
+
+        // e) 重载后仍落在登录墙 = 该账号需要重新登录（不能当成功）
+        const afterWall = detectLoginWall();
+        if (afterWall.needLogin) {
+            await closeAccountMenu();
+            return { ok: false, needLogin: true, reloaded, error: '该账号需要重新登录', hint: afterWall.hint };
+        }
+
+        // f) 用头像上的用户名复核
+        const actual = await readCurrentDoubaoAccountName();
+        if (actual && actual === target) return { ok: true, name: target, reloaded };
+        if (!reloaded) {
+            return { ok: false, reloaded: false, actual, error: '点击后 25s 内未检测到页面重载（切换可能未生效）' };
+        }
+        return { ok: false, reloaded, actual, error: '切换后用户名不匹配（实际：' + (actual || '未知') + '）' };
+    } catch (e) {
+        // g) 任何异常都关掉菜单兜底，避免浮层挡住后续生图操作
+        try { await closeAccountMenu(); } catch (_) {}
+        return { ok: false, error: e.message };
+    }
 }
 
 log('豆包AI换色脚本已加载');
