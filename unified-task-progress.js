@@ -96,6 +96,8 @@
             done = batch.index; total = batch.rows.length; current = '行' + batch.rows[batch.index];
             actions.push([batch.paused || !running ? '▶ 继续' : '⏸ 暂停', () => toggleSuiteBatch()]);
         } else if (kind === 'suite' && suite) {
+            // 分母兜底：state.total 缺失时，指定重生成按 1 张算，整套才按 5 张（旧数据写死 5 会误导）
+            const suiteGoal = () => Number(suite.total) || ((typeof targetedRegenerationRunning !== 'undefined' && targetedRegenerationRunning) ? 1 : 5);
             const labels = { preparing: '准备中', generating: '生成中', processing: '后处理中', saving: '保存中', error: '未完成' };
             const targeted = typeof targetedRegenerationRunning !== 'undefined' && targetedRegenerationRunning;
             // 统一按「套」计数：只要这一行属于未完成的连续队列，就算套数（暂停/运行都一样），
@@ -105,13 +107,13 @@
             if (inBatch) {
                 title = '连续生成套图 · ' + (suite.paused ? '已暂停' : (labels[suite.phase] || '未完成'));
                 done = batch.index; total = batch.rows.length;
-                current = '行' + suite.rowNum + '（本套 ' + (suite.done || 0) + '/' + (suite.total || 5) + '）';
+                current = '行' + suite.rowNum + '（本套 ' + (suite.done || 0) + '/' + suiteGoal() + '）';
             } else {
                 title = (targeted ? '指定重生成' : '套图') + ' · ' + (suite.paused ? '已暂停' : (labels[suite.phase] || '未完成'));
                 // 单品也是一套：进行中 0/1，结束 1/1
                 done = (suite.phase === 'completed' || (!suite.paused && suite.phase === 'saving')) ? 1 : 0;
                 total = 1;
-                current = '行' + suite.rowNum + '（本套 ' + (suite.done || 0) + '/' + (suite.total || 5) + '）' + (suite.currentKey ? ' · ' + suite.currentKey : '');
+                current = '行' + suite.rowNum + '（本套 ' + (suite.done || 0) + '/' + suiteGoal() + '）' + (suite.currentKey ? ' · ' + suite.currentKey : '');
             }
             const relevant = suite.fileKey === currentFileKey() && suite.rowNum === currentProduct?.row;
             if (relevant) actions.push([suite.paused ? '▶ 继续' : '⏸ 暂停', () => toggleSuiteAuto()]);

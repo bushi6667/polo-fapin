@@ -4296,7 +4296,10 @@ function renderSuiteAutoControls() {
     banner.style.display=active?'flex':'none';
     if(active){
         const phases={preparing:'准备中',generating:'生成中',processing:'后处理中',saving:'保存中',error:'处理未完成'};
-        banner.firstElementChild.textContent=`套图任务 · 行${state.rowNum} · ${state.paused?'已暂停 · ':''}${phases[state.phase]||'未完成'} · ${state.done||0}/${state.total||5}`;
+        // 指定重生成只跑部分步骤：标题和分母都要跟着变，不能显示成整套套图
+        const bannerGoal=Number(state.total)||((typeof targetedRegenerationRunning!=='undefined'&&targetedRegenerationRunning)?1:5);
+        const bannerKind=(typeof targetedRegenerationRunning!=='undefined'&&targetedRegenerationRunning)?'指定重生成':'套图任务';
+        banner.firstElementChild.textContent=`${bannerKind} · 行${state.rowNum} · ${state.paused?'已暂停 · ':''}${phases[state.phase]||'未完成'} · ${state.done||0}/${bannerGoal}`;
     }
     const box=document.getElementById('suiteAutoControls');if(!box)return;
     const relevant=state&&currentProduct&&state.fileKey===currentFileKey()&&state.rowNum===currentProduct.row;
