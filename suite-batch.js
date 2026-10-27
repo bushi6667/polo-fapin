@@ -54,10 +54,95 @@ async function suiteBatchRunRowOnce(row,restart){
     const keys=new Set(records.filter(r=>r.blob?.size>0).map(r=>String(r.key)));
     return SUITE_STEP_KEYS.every(key=>keys.has(key));
 }
+// 豆包账号自动切号：必须带 EXTENSION_ID、每次判 lastError，且不加超时
+// （扫描一轮账号可达 2 分钟，短超时会把正在跑的扫描掐死）。
+// 不试生图：切号成功后直接重跑当前行真实任务，出图=有额度，弹额度=换下一个号。
+var suiteBatchAutoSwitchRunning=false;
+var suiteBatchTriedAccounts=[];   // 本轮已试过的账号名（批次结束/换批时清零）
+var suiteBatchAttempts=0;         // 本轮换号次数（硬上限，防死循环）
+var SUITE_BATCH_SWITCH_LIMIT=12;  // 一轮最多换 12 次号
+function suiteBatchAutoSwitchMessage(exclude){
+    return new Promise(function(resolve,reject){
+        try{
+            if(typeof chrome==='undefined'||!chrome.runtime||!chrome.runtime.sendMessage){reject(Error('扩展未连接'));return;}
+            var id=typeof EXTENSION_ID==='undefined'?'':EXTENSION_ID;
+            chrome.runtime.sendMessage(id,{action:'doubaoAutoSwitch',exclude:Array.isArray(exclude)?exclude.slice():[]},function(response){
+                var err=chrome.runtime.lastError;
+                if(err){reject(Error(err.message||'扩展通道异常'));return;}
+                if(!response){reject(Error('扩展没有响应'));return;}
+                resolve(response);
+            });
+        }catch(e){reject(e);}
+    });
+}
+// 换号成功：清掉该行 error 残留（内存缓存 + localStorage 一起清，否则下一行读到旧 phase），
+// index 不前进、paused 复位，然后原地重启该行（等价于重跑）。
+// 重跑后又弹额度 → 本函数会被再次调用（防重入 flag 在请求结束即清），继续换下一个号。
+// 全部没额度才真暂停。
+function suiteBatchTryAutoSwitch(row){
+    if(suiteBatchAutoSwitchRunning)return;
+    if(!suiteBatchState)return;
+    if(suiteBatchAttempts>=SUITE_BATCH_SWITCH_LIMIT){
+        var over='已尝试 '+suiteBatchAttempts+' 个账号仍无额度，队列已暂停';
+        suiteBatchTriedAccounts=[];suiteBatchAttempts=0;
+        suiteBatchState.paused=true;suiteBatchState.pausedReason=over;saveSuiteBatch();
+        showToast('⚠️ '+over);
+        if(typeof console!=='undefined')console.warn('🔀 '+over);
+        return;
+    }
+    suiteBatchAttempts++;
+    suiteBatchAutoSwitchRunning=true;
+    var finish=function(){suiteBatchAutoSwitchRunning=false;};
+    var later=typeof setTimeout==='function'?setTimeout:function(fn){Promise.resolve().then(fn);};
+    // 已试过的号全部排除：切过又弹额度的号不能再切回去
+    suiteBatchAutoSwitchMessage(suiteBatchTriedAccounts).then(function(res){
+        // 队列已换（重开/换文件）：不接管
+        if(!suiteBatchState||suiteBatchState.rows[suiteBatchState.index]!==row)return;
+        var name=String((res&&res.name)||'').trim();
+        if(res&&res.ok===true&&name){
+            if(suiteBatchTriedAccounts.indexOf(name)<0)suiteBatchTriedAccounts.push(name);
+            if(typeof console!=='undefined')console.log('🔀 第 '+suiteBatchAttempts+' 次换号：已切到 '+name+'，重跑 row'+row);
+            try{localStorage.removeItem('polo_suite_auto_v1');}catch(_){}
+            try{suiteAutoState=null;}catch(_){}
+            if(typeof renderSuiteAutoControls==='function')renderSuiteAutoControls();
+            suiteBatchState.paused=false;
+            suiteBatchState.pausedReason='';
+            saveSuiteBatch();
+            showToast('🔀 已切到 '+name+'，重跑第 '+row+' 行');
+            later(function(){if(!suiteBatchRunning)runSuiteBatch();},0);
+            return;
+        }
+        // 失败：一律收尾（计数清零），给出能看出"试了几个号"的原因。
+        // 原「额度已用完（预计 … 恢复）」文案必须保留在原因里：它同时是给人看的信息。
+        var tried=suiteBatchTriedAccounts.length;
+        var base=String(suiteBatchState.pausedReason||'');
+        if(base.indexOf('额度')<0)base='豆包额度已用完';
+        var text;
+        if(res&&res.reason==='allExhausted')text='所有账号额度均已用完（已试 '+tried+' 个号）';
+        else text=base+'；自动切号失败（已试 '+tried+' 个号）：'+((res&&res.error)||(res&&res.reason)||'未知原因');
+        suiteBatchTriedAccounts=[];suiteBatchAttempts=0;
+        suiteBatchState.paused=true;
+        suiteBatchState.pausedReason=text;
+        saveSuiteBatch();
+        if(typeof console!=='undefined')console.warn('🔀 '+text);
+        showToast('⚠️ '+text);
+    },function(e){
+        if(typeof console!=='undefined')console.warn('套图自动切号失败：'+((e&&e.message)||e));
+        if(!suiteBatchState)return;
+        var tried=suiteBatchTriedAccounts.length;
+        var base=String(suiteBatchState.pausedReason||'');
+        if(base.indexOf('额度')<0)base='豆包额度已用完';
+        suiteBatchTriedAccounts=[];suiteBatchAttempts=0;
+        suiteBatchState.paused=true;
+        suiteBatchState.pausedReason=base+'；自动切号失败（已试 '+tried+' 个号）：'+((e&&e.message)||e);
+        saveSuiteBatch();
+    }).then(finish,finish);
+}
 // 豆包额度用完：整批暂停，不是这一行失败。
 // runSuiteFiveJob 会吞掉异常、只把 phase:'error'（及 error 文案）写进自动状态，所以从状态里读，不看 catch。
 // 命中后：行不前进（恢复后重跑它）、不记 failed、不进补跑轮（额度问题补跑必败）。
-function suiteBatchQuotaPause(row){
+// options.autoSwitch===false 用于补跑轮：补跑遇到额度只暂停，不再触发切号。
+function suiteBatchQuotaPause(row,options){
     const state=readSuiteAutoState();
     if(!state||state.fileKey!==suiteBatchState.fileKey||state.rowNum!==row||state.phase!=='error')return null;
     const text=String(state.error||'');
@@ -69,6 +154,7 @@ function suiteBatchQuotaPause(row){
     suiteBatchState.pausedReason=reason;
     saveSuiteBatch();
     showToast('⚠️ '+reason+'，队列已暂停');
+    if(!(options&&options.autoSwitch===false))suiteBatchTryAutoSwitch(row);
     return {resumeAt,reason};
 }
 async function runSuiteBatch(){
@@ -102,7 +188,7 @@ async function runSuiteBatch(){
                 catch(e){showToast('⚠️ 行'+row+' 补跑失败：'+e.message);}
                 if(complete)suiteBatchState.failed=suiteBatchState.failed.filter(r=>r!==row);
                 else{
-                    if(suiteBatchQuotaPause(row))break;   // 补跑时同样遇到额度用完：整批暂停
+                    if(suiteBatchQuotaPause(row,{autoSwitch:false}))break;   // 补跑时遇到额度用完：整批暂停，且不再触发切号（不进第二轮补跑）
                     await suiteBatchDropRow(row);         // 仍失败：保留在 failed，不再补跑
                 }
                 saveSuiteBatch();
@@ -110,6 +196,7 @@ async function runSuiteBatch(){
         }
         if(suiteBatchState.index>=suiteBatchState.rows.length){
             suiteBatchState.completed=true;suiteBatchState.paused=false;saveSuiteBatch();
+            suiteBatchTriedAccounts=[];suiteBatchAttempts=0;   // 批次结束：换号记录清零
             const failed=Array.isArray(suiteBatchState.failed)?suiteBatchState.failed:[];
             if(!suiteBatchState.recycled){
                 if(failed.length)showToast('⚠️ 套图队列已跑完：'+failed.length+' 行失败（已补跑 1 轮）｜行 '+failed.join('/'));
@@ -141,6 +228,7 @@ startSuiteGeneration=async function(){
         const start=previous&&previous.phase!=='completed'&&previous.fileKey===currentFileKey()?products.findIndex(p=>p.row===previous.rowNum):products.findIndex(p=>p.row===currentProduct.row);
         if(start<0)return showToast('找不到任务所属产品');
         suiteBatchState={fileKey:currentFileKey(),rows:products.slice(start).map(p=>p.row),index:0,paused:false,completed:false,failed:[],retryRound:0};saveSuiteBatch();
+        suiteBatchTriedAccounts=[];suiteBatchAttempts=0;   // 新批次：换号记录清零
     }
     await runSuiteBatch();
 };

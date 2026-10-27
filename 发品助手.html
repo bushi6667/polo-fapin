@@ -3925,6 +3925,7 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results, quota) {
 
     // ③b 豆包额度用完（内容脚本判定，quota 字段可选）：整批暂停，不是这一款失败。
     //     不记 failedRows（切号/等恢复后还要重跑本款）、不前进 currentIndex；继续时先重跑本款。
+    //     暂停后先自动切到有额度的账号；所有账号都没额度才真的等恢复。
     if (quota && quota.exhausted) {
         if (batchColorState.currentTimeoutId) {
             clearTimeout(batchColorState.currentTimeoutId);
@@ -3936,8 +3937,13 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results, quota) {
         const resumeAt = String(quota.resumeAt || '').trim();
         const reason = '豆包额度已用完' + (resumeAt ? `（预计 ${resumeAt} 恢复）` : '');
         console.warn(`⏸ row${rowNum} 豆包额度已用完，整批暂停 (${source})`);
-        finishBatchColor(false, reason);
-        showToast('⏸ ' + reason + '，整批已暂停');
+        // 切号器不在（旧版页面/精简包）→ 退回原来的「暂停等恢复」
+        if (typeof colorQuotaAutoSwitch === 'function') {
+            colorQuotaAutoSwitch(rowNum, reason);
+        } else {
+            finishBatchColor(false, reason);
+            showToast('⏸ ' + reason + '，整批已暂停');
+        }
         return;
     }
 
@@ -4008,6 +4014,124 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results, quota) {
     }, 500);
 }
 
+// ===== 额度命中 → 自动切到有额度的账号（所有账号都没额度才等恢复） =====
+// 不做任何"试生图"探测：切号成功后直接重跑当前这一款真实任务 ——
+//   出图          → 正常推进下一款
+//   又弹额度      → 把这个号记进「已试」列表，再换下一个号，重跑同一款
+//   号都试完没成功 → 暂停，等恢复/加号后再继续
+// 防重入只在「一次 doubaoAutoSwitch 请求期间」生效（请求结束立即清），
+// 否则重跑后再次弹额度就进不来了，换号循环会卡死在第一个号上。
+var colorAutoSwitchRunning = false;
+var colorQuotaTriedAccounts = [];      // 本轮额度换号已试过的账号名（换批次/换文件时清零）
+var colorQuotaAttempts = 0;            // 本轮额度换号次数（防死循环的硬上限）
+var COLOR_QUOTA_SWITCH_LIMIT = 12;     // 一轮最多换 12 次号
+
+// 账号账本类动作（扫描/选号/自动切号）统一走这里：必须带 EXTENSION_ID，且每次判 lastError。
+// 不设超时：扫 10 个号要 1.5~2.3 分钟，任何短超时都会把正在跑的扫描掐死。
+function doubaoAccountMessage(action, payload) {
+    return new Promise((resolve, reject) => {
+        try {
+            if (!EXTENSION_ID) throw new Error('尚未记录扩展 ID，请先连接扩展');
+            if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) throw new Error('扩展未连接');
+            chrome.runtime.sendMessage(EXTENSION_ID, Object.assign({ action }, payload || {}), (response) => {
+                const err = chrome.runtime.lastError;
+                if (err) { reject(new Error(err.message || '扩展通道异常')); return; }
+                if (!response) { reject(new Error('扩展没有响应')); return; }
+                resolve(response);
+            });
+        } catch (e) { reject(e); }
+    });
+}
+
+// 额度命中：先暂停（保留可恢复状态），再异步换一个有额度的账号；换号成功就从当前款重跑。
+// 中途不把当前款记进 failedRows：额度不是这一款的错，换号/等恢复后都要重跑它。
+// 换号后重跑又弹额度 → 本函数会被再次调用（防重入 flag 已清），继续换下一个号。
+function colorQuotaAutoSwitch(rowNum, reason) {
+    const state = batchColorState;
+    if (!state) return;
+    if (colorAutoSwitchRunning) {
+        console.log('🔀 上一轮换号请求还没返回，本次额度命中并入该轮（不重复切换）');
+        return;
+    }
+    // 硬上限：连续换 12 个号都没成功，就不再空转，交回人工
+    if (colorQuotaAttempts >= COLOR_QUOTA_SWITCH_LIMIT) {
+        const tried = colorQuotaAttempts;
+        colorQuotaTriedAccounts = [];
+        colorQuotaAttempts = 0;
+        const text = `已尝试 ${tried} 个账号仍无额度，已暂停（可等恢复或换号后继续）`;
+        console.warn('🔀 ' + text);
+        finishBatchColor(false, text);
+        showToast('⏸ ' + text);
+        return;
+    }
+    colorQuotaAttempts++;
+    finishBatchColor(false, reason + '，正在查找有额度的账号…');
+    showToast('⏸ ' + reason + '，整批已暂停，正在查找有额度的账号…');
+    colorAutoSwitchRunning = true;
+    const done = () => { colorAutoSwitchRunning = false; };
+    // 已试过的号全部排除：切过又弹额度的号不能再切回去（否则原地打转）
+    const exclude = colorQuotaTriedAccounts.slice();
+    if (state.lastSwitchAccount && exclude.indexOf(state.lastSwitchAccount) < 0) exclude.push(state.lastSwitchAccount);
+    doubaoAccountMessage('doubaoAutoSwitch', { exclude })
+        .then(res => applyColorAutoSwitch(state, rowNum, res, null),
+              err => applyColorAutoSwitch(state, rowNum, null, err))
+        .then(done, done);
+}
+
+// 切号结果落地。用户已手动继续/批次已换 → 不接管。
+function applyColorAutoSwitch(state, rowNum, res, err) {
+    if (batchColorState !== state) return;
+    if (state.running) return;
+    if (!/正在查找有额度的账号/.test(state.pausedReason || '')) return;
+    const name = String((res && res.name) || '').trim();
+    if (res && res.ok === true && name) {
+        state.lastSwitchAccount = name;   // 只存内存：下次命中额度时也排除它
+        if (colorQuotaTriedAccounts.indexOf(name) < 0) colorQuotaTriedAccounts.push(name);
+        const line = `第 ${colorQuotaAttempts} 次换号：已切到 ${name}，重跑 row${rowNum}`;
+        console.log('🎨 ' + line);
+        updateBatchColorStatus('🔀 ' + line);
+        showToast(`🔀 已切到 ${name}，重跑 row${rowNum}`);
+        restartColorBatchForRow(state, rowNum);
+        return;
+    }
+    const base = String(state.pausedReason || '').replace(/，正在查找有额度的账号…$/, '');
+    const code = res && res.reason;
+    const triedCount = colorQuotaTriedAccounts.length;
+    let text;
+    // 文案都保留「额度」二字：resumeColorBatch 靠它判断额度暂停（继续时要换新对话 + 重跑本款）
+    if (code === 'allExhausted') text = `所有账号额度均已用完（已试 ${triedCount} 个号），已暂停（可等恢复或加新账号后再继续）`;
+    else if (code === 'needLogin') text = '豆包额度已用完，且目标账号需要重新登录，请先在豆包登录后继续';
+    else if (code === 'busy') text = '豆包正在生成中，稍后点继续（当前账号额度仍用完）';
+    else text = base + `；自动切号失败（已试 ${triedCount} 个号）：` + ((res && res.error) || (err && err.message) || '未知原因');
+    // 失败即收尾：计数清零，下一次额度命中重新开一轮（成功分支不清，计数就是本轮换号次数）
+    colorQuotaTriedAccounts = [];
+    colorQuotaAttempts = 0;
+    console.warn('🔀 自动切号未成功：' + text);
+    finishBatchColor(false, text);
+    showToast('⏸ ' + text);
+}
+
+// 换号成功：换新 batchId、置 freshChatNext（旧对话里还留着额度气泡）、从本款重新派发。
+function restartColorBatchForRow(state, rowNum) {
+    const idx = state.queue.findIndex(p => p.row === rowNum);
+    if (idx >= 0) state.currentIndex = idx;
+    if (state.currentTimeoutId) { clearTimeout(state.currentTimeoutId); state.currentTimeoutId = null; }
+    setColorTimeoutRows([]); state.timedOutRows = [];
+    state.inFlightRow = null; state.pendingAckRow = null; state.inFlightSince = 0;
+    state.executionId = null;
+    state.lastAdvancedRow = null;
+    state.batchId = 'bc_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    state.pausedReason = '';
+    state.freshChatNext = true;
+    state.stopRequested = false;
+    state.running = true;
+    saveColorBatchState();
+    showBatchColorProgress();
+    updateBatchColorProgress();
+    startBatchColorPolling();
+    sendNextBatchColor();
+}
+
 // 结果判定：只有四色全部下载成功才算成功；否则给出缺失/失败原因
 function judgeColorTaskResult(results, rowNum) {
     const REQUIRED = ['white', 'black', 'gray', 'navy'];
@@ -4031,6 +4155,9 @@ function judgeColorTaskResult(results, rowNum) {
 // 切换文件暂停原任务，保留当前款，避免新文件接管。
 function handleColorFileSwitched(req) {
     const to = (req && req.to) || '';
+    // 换文件：额度换号的已试账号与次数作废（新文件是新一轮，不能带着旧结论）
+    colorQuotaTriedAccounts = [];
+    colorQuotaAttempts = 0;
     if (!batchColorState) return;
     const toKey = to ? String(to).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_') + '__' : '';
     if (toKey === batchColorState.fileKey) return;
@@ -5802,6 +5929,9 @@ function beginColorBatch(queueList, label, targeted=false, directoryReady=false)
     if (batchColorState && (batchColorState.inFlightRow || batchColorState.pendingAckRow)) {
         showToast('当前款尚未结束，未覆盖原换色任务'); return;
     }
+    // 新批次（一键换色 / 指定重生成）：额度换号的已试账号与次数从零开始
+    colorQuotaTriedAccounts = [];
+    colorQuotaAttempts = 0;
     batchColorState = {
         running: true,
         stopRequested: false,

@@ -1797,6 +1797,540 @@ async function recoverDoubaoAccountSwitch(tabId, name) {
     }
 }
 
+// ---------- 豆包账号账本（扫描 / 选号 / 自动切号） ----------
+// 为什么编排放在 background：切号会让豆包整页重载，重载销毁内容脚本，
+// 只有 background 的上下文能跨重载连续跑完一整轮探测。
+// 账本只落一个键 polo_doubao_accounts_v1，结构：
+// { dateKey:'YYYY-MM-DD', updatedAt, accounts: { [name]: { plan,status,percent,label,checkedAt,note,resumeAt,missing,probeSeq } } }
+// 可用性判定只用「试生图」的结论（status ok/exhausted），菜单百分比（percent/label）
+// 只作参考落库，不再参与判定 —— 百分比与「这一次能不能生成」不是一回事。
+const DOUBAO_LEDGER_KEY = 'polo_doubao_accounts_v1';
+const DOUBAO_STATUS_OK = 'ok';                 // 试生图成功：真的出图了
+const DOUBAO_STATUS_EXHAUSTED = 'exhausted';   // 试生图命中「额度已用完」
+const DOUBAO_STATUS_UNKNOWN = 'unknown';       // 未测/超时/异常/需登录，绝不当成 ok
+const DOUBAO_CHANNEL_CLOSED_RE = /message port closed|Receiving end does not exist|message channel closed|Could not establish connection/i;
+let doubaoScanInFlight = false;   // 扫描/自动切号重入闸（同一时刻只允许一轮）
+
+// 本地日期键（YYYY-MM-DD）：额度按自然日刷新，跨天必须把旧结论作废
+function doubaoLocalDateKey(ts) {
+    const d = (typeof ts === 'number' && ts > 0) ? new Date(ts) : new Date();
+    const p = n => (n < 10 ? '0' + n : String(n));
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+function doubaoEmptyLedger() { return { dateKey: doubaoLocalDateKey(), updatedAt: 0, accounts: {} }; }
+
+function doubaoNormStatus(s) {
+    return (s === DOUBAO_STATUS_OK || s === DOUBAO_STATUS_EXHAUSTED || s === DOUBAO_STATUS_UNKNOWN)
+        ? s : DOUBAO_STATUS_UNKNOWN;
+}
+
+// 读账本：任何脏数据都收敛成合法结构，读失败返回空账本（不抛）
+// 跨天处理：dateKey 不是今天就说明账本里全是「昨天甚至更早」的结论 —— 额度已刷新，
+// 把 status 全部重置为 unknown（保留 name/plan/missing/probeSeq），落盘后返回。
+async function doubaoLoadLedger() {
+    try {
+        const today = doubaoLocalDateKey();
+        const r = await chrome.storage.local.get(DOUBAO_LEDGER_KEY);
+        const raw = r && r[DOUBAO_LEDGER_KEY];
+        const ledger = doubaoEmptyLedger();
+        if (!raw || typeof raw !== 'object') return ledger;
+        ledger.dateKey = typeof raw.dateKey === 'string' ? raw.dateKey : '';
+        ledger.updatedAt = Number(raw.updatedAt) || 0;
+        const src = (raw.accounts && typeof raw.accounts === 'object') ? raw.accounts : {};
+        for (const name of Object.keys(src)) {
+            const v = src[name];
+            if (!v || typeof v !== 'object' || !name) continue;
+            ledger.accounts[name] = {
+                plan: typeof v.plan === 'string' ? v.plan : '',
+                status: doubaoNormStatus(v.status),
+                percent: (typeof v.percent === 'number' && Number.isFinite(v.percent)) ? v.percent : null,
+                label: typeof v.label === 'string' ? v.label : '',
+                checkedAt: Number(v.checkedAt) || 0,
+                note: typeof v.note === 'string' ? v.note : '',
+                resumeAt: typeof v.resumeAt === 'string' ? v.resumeAt : '',
+                missing: v.missing === true,
+                probeSeq: Number(v.probeSeq) || 0
+            };
+        }
+        if (ledger.dateKey !== today) {
+            for (const name of Object.keys(ledger.accounts)) {
+                const a = ledger.accounts[name];
+                a.status = DOUBAO_STATUS_UNKNOWN;
+                a.percent = null;
+                a.label = '';
+                a.checkedAt = 0;
+                a.note = 'dayRefresh';
+                a.resumeAt = '';
+            }
+            ledger.dateKey = today;
+            await doubaoSaveLedger(ledger);
+        }
+        return ledger;
+    } catch (e) {
+        console.warn('[doubao ledger] 读取失败，按空账本处理:', e.message);
+        return doubaoEmptyLedger();
+    }
+}
+
+async function doubaoSaveLedger(ledger) {
+    try {
+        const out = { dateKey: doubaoLocalDateKey(), updatedAt: Date.now(), accounts: {} };
+        if (ledger && typeof ledger.dateKey === 'string' && ledger.dateKey) out.dateKey = ledger.dateKey;
+        const src = (ledger && ledger.accounts) || {};
+        for (const name of Object.keys(src)) {
+            const v = src[name] || {};
+            out.accounts[name] = {
+                plan: typeof v.plan === 'string' ? v.plan : '',
+                status: doubaoNormStatus(v.status),
+                percent: (typeof v.percent === 'number' && Number.isFinite(v.percent)) ? v.percent : null,
+                label: typeof v.label === 'string' ? v.label : '',
+                checkedAt: Number(v.checkedAt) || 0,
+                note: typeof v.note === 'string' ? v.note : '',
+                resumeAt: typeof v.resumeAt === 'string' ? v.resumeAt : '',
+                missing: v.missing === true,
+                probeSeq: Number(v.probeSeq) || 0
+            };
+        }
+        ledger.updatedAt = out.updatedAt;
+        ledger.dateKey = out.dateKey;
+        await chrome.storage.local.set({ [DOUBAO_LEDGER_KEY]: out });
+        return true;
+    } catch (e) {
+        console.warn('[doubao ledger] 写入失败:', e.message);
+        return false;
+    }
+}
+
+// 带超时的内容脚本调用：避免页面重载/卡死时整轮扫描无限挂住
+function doubaoSendToTab(tabId, payload, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        let done = false;
+        const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            reject(new Error('豆包页面响应超时'));
+        }, timeoutMs || 30000);
+        let p;
+        try { p = chrome.tabs.sendMessage(tabId, payload); }
+        catch (e) { clearTimeout(timer); if (!done) { done = true; reject(e); } return; }
+        Promise.resolve(p).then(
+            v => { if (done) return; done = true; clearTimeout(timer); resolve(v); },
+            e => { if (done) return; done = true; clearTimeout(timer); reject(e); }
+        );
+    });
+}
+
+// 发品/换色/套图是否在跑（复用既有判据：套图执行锁 + 换色执行身份 + 内容脚本忙态）
+async function doubaoIsAccountBusy() {
+    try { if (globalThis.__suiteExecLock) return true; } catch (_) {}
+    try {
+        const exec = await getActiveColorExec();
+        if (exec && (exec.state === 'pending' || exec.state === 'accepted')) return true;
+    } catch (_) {}
+    try {
+        const tab = await findDoubaoTab();
+        if (tab) {
+            const st = await doubaoSendToTab(tab.id, { action: 'doubaoBusyState' }, 8000).catch(() => null);
+            if (st && st.ok === true && st.busy === true) return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
+// 单次切号（含重载断通道的复核）。返回内容脚本原语的结果，或 ok:false+needLogin/busy/error
+async function doubaoSwitchForScan(tabId, name) {
+    try {
+        const resp = await doubaoSendToTab(tabId, { action: 'doubaoSwitchAccount', name }, 45000);
+        return resp || { ok: false, error: '豆包页面无返回' };
+    } catch (e) {
+        const msg = String((e && e.message) || '');
+        if (DOUBAO_CHANNEL_CLOSED_RE.test(msg)) {
+            // 正常路径：点完账号行页面就重载了，通道先死，再复核真实账号名
+            return await recoverDoubaoAccountSwitch(tabId, name);
+        }
+        return { ok: false, error: msg };
+    }
+}
+
+// 说明：菜单额度百分比（readQuotaPercent / doubaoQuotaPercent 原语）保留可用，
+// 但不再参与账号可用性判定 —— 判定只看「试生图能不能出图」（见 doubaoOutcomeFromProbe）。
+
+function doubaoNextProbeSeq(ledger) {
+    let max = 0;
+    const acc = (ledger && ledger.accounts) || {};
+    for (const name of Object.keys(acc)) max = Math.max(max, Number(acc[name] && acc[name].probeSeq) || 0);
+    return max + 1;
+}
+
+function doubaoWriteProbe(ledger, name, outcome, plan) {
+    if (!ledger.accounts[name]) ledger.accounts[name] = {};
+    const a = ledger.accounts[name];
+    a.plan = plan || a.plan || '';
+    a.status = doubaoNormStatus(outcome.status);
+    a.percent = (typeof outcome.percent === 'number' && Number.isFinite(outcome.percent)) ? outcome.percent : null;
+    a.label = outcome.label || '';
+    a.note = outcome.note || '';
+    a.resumeAt = outcome.resumeAt || '';
+    a.checkedAt = Date.now();
+    a.missing = false;
+    a.probeSeq = doubaoNextProbeSeq(ledger);
+}
+
+// 试生图结果 → 账本三态。只有「真出图」才算 ok，只有「命中额度文案」才算 exhausted，
+// 其余（超时/异常/需登录/忙）一律 unknown —— 结论未知不等于没额度。
+function doubaoOutcomeFromProbe(pr) {
+    if (pr && pr.ok === true) {
+        return { status: DOUBAO_STATUS_OK, percent: null, label: '', note: 'generateOk', resumeAt: '' };
+    }
+    const reason = String((pr && pr.reason) || '');
+    if (reason === 'exhausted') {
+        return {
+            status: DOUBAO_STATUS_EXHAUSTED, percent: null, label: '',
+            note: 'quotaExhausted', resumeAt: typeof pr.resumeAt === 'string' ? pr.resumeAt : ''
+        };
+    }
+    if (reason === 'needLogin') {
+        return { status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '', note: 'needLogin', resumeAt: '' };
+    }
+    if (reason === 'timeout') {
+        return { status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '', note: 'timeout', resumeAt: '' };
+    }
+    if (reason === 'busy') {
+        return { status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '', note: 'busy', resumeAt: '' };
+    }
+    return { status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '', note: 'probeError', resumeAt: '' };
+}
+
+// 探测单个账号：切过去 → 真发一条生图请求看能不能出图 → 写账本。
+// 返回 {busy?} 或 {outcome, switched, probe}。会消耗 1 张图片额度。
+async function doubaoProbeOne(tabId, name, ledger, plan) {
+    const sw = await doubaoSwitchForScan(tabId, name);
+    if (!sw || (sw.ok !== true && !sw.sameAccount)) {
+        if (sw && sw.busy) {
+            return { busy: true, error: sw.error || '豆包正在生成中' };
+        }
+        if (sw && sw.needLogin) {
+            const outcome = { status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '', note: 'needLogin', resumeAt: '' };
+            doubaoWriteProbe(ledger, name, outcome, plan);
+            await doubaoSaveLedger(ledger);
+            // reloaded=true 说明确实切过去了（只是那账号要重新登录），后续切回要按已切走处理
+            return { outcome, switched: sw.reloaded === true, error: sw.error || '该账号需要重新登录' };
+        }
+        const outcome = {
+            status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '', resumeAt: '',
+            note: String((sw && sw.error) || 'switchFailed').slice(0, 80)
+        };
+        doubaoWriteProbe(ledger, name, outcome, plan);
+        await doubaoSaveLedger(ledger);
+        return { outcome, switched: false, error: (sw && sw.error) || '切号失败' };
+    }
+
+    // 试生图：内容脚本内部最多等 90s，这里给 120s（含开新对话/等输入框的耗时）
+    const probe = await doubaoSendToTab(tabId, { action: 'doubaoProbeGenerate' }, 120000)
+        .catch(e => ({ ok: false, reason: 'error', error: e.message }));
+    const outcome = doubaoOutcomeFromProbe(probe);
+    doubaoWriteProbe(ledger, name, outcome, plan);
+    await doubaoSaveLedger(ledger);
+    return { outcome, switched: sw.ok === true, probe, canGenerate: probe && probe.ok === true };
+}
+
+// 列表 → 账本合并：本轮新出现的写 unknown（这就是「每次扫描看有没有新账号」）；
+// 账本里有但本轮列表没有的保留并标 missing:true，不删（账号可能是被折叠/暂时没渲染）
+function doubaoMergeAccountList(ledger, accounts) {
+    const seen = new Set();
+    for (const a of (accounts || [])) {
+        const name = a && a.name ? String(a.name) : '';
+        if (!name) continue;
+        seen.add(name);
+        let cur = ledger.accounts[name];
+        if (!cur) {
+            ledger.accounts[name] = {
+                plan: typeof a.plan === 'string' ? a.plan : '',
+                status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '',
+                checkedAt: 0, note: 'new', missing: false, probeSeq: 0
+            };
+        } else {
+            cur.missing = false;
+            if (!cur.plan && typeof a.plan === 'string' && a.plan) cur.plan = a.plan;
+        }
+    }
+    for (const name of Object.keys(ledger.accounts)) {
+        if (!seen.has(name)) ledger.accounts[name].missing = true;
+    }
+    return ledger;
+}
+
+async function doubaoReadCurrentName(tabId) {
+    try {
+        const list = await doubaoSendToTab(tabId, { action: 'doubaoListAccounts' }, 20000);
+        return (list && list.ok && list.current) ? String(list.current) : '';
+    } catch (_) { return ''; }
+}
+
+// 一轮扫描（不判忙、不置重入闸，供 doubaoScanAccountsAction 复用）
+// mode='new'：对所有 unknown 账号逐个「切号 → 试生图」；mode='all'：全部账号都试一遍。
+// 注意：每次试生图真实消耗 1 张图片额度，所以默认只试 unknown，不重复烧已测过的号。
+async function doubaoScanAccountsOnce(mode) {
+    const startedAt = Date.now();
+    const errors = [];
+    let ledger = await doubaoLoadLedger();
+    const result = (extra) => Object.assign({
+        ok: true, total: 0, probed: 0, skipped: 0, ledger,
+        endedOn: '', elapsedMs: Date.now() - startedAt, errors
+    }, extra || {});
+
+    const tab = await findDoubaoTab();
+    if (!tab) {
+        return result({ ok: false, reason: 'noTab', error: '未找到豆包页面' });
+    }
+
+    const list = await doubaoSendToTab(tab.id, { action: 'doubaoListAccounts' }, 30000).catch(e => ({ ok: false, error: e.message }));
+    if (!list || list.ok !== true) {
+        const wall = !!(list && list.loginWall === true);
+        return result({
+            ok: false,
+            reason: wall ? 'needLogin' : 'listFailed',
+            error: (list && list.error) || '读取账号列表失败'
+        });
+    }
+
+    const startName = list.current ? String(list.current) : '';
+    const accounts = (list.accounts || []).filter(a => a && a.name);
+    doubaoMergeAccountList(ledger, accounts);
+    await doubaoSaveLedger(ledger);   // 先落盘：扫描中途被打断，新号至少已经记成 unknown
+
+    const names = accounts.map(a => String(a.name));
+    const planOf = {};
+    for (const a of accounts) planOf[String(a.name)] = typeof a.plan === 'string' ? a.plan : '';
+    const targets = mode === 'all' ? names.slice() : names.filter(n => ledger.accounts[n] && ledger.accounts[n].status === DOUBAO_STATUS_UNKNOWN);
+
+    let probed = 0;
+    let lastSwitchedTo = startName;
+    let interrupted = '';
+    for (const name of targets) {
+        if (interrupted) { errors.push({ name, error: interrupted }); continue; }
+        if (await doubaoIsAccountBusy()) {
+            interrupted = '发品/换色/套图任务开始执行，扫描中止';
+            errors.push({ name, error: interrupted });
+            continue;
+        }
+        const r = await doubaoProbeOne(tab.id, name, ledger, planOf[name]);
+        if (r && r.busy) {
+            interrupted = r.error || '豆包正在生成中，扫描中止';
+            errors.push({ name, error: interrupted });
+            continue;
+        }
+        probed++;
+        if (r && r.switched) lastSwitchedTo = name;
+        if (r && r.error) errors.push({ name, error: r.error });
+    }
+
+    // 收尾：尽量切回「开始扫描时的那个账号」；切不回去如实回报 endedOn
+    let endedOn = lastSwitchedTo || '';
+    if (startName && lastSwitchedTo !== startName) {
+        const back = await doubaoSwitchForScan(tab.id, startName);
+        if (back && (back.ok === true || back.sameAccount)) {
+            endedOn = startName;
+        } else {
+            endedOn = await doubaoReadCurrentName(tab.id);
+            errors.push({ name: startName, error: '切回原账号失败：' + ((back && back.error) || '未知原因') });
+        }
+    }
+
+    const skipped = Math.max(0, names.length - probed);
+    return result({ probed, skipped, total: names.length, endedOn });
+}
+
+async function doubaoScanAccountsAction(mode) {
+    if (doubaoScanInFlight) return { ok: false, reason: 'busy', error: '账号扫描/自动切号已在进行' };
+    doubaoScanInFlight = true;
+    try {
+        if (await doubaoIsAccountBusy()) return { ok: false, reason: 'busy', error: '发品/换色/套图任务正在进行，暂不扫描账号' };
+        return await doubaoScanAccountsOnce(mode === 'all' ? 'all' : 'new');
+    } catch (e) {
+        return { ok: false, reason: 'error', error: e.message, ledger: await doubaoLoadLedger() };
+    } finally {
+        doubaoScanInFlight = false;
+    }
+}
+
+// 当天已判「没额度」的号：只有确实是今天试出来的才算，跨天（额度已刷新）不得沿用
+function doubaoIsFreshExhausted(a) {
+    if (!a || a.status !== DOUBAO_STATUS_EXHAUSTED) return false;
+    const ts = Number(a.checkedAt) || 0;
+    if (!ts) return false;
+    return doubaoLocalDateKey(ts) === doubaoLocalDateKey();
+}
+
+function doubaoProbeOrder(x, y) {
+    return (x[1].probeSeq - y[1].probeSeq) || (x[1].checkedAt - y[1].checkedAt);
+}
+
+// 候选顺序：先 status=ok（今天真出过图），再 unknown（没试过/结论未知）。
+// 跳过：missing（列表里点不到）、exclude、当天已判 exhausted。
+// 返回 { order:[name], skipped:[name], present:[[name,acc]] }
+function doubaoBuildCandidates(ledger, exclude) {
+    const ex = new Set((exclude || []).map(s => String(s == null ? '' : s).trim()).filter(Boolean));
+    const present = Object.entries((ledger && ledger.accounts) || {})
+        .filter(([n, a]) => a && a.missing !== true && !ex.has(n));
+    const okList = present.filter(([, a]) => a.status === DOUBAO_STATUS_OK).sort(doubaoProbeOrder);
+    const unknown = present.filter(([, a]) => a.status === DOUBAO_STATUS_UNKNOWN).sort(doubaoProbeOrder);
+    const skipped = present.filter(([, a]) => doubaoIsFreshExhausted(a)).map(([n]) => n);
+    return {
+        order: okList.concat(unknown).map(([n]) => n),
+        skipped,
+        present
+    };
+}
+
+// 选号：只在「present（非 missing）、未被 exclude、status=ok（试生图真出过图）」里，
+// 按最近一次 probe 顺序取第一个。missing 的账号点不到，不参与选择。
+// 语义说明：status ok 表示「这个号今天真出过图」，不依赖菜单百分比。
+function doubaoPickFromLedger(ledger, exclude) {
+    const ex = new Set((exclude || []).map(s => String(s == null ? '' : s).trim()).filter(Boolean));
+    const all = Object.entries((ledger && ledger.accounts) || {});
+    const present = all.filter(([n, a]) => a && a.missing !== true && !ex.has(n));
+    const cand = doubaoBuildCandidates(ledger, exclude);
+    if (cand.order.length) return { ok: true, name: cand.order[0] };
+    if (!present.length) return { ok: false, reason: 'noneKnown' };
+    const unknown = present.filter(([, a]) => a.status === DOUBAO_STATUS_UNKNOWN);
+    const exhausted = present.filter(([, a]) => a.status === DOUBAO_STATUS_EXHAUSTED);
+    if (exhausted.length === present.length) return { ok: false, reason: 'allExhausted' };
+    if (unknown.length === present.length) return { ok: false, reason: 'allUnknown' };
+    return { ok: false, reason: 'noneKnown' };
+}
+
+async function doubaoPickAccountAction() {
+    try {
+        const ledger = await doubaoLoadLedger();
+        const pick = doubaoPickFromLedger(ledger, []);
+        if (pick.ok) return { ok: true, name: pick.name, ledger };
+        return { ok: false, reason: pick.reason, ledger };
+    } catch (e) {
+        return { ok: false, reason: 'noneKnown', error: e.message };
+    }
+}
+
+// 一次性自动切号：只切号，不探测 —— 切到第一个能切过去的候选就返回。
+//
+// 为什么不再「试生图」：调用本动作的唯一场景是「当前号刚弹额度」，页面拿到成功结果后
+// 会自己重跑**当前这一款真实任务**。于是额度结论由真实任务回填：
+//   出图        → 这个号有额度，继续下一款（账本记 ok 由真实任务链路负责，本动作不写）
+//   又弹额度    → 页面把这个号记进已试列表，再调本动作换下一个号，重跑同一款
+// 试生图除了白烧 1 张图片额度外没有任何信息增量，因此彻底去掉：本函数不发任何生成请求。
+//
+// 流程：读账本 → 候选排序（ok 在前、unknown 在后，跳过 missing / exclude / 当天已判 exhausted）
+//       → 逐个「只切号」：
+//          切成功 → 立刻返回 {ok:true,name,scanned:false,ledger}，不再试后面的
+//          切失败 → 该号记 unknown + note，接着试下一个（最多把候选试完）
+// 全部候选都不行：
+//   能点的号全被「当天已判 exhausted」挡住 → {ok:false, reason:'allExhausted'}
+//   切号本身失败/需登录（结论未知）        → {ok:false, reason:'none', error}
+//   只有「全是 exhausted」才报 allExhausted —— 没切过去不等于没额度。
+async function doubaoAutoSwitchAction(request) {
+    let ledger = doubaoEmptyLedger();
+    const tried = [];
+    try {
+        if (doubaoScanInFlight) return { ok: false, reason: 'busy', ledger: await doubaoLoadLedger(), tried };
+        if (await doubaoIsAccountBusy()) return { ok: false, reason: 'busy', ledger: await doubaoLoadLedger(), tried };
+
+        const tab = await findDoubaoTab();
+        if (!tab) return { ok: false, reason: 'none', error: '未找到豆包页面', ledger: await doubaoLoadLedger(), tried };
+
+        const exclude = Array.isArray(request && request.exclude) ? request.exclude.slice() : [];
+        ledger = await doubaoLoadLedger();
+
+        // 关键：把"当前正在用的账号"排除掉。
+        // 页面侧调用时刚发生额度用完，但账本里这个号可能还写着 ok，
+        // 不排除就会把同一个号再切一次 → 页面重跑 → 再命中 → 死循环。
+        const cur = await doubaoReadCurrentName(tab.id);
+        if (cur) {
+            if (exclude.indexOf(cur) < 0) exclude.push(cur);
+            // 刚用完额度的号顺手记为 exhausted（除非调用方明确说别动）
+            if (!request || request.quotaExhausted !== false) {
+                doubaoWriteProbe(ledger, cur, { status: DOUBAO_STATUS_EXHAUSTED, percent: null, label: '本批刚用完', note: 'quotaExhausted', resumeAt: '' });
+                await doubaoSaveLedger(ledger);
+            }
+        }
+
+        let cand = doubaoBuildCandidates(ledger, exclude);
+
+        // 账本里一个能点的号都没有（首次使用/账本被清）：先拉一次账号列表，只登记不探测
+        if (!cand.present.length) {
+            const list = await doubaoSendToTab(tab.id, { action: 'doubaoListAccounts' }, 20000)
+                .catch(e => ({ ok: false, error: e.message }));
+            if (list && list.loginWall === true) return { ok: false, reason: 'needLogin', ledger, tried };
+            if (list && list.ok === true) {
+                doubaoMergeAccountList(ledger, list.accounts || []);
+                await doubaoSaveLedger(ledger);
+                cand = doubaoBuildCandidates(ledger, exclude);
+            }
+        }
+        if (!cand.present.length) {
+            const hasAny = Object.keys(ledger.accounts).length > 0;
+            return hasAny
+                ? { ok: false, reason: 'allExhausted', ledger, tried }
+                : { ok: false, reason: 'none', error: '账本里没有可用账号', ledger, tried };
+        }
+        if (!cand.order.length) {
+            // 能点的号全被当天 exhausted 结论挡住：这就是「都没额度」
+            return { ok: false, reason: 'allExhausted', ledger, tried, skipped: cand.skipped };
+        }
+
+        let lastError = '';
+        doubaoScanInFlight = true;
+        try {
+            for (const name of cand.order) {
+                if (await doubaoIsAccountBusy()) {
+                    return { ok: false, reason: 'busy', error: '发品/换色/套图任务正在进行，暂不切号', ledger, tried };
+                }
+                // 只切号：不发任何生成请求（不 probe、不试生图、不占额度）
+                const sw = await doubaoSwitchForScan(tab.id, name);
+                if (sw && sw.busy) {
+                    return { ok: false, reason: 'busy', error: sw.error || '豆包正在生成中，暂不切号', ledger, tried };
+                }
+                if (sw && sw.ok === true) {
+                    return { ok: true, name, scanned: false, ledger, tried };
+                }
+                // 切号失败（含需重新登录）：如实记 unknown，接着试下一个候选
+                const why = sw && sw.needLogin ? 'needLogin' : ((sw && sw.error) || '切号失败');
+                doubaoWriteProbe(ledger, name, {
+                    status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '', resumeAt: '',
+                    note: String(why).slice(0, 80)
+                }, (ledger.accounts[name] && ledger.accounts[name].plan) || '');
+                await doubaoSaveLedger(ledger);
+                tried.push({ name, error: why });
+                lastError = why;
+            }
+        } finally {
+            doubaoScanInFlight = false;
+        }
+
+        // 候选全部切不过去：没有任何「明确没额度」的证据，只能报 none ——
+        // 没切过去（需登录/超时/异常）不等于没额度，别把结论未知说成"所有号都没额度"。
+        return { ok: false, reason: 'none', error: '账号都切不过去：' + (lastError || '未知原因'), ledger, tried };
+    } catch (e) {
+        return { ok: false, reason: 'none', error: e.message, ledger, tried };
+    }
+}
+
+async function doubaoGetAccountLedgerAction() {
+    const ledger = await doubaoLoadLedger();
+    return { ok: true, dateKey: ledger.dateKey, updatedAt: ledger.updatedAt, accounts: ledger.accounts };
+}
+
+// 手动清空账号额度记录（调试/误标时用）：清完所有账号回到 unknown，不影响豆包本身
+async function doubaoResetAccountLedgerAction() {
+    try {
+        const empty = doubaoEmptyLedger();
+        await doubaoSaveLedger(empty);
+        return { ok: true, dateKey: empty.dateKey, updatedAt: empty.updatedAt, accounts: empty.accounts };
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+}
+
 async function relayDoubaoAccountAction(request) {
     try {
         if (request.action === 'doubaoSwitchAccount' && (typeof request.name !== 'string' || !request.name.trim())) {
@@ -1839,6 +2373,19 @@ async function handleSharedAction(request, sendResponse, sender) {
     // ---------- 豆包账号：切号 / 列账号 / 读额度（发品助手 file:// 页可直接调用） ----------
     if (request.action === 'doubaoSwitchAccount' || request.action === 'doubaoListAccounts' || request.action === 'doubaoQuotaPercent') {
         relayDoubaoAccountAction(request).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    // ---------- 豆包账号账本：扫描 / 选号 / 一次性自动切号 / 读账本 ----------
+    if (request.action === 'doubaoScanAccounts' || request.action === 'doubaoPickAccount'
+        || request.action === 'doubaoAutoSwitch' || request.action === 'doubaoGetAccountLedger'
+        || request.action === 'doubaoResetAccountLedger') {
+        (async () => {
+            if (request.action === 'doubaoScanAccounts') return await doubaoScanAccountsAction(request.mode);
+            if (request.action === 'doubaoPickAccount') return await doubaoPickAccountAction();
+            if (request.action === 'doubaoAutoSwitch') return await doubaoAutoSwitchAction(request);
+            if (request.action === 'doubaoResetAccountLedger') return await doubaoResetAccountLedgerAction();
+            return await doubaoGetAccountLedgerAction();
+        })().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'suitePreparePage') {

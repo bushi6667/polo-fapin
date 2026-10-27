@@ -858,6 +858,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ ok: true, isProcessing, task: colorTask });
         return true;
     }
+    // 忙态（供 background 扫描/自动切号前判断）：套图生成不设 isProcessing，只能看 DOM 忙类
+    if (request.action === 'doubaoBusyState') {
+        let domBusy = false;
+        try { domBusy = isDoubaoBusyInDom(); } catch (_) {}
+        sendResponse({ ok: true, busy: !!(isProcessing || domBusy), processing: !!isProcessing, domBusy: !!domBusy });
+        return true;
+    }
     // ---------- 账号原语（只对调用方负责，不参与任何轮询/自动流程） ----------
     if (request.action === 'doubaoListAccounts') {
         listDoubaoAccounts().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
@@ -869,6 +876,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     if (request.action === 'doubaoSwitchAccount') {
         switchDoubaoAccount(request.name).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    // 试生图探测：真实发一条生图请求判「这个号现在能不能生成」。
+    // 会消耗 1 张图片额度，只允许 background 的账号探测路径调用。
+    if (request.action === 'doubaoProbeGenerate') {
+        probeAccountByGenerate().then(sendResponse).catch(e => sendResponse({ ok: false, reason: 'error', error: e.message }));
         return true;
     }
 });
@@ -939,6 +952,11 @@ function showToast(msg) {
 //   账号行     div[role="menuitem"][data-testid="avatar_menu_account_row"]
 //   更多账号   [data-slot="dropdown-menu-sub-trigger"] 且文案含「更多账号」
 //   （添加账号 avatar_menu_add_account / 退出登录 setup_logout 本文件不点，留作后续接线）
+//
+// 菜单开关判定【真机实测】：Radix 关闭后节点仍留在 DOM，且 offsetHeight=498 / opacity=1 /
+// pointerEvents=auto（几何判断恒为 true，已废弃）。唯一可信判据是 data-state：
+//   打开 = 存在 [data-testid="chat_header_menu"][data-state="open"]
+//   关闭 = 没有任何 data-state="open" 的菜单节点（节点上的 "closed" 才是真值）
 // ============================================================
 
 var DOUBAO_MENU_SEL = '[data-testid="chat_header_menu"]';
@@ -992,10 +1010,20 @@ function readDoubaoHeaderName() {
     } catch (_) { return ''; }
 }
 
+// 菜单是否打开：只认 data-state="open"。
+// 为什么不用几何/可见性：Radix 关闭后节点仍在 DOM 里且 offsetHeight/opacity 都正常，
+// 用 offsetHeight / getClientRects 判会恒为 true（真机实测 2026-10）。可见性仅作辅助过滤。
 function isAccountMenuOpen() {
     try {
-        const el = document.querySelector(DOUBAO_MENU_SEL);
-        return !!el && isDoubaoVisible(el);
+        const menus = document.querySelectorAll(DOUBAO_MENU_SEL);
+        for (const el of menus) {
+            if (!el || el.isConnected === false) continue;
+            if (String(el.getAttribute('data-state') || '') !== 'open') continue;
+            // 辅助过滤：真有渲染盒子的才算（data-state 已 open 时必然成立，纯防御）
+            if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+            return true;
+        }
+        return false;
     } catch (_) { return false; }
 }
 
@@ -1007,6 +1035,17 @@ async function waitAccountMenuClosed(ms) {
             await sleep(80);
         }
         return !isAccountMenuOpen();
+    } catch (_) { return false; }
+}
+
+async function waitAccountMenuOpen(ms) {
+    try {
+        const start = Date.now();
+        while (Date.now() - start < ms) {
+            if (isAccountMenuOpen()) return true;
+            await sleep(80);
+        }
+        return isAccountMenuOpen();
     } catch (_) { return false; }
 }
 
@@ -1038,19 +1077,28 @@ function activateDoubaoTarget(el) {
     }
 }
 
-// 打开一级账号菜单：点头像 → 等 [data-testid=chat_header_menu] 可见，超时 3s 返回 false
+// 打开一级账号菜单：点头像 → 等 [data-testid=chat_header_menu][data-state=open] 出现，超时 3s 返回 false
 async function openAccountMenu() {
     try {
-        if (isAccountMenuOpen()) return true;
+        // 已开就复用（再点头像会把它 toggle 关掉）。二次确认是为了排除「正好在关闭动画里」的假 open
+        if (isAccountMenuOpen()) {
+            await sleep(120);
+            if (isAccountMenuOpen()) return true;
+        }
         const btn = findDoubaoAvatarButton();
         if (!btn) { log('未找到头像按钮，无法打开账号菜单', 'warn'); return false; }
-        nativeMouseClick(btn);
-        const start = Date.now();
-        while (Date.now() - start < 3000) {
-            if (isAccountMenuOpen()) { await sleep(150); return true; }   // 再多等 150ms 让账号行渲染完
-            await sleep(100);
+        // 真机结论（2026-10-27）：头顶菜单是 Radix DropdownMenu，只认 pointerdown/pointerup；
+        // nativeMouseClick 只发 mouse 系列，点了菜单不开（实测 menuFailed）。
+        // 先用 CDP 真鼠标（realClick），不行再退回 pointer 全序列。
+        try { await realClick(btn); } catch (_) { nativeMouseClick(btn); }
+        if (!isAccountMenuOpen()) {
+            activateDoubaoTarget(btn);
         }
-        log('账号菜单 3s 内未出现', 'warn');
+        if (await waitAccountMenuOpen(3000)) {
+            await sleep(150);   // 再多等 150ms 让账号行渲染完
+            return true;
+        }
+        log('账号菜单 3s 内未出现（data-state 未变成 open）', 'warn');
         return false;
     } catch (e) {
         log('打开账号菜单异常: ' + e.message, 'warn');
@@ -1059,6 +1107,7 @@ async function openAccountMenu() {
 }
 
 // 关闭账号菜单：先 Esc（与页面其它浮层同一关法），关不掉再点空白。
+// 「关掉了」的判据同 open：data-state 不再是 open（节点留在 DOM 里也不代表开着）。
 // 只派发指针事件、不调 el.click()，避免真的触发页面上某个按钮（不影响输入框与主流程）
 async function closeAccountMenu() {
     try {
@@ -1123,15 +1172,47 @@ function parseDoubaoAccountRow(row) {
     } catch (_) { return { name: '', plan: '' }; }
 }
 
+// 只在「真正打开的那些菜单」子树里找行/触发器。
+// 为什么：Radix 关闭后节点仍留在 DOM（真机实测 offsetHeight=498），全局扫描会把
+// 上一次残留菜单里的旧行也收进来 → 点到 detached 节点，表现是「点了没反应」。
+// 注意「更多账号」展开后是**另一个 portal 节点**，不在一级菜单子树内，
+// 所以这里要收全部 open 的菜单内容根，而不是只收 chat_header_menu。
+function doubaoOpenMenuRoots() {
+    try {
+        const sels = [
+            DOUBAO_MENU_SEL + '[data-state="open"]',
+            '[data-radix-menu-content][data-state="open"]',
+            '[data-slot="dropdown-menu-content"][data-state="open"]',
+            '[data-slot="dropdown-menu-sub-content"][data-state="open"]',
+        ];
+        const seen = [];
+        for (const sel of sels) {
+            for (const el of document.querySelectorAll(sel)) {
+                if (!el || seen.indexOf(el) >= 0) continue;
+                if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+                seen.push(el);
+            }
+        }
+        return seen;
+    } catch (_) { return []; }
+}
+
 function collectDoubaoAccountRows() {
     const out = [];
     try {
-        for (const row of document.querySelectorAll(DOUBAO_ACCOUNT_ROW_SEL)) {
-            if (!isDoubaoVisible(row)) continue;
-            const parsed = parseDoubaoAccountRow(row);
-            if (!parsed.name) continue;
-            parsed.el = row;
-            out.push(parsed);
+        const roots = doubaoOpenMenuRoots();
+        const scope = roots.length ? roots : [document];
+        const seen = [];
+        for (const root of scope) {
+            for (const row of root.querySelectorAll(DOUBAO_ACCOUNT_ROW_SEL)) {
+                if (seen.indexOf(row) >= 0) continue;
+                if (!isDoubaoVisible(row)) continue;
+                const parsed = parseDoubaoAccountRow(row);
+                if (!parsed.name) continue;
+                seen.push(row);
+                parsed.el = row;
+                out.push(parsed);
+            }
         }
     } catch (_) {}
     return out;
@@ -1139,9 +1220,13 @@ function collectDoubaoAccountRows() {
 
 function findDoubaoMoreAccountsTrigger() {
     try {
-        for (const el of document.querySelectorAll('[data-slot="dropdown-menu-sub-trigger"]')) {
-            if (!isDoubaoVisible(el)) continue;
-            if (String(el.innerText || el.textContent || '').indexOf('更多账号') >= 0) return el;
+        const roots = doubaoOpenMenuRoots();
+        const scope = roots.length ? roots : [document];
+        for (const root of scope) {
+            for (const el of root.querySelectorAll('[data-slot="dropdown-menu-sub-trigger"]')) {
+                if (!isDoubaoVisible(el)) continue;
+                if (String(el.innerText || el.textContent || '').indexOf('更多账号') >= 0) return el;
+            }
         }
     } catch (_) {}
     return null;
@@ -1239,35 +1324,69 @@ async function listDoubaoAccounts() {
     }
 }
 
-// 「近 7 天消耗消耗 100%」：文案可能重复「消耗」、可能跨 span 换行。
-// 先抹掉所有空白，再从「近7天消耗」之后最多 12 个非数字字符内抓百分数。
+// 额度用量条目（真机实测有两种文案，随账号状态切换）：
+//   已用满的账号：「近 7 天消耗消耗 100%」
+//   新账号/未消耗：「当前时段额度用量 0%」
+// 文案可能重复字（消耗消耗）、可能跨 span 换行，先抹掉所有空白再抓。
+// 返回 { label, percent }；label 用于区分是哪个额度池，调用方不要混为一谈。
 function parseDoubaoQuotaPercent(text) {
     try {
         const flat = String(text || '').replace(/[\s\u00a0]+/g, '');
-        const m = flat.match(/近7天消耗\D{0,12}?(\d{1,3})%/);
+        const m = flat.match(/(近7天消耗|当前时段额度用量)\D{0,12}?(\d{1,3})%/);
         if (!m) return null;
-        const v = parseInt(m[1], 10);
-        return (Number.isFinite(v) && v >= 0 && v <= 100) ? v : null;
+        const v = parseInt(m[2], 10);
+        if (!(Number.isFinite(v) && v >= 0 && v <= 100)) return null;
+        return { label: m[1], percent: v };
     } catch (_) { return null; }
 }
 
+// 原文片段（只截断，不做改写），便于调用方/人工排查
+function doubaoRawSnippet(text, max) {
+    try {
+        const s = String(text == null ? '' : text);
+        const n = max > 0 ? max : 400;
+        return s.length > n ? s.slice(0, n) + '…' : s;
+    } catch (_) { return ''; }
+}
+
 // 读额度百分比：只在被调用时开一次菜单（不进任何轮询循环）
+// 返回三态（调用方必须按 reason 区分，ok:false 一律表示「额度未知」）：
+//   { ok:true,  percent, raw, loginWall }                       读到百分比
+//   { ok:false, reason:'menuFailed', error, loginWall }         菜单没打开 → 完全不知道额度
+//   { ok:false, reason:'noQuotaRow', error, raw, loginWall }    菜单开了但没有「近 7 天消耗」这一项
+//                                                               （部分套餐/无消耗时不渲染，不是读取失败）
+//   { ok:false, reason:'exception',  error, loginWall }         过程抛异常
 async function readQuotaPercent() {
     try {
         const opened = await openAccountMenu();
         if (!opened) {
-            return { ok: false, error: '未能打开账号菜单（未找到头像按钮或菜单未出现）', loginWall: detectLoginWall().needLogin };
+            return {
+                ok: false,
+                reason: 'menuFailed',
+                error: '未能打开账号菜单（未找到头像按钮或菜单未出现）',
+                loginWall: detectLoginWall().needLogin
+            };
         }
-        const menu = document.querySelector(DOUBAO_MENU_SEL);
+        // 只读真正的那个菜单节点（DOM 里可能还留着早先的 closed 节点）
+        const menu = document.querySelector(DOUBAO_MENU_SEL + '[data-state="open"]')
+            || document.querySelector(DOUBAO_MENU_SEL);
         const text = String((menu && menu.innerText) || '');
         await closeAccountMenu();
         const loginWall = detectLoginWall().needLogin;
         const percent = parseDoubaoQuotaPercent(text);
-        if (percent === null) return { ok: false, error: '账号菜单里没读到「近 7 天消耗 …%」', loginWall };
-        return { ok: true, percent, loginWall };
+        if (percent === null) {
+            return {
+                ok: false,
+                reason: 'noQuotaRow',
+                error: '账号菜单里没有额度用量条目（未渲染，不代表额度正常）',
+                raw: doubaoRawSnippet(text, 400),
+                loginWall
+            };
+        }
+        return { ok: true, percent: percent.percent, label: percent.label, raw: doubaoRawSnippet(text, 400), loginWall };
     } catch (e) {
         await closeAccountMenu();
-        return { ok: false, error: e.message, loginWall: detectLoginWall().needLogin };
+        return { ok: false, reason: 'exception', error: e.message, loginWall: detectLoginWall().needLogin };
     }
 }
 
@@ -1355,6 +1474,39 @@ function isDoubaoBusyInDom() {
     return false;
 }
 
+// 在菜单里找目标行：先一级行，找不到再展开「更多账号」。
+// 进入时保证菜单处于 data-state="open"（中间被页面自己关掉会重开一次），
+// 否则返回的 row 是 detached 节点，点上去毫无反应。
+// 返回 { hit, rows, menuClosed }
+async function findDoubaoAccountRow(name) {
+    let rows = [];
+    if (!isAccountMenuOpen()) {
+        if (!(await openAccountMenu())) return { hit: null, rows: [], menuClosed: true };
+        await sleep(200);
+    }
+    rows = collectDoubaoAccountRows();
+    // 菜单刚被关掉：本轮 rows 会是空的，重开后再收一次
+    if (!rows.length && !isAccountMenuOpen()) {
+        if (!(await openAccountMenu())) return { hit: null, rows: [], menuClosed: true };
+        await sleep(200);
+        rows = collectDoubaoAccountRows();
+    }
+    let hit = rows.find(r => r.name === name) || null;
+    if (!hit) {
+        const trigger = findDoubaoMoreAccountsTrigger();
+        if (trigger) {
+            const seen = new Set(rows.map(r => r.name));
+            for (const r of await expandDoubaoMoreAccounts(trigger)) {
+                if (seen.has(r.name)) continue;
+                seen.add(r.name);
+                rows.push(r);
+            }
+            hit = rows.find(r => r.name === name) || null;
+        }
+    }
+    return { hit, rows, menuClosed: false };
+}
+
 // 完整切号流程：登录墙 → 找行 → 同号判断 → 点击 → 等重载 → 再查登录墙 → 复核用户名
 async function switchDoubaoAccount(name) {
     const target = String(name == null ? '' : name).trim();
@@ -1376,22 +1528,12 @@ async function switchDoubaoAccount(name) {
         await sleep(200);
 
         const headerName = readDoubaoHeaderName();
-        const rows = collectDoubaoAccountRows();
-        let hit = rows.find(r => r.name === target) || null;
-        if (!hit) {
-            const trigger = findDoubaoMoreAccountsTrigger();
-            if (trigger) {
-                const seen = new Set(rows.map(r => r.name));
-                for (const r of await expandDoubaoMoreAccounts(trigger)) {
-                    if (seen.has(r.name)) continue;
-                    seen.add(r.name);
-                    rows.push(r);
-                }
-                hit = rows.find(r => r.name === target) || null;
-            }
-        }
+        let found = await findDoubaoAccountRow(target);
+        let rows = found.rows;
+        let hit = found.hit;
         if (!hit) {
             await closeAccountMenu();
+            if (found.menuClosed) return { ok: false, error: '未能打开账号菜单（未找到头像按钮或菜单未出现）' };
             return { ok: false, error: '未找到账号：' + target, accounts: rows.map(r => r.name) };
         }
 
@@ -1410,6 +1552,18 @@ async function switchDoubaoAccount(name) {
         }
         const beforeHref = location.href;
         const beforeCount = collectQuotaMessageNodes().length;
+        // d1) 点之前复核菜单仍处于 data-state="open"；已被页面关掉就重开并重新找行，
+        //     否则会点在一个已失效（detached）的行上 —— 表现为「点了没反应」。
+        if (!isAccountMenuOpen()) {
+            found = await findDoubaoAccountRow(target);
+            rows = found.rows;
+            if (!found.hit) {
+                await closeAccountMenu();
+                if (found.menuClosed) return { ok: false, error: '点击前账号菜单已关闭，且无法重新打开' };
+                return { ok: false, error: '账号菜单重新打开后未找到账号：' + target, accounts: rows.map(r => r.name) };
+            }
+            hit = found.hit;
+        }
         activateDoubaoTarget(hit.el);
         const reloaded = await waitDoubaoPageReload(beforeHref, beforeCount, 25000);
         await sleep(2000);
@@ -1432,6 +1586,159 @@ async function switchDoubaoAccount(name) {
         // g) 任何异常都关掉菜单兜底，避免浮层挡住后续生图操作
         try { await closeAccountMenu(); } catch (_) {}
         return { ok: false, error: e.message };
+    }
+}
+
+// ============================================================
+// 账号可用性探测：真的发一条生图请求，看能不能出图
+//
+// 为什么不用菜单里的额度百分比：菜单里有两种额度条目（近 7 天消耗 / 当前时段额度用量），
+// 百分比与「这一次能不能生成」不是一回事（100% 只是已用量，不代表本次被拒）；
+// 而且额度每天刷新，昨天判死的号今天可能已经恢复。唯一可信的判据是「发一条 → 出不出图」。
+//
+// 代价：每次探测真实消耗 1 张图片额度 → 只允许 background 的探测路径调用。
+// 返回（ok:false 时 reason 必须区分，调用方不能把 timeout 当成「没额度」）：
+//   { ok:true, evidence:'image'|'text', elapsedMs }        出图 = 这个号现在能生成
+//   { ok:false, reason:'exhausted', resumeAt, text }        命中「额度已用完」→ 立刻返回，不等满 90s
+//   { ok:false, reason:'needLogin', hint }                  落在登录墙
+//   { ok:false, reason:'busy' }                             页面正在生成/执行任务，不探测
+//   { ok:false, reason:'timeout', elapsedMs }               90s 内既没图也没额度文案（结论未知）
+//   { ok:false, reason:'error', error }                     异常
+// ============================================================
+
+var DOUBAO_PROBE_PROMPT = '生成一张纯白背景的图片，1:1';
+var DOUBAO_PROBE_TIMEOUT = 90000;     // 发送后最长等待
+var DOUBAO_PROBE_POLL = 500;          // 轮询间隔
+var DOUBAO_PROBE_INPUT_WAIT = 10000;  // 开新对话后等输入框就绪
+var DOUBAO_PROBE_DONE_TEXT_RE = /(已生成|已经生成|生成完成|生成完毕|生成好了)/;
+
+// 页面上「已加载完成」的生成图 URL：只认豆包 CDN + naturalWidth>0（占位图/骨架图不算出图）
+// 只在**消息节点内**取图：整页 img 会把侧边栏会话缩略图、头像的延迟加载也算进来，
+// 导致「切到一个其实没额度的号也被判成出图」（真机风险，见 2026-10-27 评估）。
+// 拿不到消息节点时才退回整页（宁可多判，也不至于永远 timeout）。
+function collectProbeImageSrcs() {
+    const out = [];
+    try {
+        let roots = [];
+        try { roots = collectQuotaMessageNodes(); } catch (_) { roots = []; }
+        const scopes = (Array.isArray(roots) && roots.length) ? roots : [document];
+        const seen = [];
+        for (const root of scopes) {
+            const imgs = root.querySelectorAll ? root.querySelectorAll('img') : [];
+            for (const img of imgs) {
+                const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+                if (!src) continue;
+                if (!src.includes('byteimg.com') && !src.includes('tos-alistore')) continue;
+                if (!(img.naturalWidth > 0)) continue;
+                if (seen.indexOf(src) >= 0) continue;
+                seen.push(src);
+                out.push(src);
+            }
+        }
+    } catch (_) {}
+    return out;
+}
+
+// 「出图了」的文案判定：必须排除「正在生成中」这类进行时，否则一开始就误判成功
+function isProbeDoneText(t) {
+    const s = String(t || '');
+    if (!s) return false;
+    if (/生成中|正在生成|绘制中|创作中|排队中/.test(s)) return false;
+    return DOUBAO_PROBE_DONE_TEXT_RE.test(s);
+}
+
+function collectProbeMessageTexts() {
+    try {
+        return collectQuotaMessageNodes().map(el => String((el && el.innerText) || ''));
+    } catch (_) { return []; }
+}
+
+// 本轮新增消息里是否出现「已生成/生成完成」：只认基线之后的新节点，
+// 以及基线末条节点原地追加的内容（老节点没变化就不算本轮证据 → 宁漏不误）
+function hasProbeDoneText(baseTexts) {
+    try {
+        const base = Array.isArray(baseTexts) ? baseTexts : [];
+        const nodes = collectQuotaMessageNodes();
+        for (let i = Math.max(0, base.length - 1); i < nodes.length; i++) {
+            const t = String((nodes[i] && nodes[i].innerText) || '');
+            if (!t) continue;
+            if (i < base.length && t === base[i]) continue;   // 基线里的老节点没变化
+            if (isProbeDoneText(t)) return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
+// 等输入框可用（新对话切换/整页渲染都需要时间）
+async function waitProbeInput(timeoutMs) {
+    const start = Date.now();
+    while (Date.now() - start < (timeoutMs || 0)) {
+        if (findChatInput()) return true;
+        if (detectLoginWall().needLogin) return false;
+        await sleep(200);
+    }
+    return !!findChatInput();
+}
+
+async function probeAccountByGenerate() {
+    const startedAt = Date.now();
+    let wasProcessing = false;
+    try {
+        if (isProcessing || isDoubaoBusyInDom()) return { ok: false, reason: 'busy' };
+
+        // a) 先判登录墙：墙上的输入框不存在，硬发只会白等 90s
+        const wall0 = detectLoginWall();
+        if (wall0.needLogin) return { ok: false, reason: 'needLogin', hint: wall0.hint };
+
+        // b) 优先开新对话：避免探测消息污染用户正在看的会话
+        await startNewChat();
+        if (!(await waitProbeInput(DOUBAO_PROBE_INPUT_WAIT))) {
+            const wall = detectLoginWall();
+            if (wall.needLogin) return { ok: false, reason: 'needLogin', hint: wall.hint };
+            return { ok: false, reason: 'error', error: '新对话后 10s 内未出现输入框' };
+        }
+
+        // c) 打额度快照（必须在本轮发送前，否则会命中历史残留的额度文案）
+        markQuotaBaseline();
+        const baseImages = new Set(collectProbeImageSrcs());
+        const baseTexts = collectProbeMessageTexts();
+
+        // d) 发送探测提示词
+        if (!(await typePrompt(DOUBAO_PROBE_PROMPT))) {
+            return { ok: false, reason: 'error', error: '未找到输入框，探测提示词未输入' };
+        }
+        isProcessing = true;      // 探测期间占住会话：真实任务不会被接进来抢这一条消息
+        wasProcessing = true;
+        await sendMessage();
+        const sentAt = Date.now();   // 90s 从「发送完成」开始算，前面的开新对话不计入
+
+        // e) 轮询判定：额度优先（命中即返回），其次出图，再次出图文案
+        while (Date.now() - sentAt < DOUBAO_PROBE_TIMEOUT) {
+            await sleep(DOUBAO_PROBE_POLL);
+            const wall = detectLoginWall();
+            if (wall.needLogin) {
+                return { ok: false, reason: 'needLogin', hint: wall.hint, elapsedMs: Date.now() - startedAt };
+            }
+            const quota = detectQuotaExhausted();
+            if (quota && quota.exhausted) {
+                return {
+                    ok: false, reason: 'exhausted', resumeAt: quota.resumeAt || null,
+                    text: String(quota.text || '').slice(0, 200), elapsedMs: Date.now() - startedAt
+                };
+            }
+            for (const src of collectProbeImageSrcs()) {
+                if (!baseImages.has(src)) return { ok: true, evidence: 'image', elapsedMs: Date.now() - startedAt };
+            }
+            if (hasProbeDoneText(baseTexts)) {
+                return { ok: true, evidence: 'text', elapsedMs: Date.now() - startedAt };
+            }
+        }
+        // f) 没图也没额度文案：结论未知，绝不能当成「没额度」
+        return { ok: false, reason: 'timeout', elapsedMs: Date.now() - startedAt };
+    } catch (e) {
+        return { ok: false, reason: 'error', error: e.message || String(e) };
+    } finally {
+        if (wasProcessing) isProcessing = false;
     }
 }
 
