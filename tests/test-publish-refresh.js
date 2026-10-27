@@ -31,7 +31,7 @@ function page(e, task, row, tab, { store = new Map(), dropCompletion = false, st
     const saveBtn = { innerText: '保存', offsetHeight: 10, scrollIntoView() {}, getBoundingClientRect: () => ({ left: 10, top: 10, width: 100, height: 40 }) };
     const c = { URLSearchParams, window: { location: { search: '?row=' + row + '&task=' + task } },
         sessionStorage: { getItem: key => store.get(key) || null, setItem: (key, value) => store.set(key, value) },
-        currentProduct: null, document: { querySelectorAll: () => [saveBtn], addEventListener: (name, fn) => { listeners[name] = fn; } },
+        currentProduct: null, document: { querySelectorAll: sel => (String(sel) === '.sell-catProp-item' ? [{}, {}, {}] : [saveBtn]), addEventListener: (name, fn) => { listeners[name] = fn; } },
         updateProductInfo() {}, log: msg => logs.push(msg), ensureTabActive: async () => {},
         startHeartbeat: () => () => {}, setTimeout: callback => setTimeout(callback, 0),
         realClick: async el => clicks.push(el), sleep3: async () => {},
@@ -48,7 +48,7 @@ function page(e, task, row, tab, { store = new Map(), dropCompletion = false, st
     for (const name of names) c[name] = async () => { writes.push(name); return name==='fillDetailTemplate'?['✅ 商品详情模板: 通用']:[]; };
     vm.createContext(c);
     const source = stage === 2 ? [fn('loadBatchProduct', src2)] :
-        ['getRowFromUrl', 'getTaskFromUrl', 'observePage3SaveClick', 'fillAllPage3', 'loadBatchProduct', 'saveDraft'].map(n => fn(n));
+        ['getRowFromUrl', 'getTaskFromUrl', 'observePage3SaveClick', 'fillAllPage3', 'loadBatchProduct', 'saveDraft', 'waitPublishFormReady'].map(n => fn(n));
     vm.runInContext(source.join('\n'), c);
     return { c, store, writes, clicks, messages, logs, listeners, saveBtn, run: code => vm.runInContext(code, c) };
 }

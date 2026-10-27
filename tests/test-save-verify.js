@@ -143,7 +143,7 @@ function pageEnv(opts = {}) {
         }
     };
     vm.createContext(c);
-    vm.runInContext([fn('saveDraft'), fn('loadBatchProduct')].join('\n'), c);
+    vm.runInContext([fn('saveDraft'), fn('waitPublishFormReady'), fn('loadBatchProduct')].join('\n'), c);
     return { c, events, logs, messages, store, saveBtn, btn, row, task };
 }
 

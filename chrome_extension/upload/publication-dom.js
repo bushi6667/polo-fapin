@@ -101,7 +101,8 @@
         globalThis.PublicationUploadAudit={kind,compressedAt:Date.now(),files:prepared.map(file=>({name:file.name,type:file.type,bytes:file.size})),uploadStartedAt:null};
         document.documentElement.dataset.publicationUploadAudit=JSON.stringify(globalThis.PublicationUploadAudit);
         if(kind==='detail')await enableDetail();
-        let area;for(let i=0;i<30;i++){area=root(kind);if(area)break;await sleep(300);}
+        // 等上传区出现：原来 30×300ms=9s，慢网下表单还没渲染完就判失败（真机复现），放宽到 30s
+        let area;for(let i=0;i<60;i++){area=root(kind);if(area)break;await sleep(500);}
         if(!area)throw Error(kind==='detail'?'未找到细节图区域，请先选择详情模板':'未找到主图上传区域');
         area.scrollIntoView({block:'center'});
         area.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));

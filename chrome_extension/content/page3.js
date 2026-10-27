@@ -4315,6 +4315,27 @@ function observePage3SaveClick() {
     }, true);
 }
 
+// 等发布表单渲染完成再开始填。
+// 真机事故：页2 刚跳到页3 就开填，2 秒后「未找到主图上传区域」→ 该行直接报到完成、
+// 队列跳到下一行（一行 40 秒"填完"）。根因是页面骨架还没出来就动手。
+async function waitPublishFormReady(timeoutMs = 60000) {
+    const t0 = Date.now();
+    let lastLog = 0;
+    while (Date.now() - t0 < timeoutMs) {
+        const props = document.querySelectorAll('.sell-catProp-item').length;
+        const saveBtn = Array.from(document.querySelectorAll('button')).some(b =>
+            (b.innerText || b.textContent || '').trim() === '保存' && b.offsetHeight > 0);
+        if (props >= 3 && saveBtn) return true;
+        const elapsed = Date.now() - t0;
+        if (elapsed - lastLog >= 10000) {
+            lastLog = elapsed;
+            log(`⏳ 等待发布表单渲染… ${Math.round(elapsed / 1000)}s（属性项 ${props} 个）`, 'info');
+        }
+        await sleep3(500);
+    }
+    return false;
+}
+
 async function loadBatchProduct(rowNum) {
     try {
         const resp = await sendMessageRetry({
@@ -4366,8 +4387,10 @@ async function loadBatchProduct(rowNum) {
             const stopHeartbeat = startHeartbeat(15000);
             log('💓 保活心跳已启动（每15秒）', 'info');
             
-            await new Promise(r => setTimeout(r, 3000));
-            
+            // 先等表单真的渲染出来（最多 60s），别拿固定 3 秒赌网速
+            const formReady = await waitPublishFormReady(60000);
+            if (!formReady) log('⚠️ 发布表单 60s 内未就绪，仍尝试填写（可能失败）', 'warn');
+
             try {
                 await ensureTabActive();
                 log('🔄 批量模式：自动开始填写页3...', 'success');

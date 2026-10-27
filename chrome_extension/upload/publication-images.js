@@ -2,12 +2,18 @@
 (() => {
     const BANK=Object.freeze({polo:['产线','刺绣','LOGO','颜色'],shirt:['产线','刺绣','LOGO','颜色'],'t-shirt':['产线','印花','LOGO','面料'],'hooded-sweatshirt':['1','2-2','3','4'],'non-hooded-sweatshirt':['1','2-1','3','4']});
     function category(product){
-        const value=String(product._categoryType||product.category||'').trim().toLowerCase().replace(/\(\d+\)/g,'').trim().replace(/\s+/g,'-');
-        if(value.includes('non-hood')||value==='sweatshirt')return 'non-hooded-sweatshirt';
-        if(value.includes('hooded-sweatshirt')||value==='hoodie')return 'hooded-sweatshirt';
+        // 必须优先用完整类目名 category：_categoryType 只是粗类型（帽衫恒为 "sweatshirt"），
+        // 用它判会把有帽卫衣当成无帽卫衣，传错 4 张公共图（真机已复现）。
+        const raw=String(product.category||product._categoryType||'');
+        const value=raw.trim().toLowerCase().replace(/\(\d+\)/g,'').trim().replace(/\s+/g,'-');
+        // 先判帽型：non-hooded 里也含 "hood"，顺序不能反
+        if(/non-?hood|无帽|不带帽/.test(value))return 'non-hooded-sweatshirt';
+        if(/hood|连帽|有帽|带帽/.test(value))return 'hooded-sweatshirt';
         if(value.includes('polo'))return 'polo';
         if(value.includes('t-shirt')||value==='tshirt')return 't-shirt';
         if(/^shirt(?:$|-)/.test(value))return 'shirt';
+        // 只剩 "sweatshirt" 这类粗类型：宁可报错，也不能猜一个帽型去传错图
+        if(value.includes('sweatshirt'))throw Error('类目缺少帽型信息（有帽/无帽），不能选择上传图片：'+raw);
         throw Error('产品类目不明确，不能选择上传图片：'+value);
     }
     function plan(product,kind){

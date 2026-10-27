@@ -56,7 +56,14 @@ function pageEnv(opts = {}) {
         },
         currentProduct: null,
         document: {
-            querySelectorAll: sel => (String(sel) === 'button' ? [saveBtn] : []),
+            // 表单就绪探测（waitPublishFormReady）：属性项 >=3 且存在「保存」按钮才算就绪，
+            // 这里直接给足，避免测试里空等 60s
+            querySelectorAll: sel => {
+                const k = String(sel);
+                if (k === 'button') return [saveBtn];
+                if (k === '.sell-catProp-item') return [{}, {}, {}];
+                return [];
+            },
             getElementById: id => (id === 'polo-autofill-btn' ? btn : null),
             addEventListener: () => {}
         },
@@ -97,7 +104,7 @@ const runIn = (env, code) => vm.runInContext(code, env.c);
 // 批量路径：真实 loadBatchProduct
 async function runBatch(opts = {}) {
     const env = pageEnv(opts);
-    vm.runInContext([fn('loadBatchProduct')].join('\n'), env.c);
+    vm.runInContext([fn('waitPublishFormReady'), fn('loadBatchProduct')].join('\n'), env.c);
     await runIn(env, 'loadBatchProduct(' + env.row + ')');
     return env;
 }
