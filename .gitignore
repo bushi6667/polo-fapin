@@ -27,3 +27,6 @@ chrome_extension/runtime/
 项目代码审查_*.md
 项目完整复查_*.md
 自动脚本配置与无水印核验.md
+
+# AI 会话记忆与本地元数据（不入库）
+.workbuddy/
