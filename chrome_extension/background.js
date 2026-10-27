@@ -1949,15 +1949,21 @@ async function recoverDoubaoAccountSwitch(tabId, name) {
 // 为什么编排放在 background：切号会让豆包整页重载，重载销毁内容脚本，
 // 只有 background 的上下文能跨重载继续跑完一次切号。
 // 账本只落一个键 polo_doubao_accounts_v1，结构：
-// { dateKey:'YYYY-MM-DD', updatedAt, accounts: { [name]: { plan,status,percent,label,checkedAt,note,resumeAt,missing,probeSeq } } }
-// 可用性判定只看 status（exhausted / unknown 两态）；percent / label / resumeAt 是诊断字段，
-// 当前没有任何消费者（不参与判定、不出现在 UI），留库只为人工排查历史数据。
+// { dateKey:'YYYY-MM-DD', updatedAt, accounts: { [name]: { plan,status,percent,label,checkedAt,note,resumeAt,missing,probeSeq,
+//                                                     genFailStreak,genFailAt,unsupportedAt } } }
+// 可用性判定看 status（exhausted / unsupported 今天都不再当候选，unknown 才是候选）；
+// percent / label / resumeAt / genFail* 是诊断字段（genFail* 参与「连续 3 次生成不出图」的记账）。
 const DOUBAO_LEDGER_KEY = 'polo_doubao_accounts_v1';
 const DOUBAO_STATUS_OK = 'ok';                 // 历史可用标记：当前没有任何代码写入 ok
 const DOUBAO_STATUS_EXHAUSTED = 'exhausted';   // 真实任务刚被额度拒 → 自动切号把当前号记成这个
+// 连续 DOUBAO_GEN_FAIL_LIMIT 次「一张图都没生成出来」→ 今天判该账号不支持生图（被平台限制的号）
+const DOUBAO_STATUS_UNSUPPORTED = 'unsupported';
 const DOUBAO_STATUS_UNKNOWN = 'unknown';       // 未测/超时/异常/需登录，绝不当成 ok
+const DOUBAO_GEN_FAIL_LIMIT = 3;               // 连续生成失败几次判定「不支持生图」
+const DOUBAO_GEN_DEDUPE_MS = 8000;             // 同一次失败会被内容脚本与页面各报一次，窗口内只记一次
 const DOUBAO_CHANNEL_CLOSED_RE = /message port closed|Receiving end does not exist|message channel closed|Could not establish connection/i;
 let doubaoScanInFlight = false;   // 自动切号重入闸（同一时刻只允许一轮）
+let doubaoGenLastReport = null;   // { name, row, ok, at }：生成结果双上报去重用
 
 // 本地日期键（YYYY-MM-DD）：额度按自然日刷新，跨天必须把旧结论作废
 function doubaoLocalDateKey(ts) {
@@ -1969,13 +1975,14 @@ function doubaoLocalDateKey(ts) {
 function doubaoEmptyLedger() { return { dateKey: doubaoLocalDateKey(), updatedAt: 0, accounts: {} }; }
 
 function doubaoNormStatus(s) {
-    return (s === DOUBAO_STATUS_OK || s === DOUBAO_STATUS_EXHAUSTED || s === DOUBAO_STATUS_UNKNOWN)
-        ? s : DOUBAO_STATUS_UNKNOWN;
+    return (s === DOUBAO_STATUS_OK || s === DOUBAO_STATUS_EXHAUSTED || s === DOUBAO_STATUS_UNSUPPORTED
+        || s === DOUBAO_STATUS_UNKNOWN) ? s : DOUBAO_STATUS_UNKNOWN;
 }
 
 // 读账本：任何脏数据都收敛成合法结构，读失败返回空账本（不抛）
-// 跨天处理：dateKey 不是今天就说明账本里全是「昨天甚至更早」的结论 —— 额度已刷新，
-// 把 status 全部重置为 unknown（保留 name/plan/missing/probeSeq），落盘后返回。
+// 跨天处理：dateKey 不是今天就说明账本里全是「昨天甚至更早」的结论 —— 额度已刷新、
+// 平台的生图限制也按自然日重新观察，把 status 全部重置为 unknown 并把
+// genFailStreak / genFailAt / unsupportedAt 一起清零（保留 name/plan/missing/probeSeq），落盘后返回。
 async function doubaoLoadLedger() {
     try {
         const today = doubaoLocalDateKey();
@@ -1998,7 +2005,10 @@ async function doubaoLoadLedger() {
                 note: typeof v.note === 'string' ? v.note : '',
                 resumeAt: typeof v.resumeAt === 'string' ? v.resumeAt : '',
                 missing: v.missing === true,
-                probeSeq: Number(v.probeSeq) || 0
+                probeSeq: Number(v.probeSeq) || 0,
+                genFailStreak: Math.max(0, Number(v.genFailStreak) || 0),
+                genFailAt: Number(v.genFailAt) || 0,
+                unsupportedAt: Number(v.unsupportedAt) || 0
             };
         }
         if (ledger.dateKey !== today) {
@@ -2010,6 +2020,9 @@ async function doubaoLoadLedger() {
                 a.checkedAt = 0;
                 a.note = 'dayRefresh';
                 a.resumeAt = '';
+                a.genFailStreak = 0;
+                a.genFailAt = 0;
+                a.unsupportedAt = 0;
             }
             ledger.dateKey = today;
             await doubaoSaveLedger(ledger);
@@ -2037,7 +2050,10 @@ async function doubaoSaveLedger(ledger) {
                 note: typeof v.note === 'string' ? v.note : '',
                 resumeAt: typeof v.resumeAt === 'string' ? v.resumeAt : '',
                 missing: v.missing === true,
-                probeSeq: Number(v.probeSeq) || 0
+                probeSeq: Number(v.probeSeq) || 0,
+                genFailStreak: Math.max(0, Number(v.genFailStreak) || 0),
+                genFailAt: Number(v.genFailAt) || 0,
+                unsupportedAt: Number(v.unsupportedAt) || 0
             };
         }
         ledger.updatedAt = out.updatedAt;
@@ -2155,7 +2171,8 @@ function doubaoMergeAccountList(ledger, accounts) {
             ledger.accounts[name] = {
                 plan: typeof a.plan === 'string' ? a.plan : '',
                 status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '',
-                checkedAt: 0, note: 'new', missing: false, probeSeq: 0
+                checkedAt: 0, note: 'new', missing: false, probeSeq: 0,
+                genFailStreak: 0, genFailAt: 0, unsupportedAt: 0
             };
         } else {
             cur.missing = false;
@@ -2175,9 +2192,10 @@ async function doubaoReadCurrentName(tabId) {
     } catch (_) { return ''; }
 }
 
-// 当天已判「没额度」的号：只有确实是今天试出来的才算，跨天（额度已刷新）不得沿用
+// 当天已判「不可用」的号：exhausted（弹额度）与 unsupported（连续 3 次生成不出图）同等对待 ——
+// 今天都不再当候选。只有确实是今天试出来的才算，跨天（额度/平台限制按自然日重新观察）不得沿用。
 function doubaoIsFreshExhausted(a) {
-    if (!a || a.status !== DOUBAO_STATUS_EXHAUSTED) return false;
+    if (!a || (a.status !== DOUBAO_STATUS_EXHAUSTED && a.status !== DOUBAO_STATUS_UNSUPPORTED)) return false;
     const ts = Number(a.checkedAt) || 0;
     if (!ts) return false;
     return doubaoLocalDateKey(ts) === doubaoLocalDateKey();
@@ -2188,18 +2206,22 @@ function doubaoProbeOrder(x, y) {
 }
 
 // 候选顺序：先 status=ok，再 unknown（没测过/结论未知）—— 两态都是可切候选，ok 只是排前面。
-// 跳过：missing（列表里点不到）、exclude、当天已判 exhausted。
-// 返回 { order:[name], skipped:[name], present:[[name,acc]] }
+// 跳过：missing（列表里点不到）、exclude、当天已判 exhausted / unsupported（两种原因分开返回，日志能区分）。
+// 返回 { order:[name], skipped:[name], skippedExhausted:[name], skippedUnsupported:[name], present:[[name,acc]] }
 function doubaoBuildCandidates(ledger, exclude) {
     const ex = new Set((exclude || []).map(s => String(s == null ? '' : s).trim()).filter(Boolean));
     const present = Object.entries((ledger && ledger.accounts) || {})
         .filter(([n, a]) => a && a.missing !== true && !ex.has(n));
     const okList = present.filter(([, a]) => a.status === DOUBAO_STATUS_OK).sort(doubaoProbeOrder);
     const unknown = present.filter(([, a]) => a.status === DOUBAO_STATUS_UNKNOWN).sort(doubaoProbeOrder);
-    const skipped = present.filter(([, a]) => doubaoIsFreshExhausted(a)).map(([n]) => n);
+    const blocked = present.filter(([, a]) => doubaoIsFreshExhausted(a));
+    const skippedExhausted = blocked.filter(([, a]) => a.status === DOUBAO_STATUS_EXHAUSTED).map(([n]) => n);
+    const skippedUnsupported = blocked.filter(([, a]) => a.status !== DOUBAO_STATUS_EXHAUSTED).map(([n]) => n);
     return {
         order: okList.concat(unknown).map(([n]) => n),
-        skipped,
+        skipped: skippedExhausted.concat(skippedUnsupported),
+        skippedExhausted,
+        skippedUnsupported,
         present
     };
 }
@@ -2244,8 +2266,13 @@ async function doubaoAutoSwitchAction(request) {
         const cur = await doubaoReadCurrentName(tab.id);
         if (cur) {
             if (exclude.indexOf(cur) < 0) exclude.push(cur);
-            // 刚用完额度的号顺手记为 exhausted（除非调用方明确说别动）
-            if (!request || request.quotaExhausted !== false) {
+            // 刚用完额度的号顺手记为 exhausted（除非调用方明确说别动）。
+            // 但已经是「连续 3 次生成不出图」的号不能被改写成额度用完：两种不可用原因必须能区分。
+            const curRec = ledger.accounts[cur];
+            const curUnsupported = !!(curRec && curRec.status === DOUBAO_STATUS_UNSUPPORTED && doubaoIsFreshExhausted(curRec));
+            if (curUnsupported) {
+                console.log('[doubao ledger] 当前号 ' + cur + ' 已判「不支持生图」，保留该结论（不改写为额度用完）');
+            } else if (!request || request.quotaExhausted !== false) {
                 doubaoWriteProbe(ledger, cur, { status: DOUBAO_STATUS_EXHAUSTED, percent: null, label: '本批刚用完', note: 'quotaExhausted', resumeAt: '' });
                 await doubaoSaveLedger(ledger);
             }
@@ -2267,12 +2294,14 @@ async function doubaoAutoSwitchAction(request) {
         if (!cand.present.length) {
             const hasAny = Object.keys(ledger.accounts).length > 0;
             return hasAny
-                ? { ok: false, reason: 'allExhausted', ledger, tried }
+                ? { ok: false, reason: 'allExhausted', ledger, tried,
+                    skipped: cand.skipped, skippedExhausted: cand.skippedExhausted, skippedUnsupported: cand.skippedUnsupported }
                 : { ok: false, reason: 'none', error: '账本里没有可用账号', ledger, tried };
         }
         if (!cand.order.length) {
-            // 能点的号全被当天 exhausted 结论挡住：这就是「都没额度」
-            return { ok: false, reason: 'allExhausted', ledger, tried, skipped: cand.skipped };
+            // 能点的号全被当天结论挡住：这就是「都不可用」（额度用完 / 不支持生图分开回，日志能区分原因）
+            return { ok: false, reason: 'allExhausted', ledger, tried,
+                skipped: cand.skipped, skippedExhausted: cand.skippedExhausted, skippedUnsupported: cand.skippedUnsupported };
         }
 
         let lastError = '';
@@ -2313,10 +2342,102 @@ async function doubaoAutoSwitchAction(request) {
     }
 }
 
+// 生成结果记账的串行闸：读账本 → 改 → 落盘 是「读改写」，同一次失败会被内容脚本和页面
+// 几乎同时各报一次，并发进来会各加一次。这里把记账串成一条链，第二条能看到第一条写的去重标记。
+let doubaoGenQueue = Promise.resolve();
+function doubaoGenResultSerialized(request, tabId) {
+    const run = () => doubaoGenResultAction(request, tabId);
+    const next = doubaoGenQueue.then(run, run);
+    doubaoGenQueue = next.then(() => {}, () => {});
+    return next;
+}
+
 // 无 UI 入口，供控制台/调试调用：读账本原始内容
 async function doubaoGetAccountLedgerAction() {
     const ledger = await doubaoLoadLedger();
     return { ok: true, dateKey: ledger.dateKey, updatedAt: ledger.updatedAt, accounts: ledger.accounts };
+}
+
+// 生成结果记账（内容脚本出图/失败各报一次；页面侧失败时也报一次问结论）。
+// 规则：
+//   出图（ok:true）      → genFailStreak 归零、unsupportedAt 清零；若它当前是 unsupported，恢复成 unknown
+//                          （能出图就说明这个号能用，之前的判定作废）
+//   生成失败（ok:false） → genFailStreak++ ；连续 DOUBAO_GEN_FAIL_LIMIT 次 → status=unsupported、
+//                          unsupportedAt=now、note='genFailed3'（今天不再当候选，页面据此换号）
+// 同一次失败会被内容脚本和页面各报一次，用 (账号, 行号) + 时间窗去重，保证「连续 3 次」按真实失败次数算。
+// 记账失败绝不抛：返回 {ok:false}，调用方一律按「没被判不可用」继续主流程。
+async function doubaoGenResultAction(request, tabId) {
+    try {
+        const okFlag = !!(request && request.ok === true);
+        const row = Number(request && request.row) || 0;
+        const reason = String((request && request.reason) || '').slice(0, 120);
+        let tid = Number(tabId) || 0;
+        if (!tid) {
+            const tab = await findDoubaoTab();
+            if (!tab) return { ok: false, error: '未找到豆包页面' };
+            tid = tab.id;
+        }
+        const name = await doubaoReadCurrentName(tid);
+        if (!name) return { ok: false, error: '读不到当前账号名' };
+        const ledger = await doubaoLoadLedger();
+        if (!ledger.accounts[name]) {
+            ledger.accounts[name] = {
+                plan: '', status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '',
+                checkedAt: 0, note: '', resumeAt: '', missing: false, probeSeq: 0,
+                genFailStreak: 0, genFailAt: 0, unsupportedAt: 0
+            };
+        }
+        const a = ledger.accounts[name];
+        const now = Date.now();
+
+        if (okFlag) {
+            const wasUnsupported = a.status === DOUBAO_STATUS_UNSUPPORTED;
+            a.genFailStreak = 0;
+            a.genFailAt = 0;
+            a.unsupportedAt = 0;
+            if (wasUnsupported) {
+                a.status = DOUBAO_STATUS_UNKNOWN;
+                a.note = 'genOkRecovered';
+                console.log('[doubao ledger] ' + name + ' 出图成功 → 解除「不支持生图」判定，恢复 unknown');
+            }
+            doubaoGenLastReport = { name, row, ok: true, at: now };
+            await doubaoSaveLedger(ledger);
+            return { ok: true, name, row, streak: 0, disabled: false, recovered: wasUnsupported };
+        }
+
+        // 去重：内容脚本 + 页面可能对同一次失败各报一次 → 只算一次
+        const prev = doubaoGenLastReport;
+        const dup = !!(prev && prev.ok === false && prev.name === name && prev.row === row
+            && (now - prev.at) < DOUBAO_GEN_DEDUPE_MS);
+        if (!dup) {
+            a.genFailStreak = (Number(a.genFailStreak) || 0) + 1;
+            a.genFailAt = now;
+            if (a.genFailStreak >= DOUBAO_GEN_FAIL_LIMIT) {
+                a.status = DOUBAO_STATUS_UNSUPPORTED;
+                a.unsupportedAt = now;
+                a.checkedAt = now;
+                a.note = 'genFailed3';
+                console.warn('[doubao ledger] ' + name + ' 连续 ' + a.genFailStreak
+                    + ' 次生成不出图 → 今天判定「不支持生图」，不再当候选（原因=' + (reason || '无') + '）');
+            } else {
+                console.log('[doubao ledger] ' + name + ' 生成失败 ' + a.genFailStreak + '/' + DOUBAO_GEN_FAIL_LIMIT
+                    + '（原因=' + (reason || '无') + '）');
+            }
+            doubaoGenLastReport = { name, row, ok: false, at: now };
+            await doubaoSaveLedger(ledger);
+        }
+        const disabled = a.status === DOUBAO_STATUS_UNSUPPORTED;
+        return {
+            ok: true, name, row, reason,
+            reasonKind: disabled ? 'unsupported' : 'genFail',
+            streak: Number(a.genFailStreak) || 0,
+            disabled,
+            deduped: dup
+        };
+    } catch (e) {
+        console.warn('[doubao ledger] 生成结果记账失败（不影响主流程）:', e.message);
+        return { ok: false, error: e.message };
+    }
 }
 
 // 手动清空账号额度记录（调试/误标时用）：清完所有账号回到 unknown，不影响豆包本身
@@ -2383,6 +2504,17 @@ async function handleSharedAction(request, sendResponse, sender) {
             if (request.action === 'doubaoResetAccountLedger') return await doubaoResetAccountLedgerAction();
             return await doubaoGetAccountLedgerAction();
         })().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    // 生成结果记账：内容脚本（出图/失败）与发品助手页（失败时问结论）都走这条
+    if (request.action === 'doubaoGenResult') {
+        // ⚠️ 只有内容脚本所在的 tab 才是豆包页。发品助手是 externally-connected 的普通网页，
+        // 它发来的 sender.tab 是助手页自己的 tab，用它会去助手页要「当前账号名」，永远读不到
+        // → disabled 永远为 false → 连续 3 次失败也不会换号。所以这里必须校验来源 URL。
+        const srcUrl = String((sender && sender.tab && sender.tab.url) || '');
+        const fromDoubaoTab = /^https?:\/\/([a-z0-9-]+\.)*(doubao\.com)\//i.test(srcUrl);
+        const tabId = fromDoubaoTab ? sender.tab.id : 0;
+        doubaoGenResultSerialized(request, tabId).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'suitePreparePage') {
@@ -3370,6 +3502,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log(`🔍 [onMessage] 收到消息: action=${request.action}, sender=${sender?.tab?.url ? 'tab' : 'unknown'}`);
     if (request.action === 'savePublishProduct' || request.action === 'recordPublishSaveClick') {
         savePublishProduct(request, sender, request.action === 'savePublishProduct').then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+
+    // ---------- 豆包生成结果记账（内部通道：换色内容脚本上报出图/失败） ----------
+    if (request.action === 'doubaoGenResult') {
+        const tabId = sender && sender.tab ? sender.tab.id : 0;
+        doubaoGenResultSerialized(request, tabId).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
 

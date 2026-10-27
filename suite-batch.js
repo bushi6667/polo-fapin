@@ -56,7 +56,7 @@ async function suiteBatchRunRowOnce(row,restart){
 }
 // 豆包账号自动切号：必须带 EXTENSION_ID、每次判 lastError，且不加超时
 // （扫描一轮账号可达 2 分钟，短超时会把正在跑的扫描掐死）。
-// 不试生图：切号成功后直接重跑当前行真实任务，出图=有额度，弹额度=换下一个号。
+// 不试生图：切号成功后直接重跑当前行真实任务，出图=可用，弹额度/连续不出图=换下一个号。
 var suiteBatchAutoSwitchRunning=false;
 var suiteBatchTriedAccounts=[];   // 本轮已试过的账号名（批次结束/换批时清零）
 var suiteBatchAttempts=0;         // 本轮换号次数（硬上限，防死循环）
@@ -75,15 +75,74 @@ function suiteBatchAutoSwitchMessage(exclude){
         }catch(e){reject(e);}
     });
 }
+// 生成结果记账（套图侧自己上报，因为套图内容脚本不报）：
+//   ok=true  → 该账号能出图，连续失败计数归零
+//   ok=false → 后台连续 3 次判它「不支持生图」，返回 disabled:true → 换号重跑本行
+// 通道不可用/异常一律 reject/返回 null，调用方按「照旧记失败」处理，不影响队列。
+function suiteBatchGenResult(row,ok,reason){
+    return new Promise(function(resolve,reject){
+        try{
+            if(typeof chrome==='undefined'||!chrome.runtime||!chrome.runtime.sendMessage){reject(Error('扩展未连接'));return;}
+            var id=typeof EXTENSION_ID==='undefined'?'':EXTENSION_ID;
+            var payload={action:'doubaoGenResult',ok:!!ok,row:row};
+            if(!ok)payload.reason=String(reason||'').slice(0,120);
+            chrome.runtime.sendMessage(id,payload,function(response){
+                var err=chrome.runtime.lastError;
+                if(err){reject(Error(err.message||'扩展通道异常'));return;}
+                if(!response){reject(Error('扩展没有响应'));return;}
+                resolve(response);
+            });
+        }catch(e){reject(e);}
+    });
+}
+// 成功出图：把该账号的连续失败计数归零（fire-and-forget，失败只打 warn）
+function suiteBatchGenOk(row){
+    if(typeof chrome==='undefined'||!chrome.runtime||!chrome.runtime.sendMessage)return;
+    suiteBatchGenResult(row,true,'').then(null,function(e){
+        if(typeof console!=='undefined')console.warn('套图生成成功记账失败（不影响队列）：'+((e&&e.message)||e));
+    });
+}
+// 生成不出图（非额度）：上报后问后台该账号是否已被判不可用。
+// 返回 true  = 已接管：已判「不支持生图」→ 触发换号（成功后原地重跑本行、不记失败），调用方不要再记失败。
+// 返回 false = 照旧记失败跳过（偶发失败、通道不可用、后台说还能用）。
+async function suiteBatchGenFailGate(row){
+    if(!suiteBatchState)return false;
+    var state=readSuiteAutoState();
+    if(!state||state.fileKey!==suiteBatchState.fileKey||state.rowNum!==row||state.phase!=='error')return false;
+    var text=String(state.error||'');
+    // 额度有独立机制（suiteBatchQuotaPause 已经处理过这里才会走到），别把额度记成不会生图
+    if(/额度\s*[,，]?\s*已\s*用完/.test(text))return false;
+    var res=null;
+    try{res=await suiteBatchGenResult(row,false,text);}
+    catch(e){
+        if(typeof console!=='undefined')console.warn('套图生成失败记账失败（不影响队列）：'+((e&&e.message)||e));
+        return false;
+    }
+    if(!res||res.disabled!==true)return false;
+    if(!suiteBatchState||suiteBatchState.rows[suiteBatchState.index]!==row)return false;
+    var name=String(res.name||'').trim();
+    var streak=Number(res.streak)||3;
+    var line='已连续 '+streak+' 次生成失败，判定该账号不支持生图'+(name?'（'+name+'）':'')+'，正在换号…';
+    if(typeof console!=='undefined')console.warn('🔀 row'+row+' '+line);
+    showToast('⚠️ '+line);
+    suiteBatchState.paused=true;
+    suiteBatchState.pausedReason='已连续 '+streak+' 次生成失败，判定该账号不支持生图';
+    saveSuiteBatch();
+    suiteBatchTryAutoSwitch(row,'genfail');
+    return true;
+}
 // 换号成功：清掉该行 error 残留（内存缓存 + localStorage 一起清，否则下一行读到旧 phase），
 // index 不前进、paused 复位，然后原地重启该行（等价于重跑）。
-// 重跑后又弹额度 → 本函数会被再次调用（防重入 flag 在请求结束即清），继续换下一个号。
-// 全部没额度才真暂停。
-function suiteBatchTryAutoSwitch(row){
+// 重跑后又弹额度/又不出图 → 本函数会被再次调用（防重入 flag 在请求结束即清），继续换下一个号。
+// kind='genfail' 表示「连续 3 次生成不出图」，文案与额度分开，但计数/上限/已试列表完全共用。
+function suiteBatchTryAutoSwitch(row,kind){
+    const genFail=kind==='genfail';
     if(suiteBatchAutoSwitchRunning)return;
     if(!suiteBatchState)return;
     if(suiteBatchAttempts>=SUITE_BATCH_SWITCH_LIMIT){
-        var over='已尝试 '+suiteBatchAttempts+' 个账号仍无额度，队列已暂停';
+        var over=genFail
+            ?'已尝试 '+suiteBatchAttempts+' 个账号仍生成不出图（不支持生图），队列已暂停'
+            :'已尝试 '+suiteBatchAttempts+' 个账号仍无额度，队列已暂停';
         suiteBatchTriedAccounts=[];suiteBatchAttempts=0;
         suiteBatchState.paused=true;suiteBatchState.pausedReason=over;saveSuiteBatch();
         showToast('⚠️ '+over);
@@ -94,14 +153,14 @@ function suiteBatchTryAutoSwitch(row){
     suiteBatchAutoSwitchRunning=true;
     var finish=function(){suiteBatchAutoSwitchRunning=false;};
     var later=typeof setTimeout==='function'?setTimeout:function(fn){Promise.resolve().then(fn);};
-    // 已试过的号全部排除：切过又弹额度的号不能再切回去
+    // 已试过的号全部排除：切过又不可用的号不能再切回去
     suiteBatchAutoSwitchMessage(suiteBatchTriedAccounts).then(function(res){
         // 队列已换（重开/换文件）：不接管
         if(!suiteBatchState||suiteBatchState.rows[suiteBatchState.index]!==row)return;
         var name=String((res&&res.name)||'').trim();
         if(res&&res.ok===true&&name){
             if(suiteBatchTriedAccounts.indexOf(name)<0)suiteBatchTriedAccounts.push(name);
-            if(typeof console!=='undefined')console.log('🔀 第 '+suiteBatchAttempts+' 次换号：已切到 '+name+'，重跑 row'+row);
+            if(typeof console!=='undefined')console.log('🔀 第 '+suiteBatchAttempts+' 次换号'+(genFail?'（不支持生图）':'')+'：已切到 '+name+'，重跑 row'+row);
             try{localStorage.removeItem('polo_suite_auto_v1');}catch(_){}
             try{suiteAutoState=null;}catch(_){}
             if(typeof renderSuiteAutoControls==='function')renderSuiteAutoControls();
@@ -113,12 +172,15 @@ function suiteBatchTryAutoSwitch(row){
             return;
         }
         // 失败：一律收尾（计数清零），给出能看出"试了几个号"的原因。
-        // 原「额度已用完（预计 … 恢复）」文案必须保留在原因里：它同时是给人看的信息。
+        // 原「额度已用完（预计 … 恢复）」/「不支持生图」文案必须保留在原因里：它同时是给人看的信息。
         var tried=suiteBatchTriedAccounts.length;
         var base=String(suiteBatchState.pausedReason||'');
-        if(base.indexOf('额度')<0)base='豆包额度已用完';
+        if(genFail){if(base.indexOf('不支持生图')<0)base='该账号不支持生图';}
+        else if(base.indexOf('额度')<0)base='豆包额度已用完';
         var text;
-        if(res&&res.reason==='allExhausted')text='所有账号额度均已用完（已试 '+tried+' 个号）';
+        if(res&&res.reason==='allExhausted')text=genFail
+            ?'所有账号均已判定不可用（不支持生图，已试 '+tried+' 个号）'
+            :'所有账号额度均已用完（已试 '+tried+' 个号）';
         else text=base+'；自动切号失败（已试 '+tried+' 个号）：'+((res&&res.error)||(res&&res.reason)||'未知原因');
         suiteBatchTriedAccounts=[];suiteBatchAttempts=0;
         suiteBatchState.paused=true;
@@ -131,7 +193,8 @@ function suiteBatchTryAutoSwitch(row){
         if(!suiteBatchState)return;
         var tried=suiteBatchTriedAccounts.length;
         var base=String(suiteBatchState.pausedReason||'');
-        if(base.indexOf('额度')<0)base='豆包额度已用完';
+        if(genFail){if(base.indexOf('不支持生图')<0)base='该账号不支持生图';}
+        else if(base.indexOf('额度')<0)base='豆包额度已用完';
         suiteBatchTriedAccounts=[];suiteBatchAttempts=0;
         suiteBatchState.paused=true;
         suiteBatchState.pausedReason=base+'；自动切号失败（已试 '+tried+' 个号）：'+((e&&e.message)||e);
@@ -167,11 +230,13 @@ async function runSuiteBatch(){
             if(currentFileKey()!==suiteBatchState.fileKey)throw Error('Excel 已切换，套图队列已暂停');
             const row=suiteBatchState.rows[suiteBatchState.index];
             const complete=await suiteBatchRunRow(row,false);
-            if(complete){suiteBatchState.index++;saveSuiteBatch();continue;}
+            if(complete){suiteBatchGenOk(row);suiteBatchState.index++;saveSuiteBatch();continue;}
             // 用户主动暂停不算失败：当前行保留待续跑，不能登记失败也不能跳过。
             if(suiteBatchState.paused)break;
             // 豆包额度用完：整批暂停，当前行保留待续跑（不记失败、不前进、不补跑）。
             if(suiteBatchQuotaPause(row))break;
+            // 连续 3 次一张图都生成不出来（被平台限制的号）：换号后原地重跑本行，同样不记失败。
+            if(await suiteBatchGenFailGate(row))break;
             suiteBatchMarkFailed(row);
             await suiteBatchDropRow(row);
             suiteBatchState.index++;saveSuiteBatch();
@@ -186,7 +251,7 @@ async function runSuiteBatch(){
                 let complete=false;
                 try{complete=await suiteBatchRunRow(row,true);}
                 catch(e){showToast('⚠️ 行'+row+' 补跑失败：'+e.message);}
-                if(complete)suiteBatchState.failed=suiteBatchState.failed.filter(r=>r!==row);
+                if(complete){suiteBatchGenOk(row);suiteBatchState.failed=suiteBatchState.failed.filter(r=>r!==row);}
                 else{
                     if(suiteBatchQuotaPause(row,{autoSwitch:false}))break;   // 补跑时遇到额度用完：整批暂停，且不再触发切号（不进第二轮补跑）
                     await suiteBatchDropRow(row);         // 仍失败：保留在 failed，不再补跑

@@ -3956,26 +3956,36 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results, quota) {
             clearTimeout(batchColorState.currentTimeoutId);
             batchColorState.currentTimeoutId = null;
         }
-        if (!Array.isArray(batchColorState.failedRows)) batchColorState.failedRows = [];
-        if (batchColorState.failedRows.indexOf(rowNum) < 0) {
-            batchColorState.failedRows.push(rowNum);
-            batchColorState.failCount++;
-        }
-        // 报错类失败不重试（重试只会空转）：记失败 → 跳过 → 继续下一款，整批结束后统一补跑
-        batchColorState.inFlightRow = null;
-        batchColorState.pendingAckRow = null;
-        batchColorState.inFlightSince = 0;
-        batchColorState.executionId = null;
-        batchColorState.currentTimeoutId = null;
-        batchColorState.retryOf = null;
-        batchColorState.currentIndex++;
-        batchColorState.freshChatNext = true;   // 下一款先开新对话，防上一款的迟到图串款
-        saveColorBatchState();
-        refreshColorResumeRowsFromState();
-        updateBatchColorProgress();
-        showToast(`❌ row${rowNum} 换色失败（${verdict.reason}），已跳过（整批结束后补跑）`);
-        console.log(`🎨 失败入账并跳过: row${rowNum} (${source})`);
-        processNextBatchColor();
+        // 记失败 → 跳过 → 继续下一款，整批结束后统一补跑
+        const skipRow = () => {
+            if (!Array.isArray(batchColorState.failedRows)) batchColorState.failedRows = [];
+            if (batchColorState.failedRows.indexOf(rowNum) < 0) {
+                batchColorState.failedRows.push(rowNum);
+                batchColorState.failCount++;
+            }
+            batchColorState.inFlightRow = null;
+            batchColorState.pendingAckRow = null;
+            batchColorState.inFlightSince = 0;
+            batchColorState.executionId = null;
+            batchColorState.currentTimeoutId = null;
+            batchColorState.retryOf = null;
+            batchColorState.currentIndex++;
+            batchColorState.freshChatNext = true;   // 下一款先开新对话，防上一款的迟到图串款
+            saveColorBatchState();
+            refreshColorResumeRowsFromState();
+            updateBatchColorProgress();
+            showToast(`❌ row${rowNum} 换色失败（${verdict.reason}），已跳过（整批结束后补跑）`);
+            console.log(`🎨 失败入账并跳过: row${rowNum} (${source})`);
+            processNextBatchColor();
+        };
+        // ④a 一张图都没生成（不是额度的错）：先让后台给这个账号记一次「生成失败」。
+        //     后台连续 3 次才会回 disabled:true → 走与额度完全相同的换号流程、重跑本款、不记失败；
+        //     偶发失败后台只回 disabled:false（或记账不可用）→ 仍按原逻辑记失败跳过。
+        //     部分出图（1~3 色）不算「不会生图」，不进这条分支。
+        const downloads = Array.isArray(results && results.downloads) ? results.downloads : null;
+        const noImage = !downloads || !downloads.some(d => d && d.ok === true);
+        if (noImage && typeof colorGenFailReport === 'function' && colorGenFailReport(rowNum, verdict.reason, source, skipRow)) return;
+        skipRow();
         return;
     }
 
@@ -4014,19 +4024,21 @@ function advanceBatchColorForRow(rowNum, source, msgBatchId, results, quota) {
     }, 500);
 }
 
-// ===== 额度命中 → 自动切到有额度的账号（所有账号都没额度才等恢复） =====
+// ===== 换号：额度命中 / 连续 3 次生成不出图（账号不支持生图）=====
+// 两个触发条件共用同一条换号链路（同一套防重入、12 次上限、exclude 累积）：
+//   ① 额度命中（内容脚本回传 quota）        ② 连续 3 次一张图都没生成（后台判 unsupported）
 // 不做任何"试生图"探测：切号成功后直接重跑当前这一款真实任务 ——
 //   出图          → 正常推进下一款
-//   又弹额度      → 把这个号记进「已试」列表，再换下一个号，重跑同一款
+//   又弹额度/又不出图 → 把这个号记进「已试」列表，再换下一个号，重跑同一款
 //   号都试完没成功 → 暂停，等恢复/加号后再继续
 // 防重入只在「一次 doubaoAutoSwitch 请求期间」生效（请求结束立即清），
-// 否则重跑后再次弹额度就进不来了，换号循环会卡死在第一个号上。
+// 否则重跑后再次命中就进不来了，换号循环会卡死在第一个号上。
 var colorAutoSwitchRunning = false;
-var colorQuotaTriedAccounts = [];      // 本轮额度换号已试过的账号名（换批次/换文件时清零）
-var colorQuotaAttempts = 0;            // 本轮额度换号次数（防死循环的硬上限）
+var colorQuotaTriedAccounts = [];      // 本轮换号已试过的账号名（换批次/换文件时清零）
+var colorQuotaAttempts = 0;            // 本轮换号次数（防死循环的硬上限）
 var COLOR_QUOTA_SWITCH_LIMIT = 12;     // 一轮最多换 12 次号
 
-// 账号账本类动作（扫描/选号/自动切号）统一走这里：必须带 EXTENSION_ID，且每次判 lastError。
+// 账号账本类动作（扫描/选号/自动切号/生成结果记账）统一走这里：必须带 EXTENSION_ID，且每次判 lastError。
 // 不设超时：扫 10 个号要 1.5~2.3 分钟，任何短超时都会把正在跑的扫描掐死。
 function doubaoAccountMessage(action, payload) {
     return new Promise((resolve, reject) => {
@@ -4043,14 +4055,54 @@ function doubaoAccountMessage(action, payload) {
     });
 }
 
-// 额度命中：先暂停（保留可恢复状态），再异步换一个有额度的账号；换号成功就从当前款重跑。
-// 中途不把当前款记进 failedRows：额度不是这一款的错，换号/等恢复后都要重跑它。
-// 换号后重跑又弹额度 → 本函数会被再次调用（防重入 flag 已清），继续换下一个号。
-function colorQuotaAutoSwitch(rowNum, reason) {
+// 生成不出图（0 图 / 超时 / 结果为空）→ 请后台给该账号记一次失败，并问它是不是已经被判不可用。
+// 只上报、不在页面侧数次数：阈值（连续 3 次）只由 background 判，页面只认 disabled:true。
+// 返回 true  已接管：后台回了 disabled:true → 走与额度完全相同的换号流程（不记失败、重跑本款），
+//                    或 disabled:false → 立刻走 fallback 记失败跳过；两种情况都由异步回调决定。
+// 返回 false 本页没有可用通道 → 调用方按原逻辑记失败跳过。
+function colorGenFailReport(rowNum, reason, source, fallback) {
+    const state = batchColorState;
+    if (!state) return false;
+    if (typeof doubaoAccountMessage !== 'function') return false;
+    const fallbackOnce = () => {
+        if (batchColorState !== state) return;
+        if (typeof fallback === 'function') fallback();
+    };
+    doubaoAccountMessage('doubaoGenResult', { ok: false, row: rowNum, reason: String(reason || '').slice(0, 120) })
+        .then(res => {
+            if (batchColorState !== state) return;
+            if (res && res.disabled === true) {
+                // 期间用户已停/已暂停 → 不接管（不能替用户继续跑）
+                if (!state.running || state.stopRequested) { fallbackOnce(); return; }
+                const name = String(res.name || '').trim();
+                const streak = Number(res.streak) || 3;
+                const line = `已连续 ${streak} 次生成失败，判定该账号不支持生图`
+                    + (name ? `（${name}）` : '') + '，正在换号…';
+                console.warn(`🔀 row${rowNum} ${line} (${source})`);
+                colorQuotaAutoSwitch(rowNum, `已连续 ${streak} 次生成失败，判定该账号不支持生图`, { kind: 'genfail' });
+                return;
+            }
+            fallbackOnce();
+        }, err => {
+            // 记账失败只是没拿到结论 → 不能因此卡住整批，照原逻辑记失败跳过
+            console.warn(`账号生成失败记账失败（不影响换色主流程）：${(err && err.message) || err}`);
+            fallbackOnce();
+        });
+    return true;
+}
+
+// 换号（kind='quota' 额度命中 / kind='genfail' 连续 3 次生成不出图）：先暂停（保留可恢复状态），
+// 再异步换一个可用账号；换号成功就从当前款重跑。两种原因共用计数/上限/已试列表，日志文案分开。
+// 中途不把当前款记进 failedRows：这不是这一款的错，换号/等恢复后都要重跑它。
+function colorQuotaAutoSwitch(rowNum, reason, opts) {
     const state = batchColorState;
     if (!state) return;
+    const o = opts || {};
+    const kind = o.kind === 'genfail' ? 'genfail' : 'quota';
+    // 暂停原因后缀：两种原因必须一眼能分开（额度 / 不支持生图），applyColorAutoSwitch 靠它认领结果
+    const marker = kind === 'genfail' ? '，正在换号…' : '，正在查找有额度的账号…';
     if (colorAutoSwitchRunning) {
-        console.log('🔀 上一轮换号请求还没返回，本次额度命中并入该轮（不重复切换）');
+        console.log('🔀 上一轮换号请求还没返回，本次命中并入该轮（不重复切换）');
         return;
     }
     // 硬上限：连续换 12 个号都没成功，就不再空转，交回人工
@@ -4058,18 +4110,22 @@ function colorQuotaAutoSwitch(rowNum, reason) {
         const tried = colorQuotaAttempts;
         colorQuotaTriedAccounts = [];
         colorQuotaAttempts = 0;
-        const text = `已尝试 ${tried} 个账号仍无额度，已暂停（可等恢复或换号后继续）`;
+        const text = kind === 'genfail'
+            ? `已尝试 ${tried} 个账号仍生成不出图（不支持生图），已暂停（可等恢复或加新账号后再继续）`
+            : `已尝试 ${tried} 个账号仍无额度，已暂停（可等恢复或换号后继续）`;
         console.warn('🔀 ' + text);
         finishBatchColor(false, text);
         showToast('⏸ ' + text);
         return;
     }
     colorQuotaAttempts++;
-    finishBatchColor(false, reason + '，正在查找有额度的账号…');
-    showToast('⏸ ' + reason + '，整批已暂停，正在查找有额度的账号…');
+    state.switchKind = kind;
+    state.switchMarker = marker;
+    finishBatchColor(false, reason + marker);
+    showToast('⏸ ' + reason + '，整批已暂停' + marker);
     colorAutoSwitchRunning = true;
     const done = () => { colorAutoSwitchRunning = false; };
-    // 已试过的号全部排除：切过又弹额度的号不能再切回去（否则原地打转）
+    // 已试过的号全部排除：切过又不可用的号不能再切回去（否则原地打转）
     const exclude = colorQuotaTriedAccounts.slice();
     if (state.lastSwitchAccount && exclude.indexOf(state.lastSwitchAccount) < 0) exclude.push(state.lastSwitchAccount);
     doubaoAccountMessage('doubaoAutoSwitch', { exclude })
@@ -4082,30 +4138,40 @@ function colorQuotaAutoSwitch(rowNum, reason) {
 function applyColorAutoSwitch(state, rowNum, res, err) {
     if (batchColorState !== state) return;
     if (state.running) return;
-    if (!/正在查找有额度的账号/.test(state.pausedReason || '')) return;
+    const marker = String(state.switchMarker || '，正在查找有额度的账号…');
+    if (String(state.pausedReason || '').indexOf(marker) < 0) return;
+    const genFail = state.switchKind === 'genfail';
     const name = String((res && res.name) || '').trim();
     if (res && res.ok === true && name) {
-        state.lastSwitchAccount = name;   // 只存内存：下次命中额度时也排除它
+        state.lastSwitchAccount = name;   // 只存内存：下次命中时也排除它
         if (colorQuotaTriedAccounts.indexOf(name) < 0) colorQuotaTriedAccounts.push(name);
-        const line = `第 ${colorQuotaAttempts} 次换号：已切到 ${name}，重跑 row${rowNum}`;
+        const line = `第 ${colorQuotaAttempts} 次换号${genFail ? '（不支持生图）' : ''}：已切到 ${name}，重跑 row${rowNum}`;
         console.log('🎨 ' + line);
         updateBatchColorStatus('🔀 ' + line);
         showToast(`🔀 已切到 ${name}，重跑 row${rowNum}`);
         restartColorBatchForRow(state, rowNum);
         return;
     }
-    const base = String(state.pausedReason || '').replace(/，正在查找有额度的账号…$/, '');
+    const base = String(state.pausedReason || '').replace(marker, '');
     const code = res && res.reason;
     const triedCount = colorQuotaTriedAccounts.length;
     let text;
-    // 文案都保留「额度」二字：resumeColorBatch 靠它判断额度暂停（继续时要换新对话 + 重跑本款）
-    if (code === 'allExhausted') text = `所有账号额度均已用完（已试 ${triedCount} 个号），已暂停（可等恢复或加新账号后再继续）`;
+    // 文案：额度暂停必须保留「额度」二字，生图暂停必须保留「不支持生图」——
+    // resumeColorBatch 靠这两个词判断「继续时要换新对话 + 重跑本款」。
+    if (genFail) {
+        if (code === 'allExhausted') text = `所有账号均已判定不可用（不支持生图，已试 ${triedCount} 个号），已暂停（可等恢复或加新账号后再继续）`;
+        else if (code === 'needLogin') text = '该账号不支持生图，且目标账号需要重新登录，请先在豆包登录后继续';
+        else if (code === 'busy') text = '豆包正在生成中，稍后点继续（当前账号仍判定不支持生图）';
+        else text = base + `；自动换号失败（已试 ${triedCount} 个号）：` + ((res && res.error) || (err && err.message) || '未知原因');
+    } else if (code === 'allExhausted') text = `所有账号额度均已用完（已试 ${triedCount} 个号），已暂停（可等恢复或加新账号后再继续）`;
     else if (code === 'needLogin') text = '豆包额度已用完，且目标账号需要重新登录，请先在豆包登录后继续';
     else if (code === 'busy') text = '豆包正在生成中，稍后点继续（当前账号额度仍用完）';
     else text = base + `；自动切号失败（已试 ${triedCount} 个号）：` + ((res && res.error) || (err && err.message) || '未知原因');
-    // 失败即收尾：计数清零，下一次额度命中重新开一轮（成功分支不清，计数就是本轮换号次数）
+    // 失败即收尾：计数清零，下一次命中重新开一轮（成功分支不清，计数就是本轮换号次数）
     colorQuotaTriedAccounts = [];
     colorQuotaAttempts = 0;
+    state.switchMarker = '';
+    state.switchKind = '';
     console.warn('🔀 自动切号未成功：' + text);
     finishBatchColor(false, text);
     showToast('⏸ ' + text);
@@ -6116,8 +6182,8 @@ function resumeColorBatch(directoryReady=false) {
     if (batchColorState) {
         const state = batchColorState;
         // 兼容旧缓存中的在途/超时记录：当前款重新执行，不等待旧引擎。
-        // 额度暂停不是本款故障：继续时先重跑当前款（失败款另有整批末尾补跑）。
-        const quotaPaused = /额度/.test(state.pausedReason || '');
+        // 额度暂停 / 「不支持生图」暂停都不是本款故障：继续时先重跑当前款（失败款另有整批末尾补跑）。
+        const quotaPaused = /额度|不支持生图/.test(state.pausedReason || '');
         const pausedRow = state.inFlightRow || state.pendingAckRow || getColorTimeoutRows()[0]
             || (quotaPaused && state.queue[state.currentIndex] ? state.queue[state.currentIndex].row : 0)
             || (state.failedRows || [])[0];
@@ -6420,18 +6486,24 @@ function setupBatchColorTimeout(product) {
             state.currentTimeoutId = null;
             if (isRetry) {
                 // 第二次超时：记失败、跳过、继续下一款，整批结束后统一补跑
-                if (!Array.isArray(state.failedRows)) state.failedRows = [];
-                if (state.failedRows.indexOf(product.row) < 0) {
-                    state.failedRows.push(product.row);
-                    state.failCount++;
-                }
-                state.retryOf = null;
-                state.currentIndex++;
-                state.freshChatNext = true;   // 下一款先开新对话，防上一款的迟到图串款
-                saveColorBatchState();
-                showToast(`❌ row${product.row} 重试后仍未出图，已跳过（整批结束后补跑）`);
-                console.log(`🎨 二次超时跳过: row${product.row}`);
-                processNextBatchColor();
+                const skipRow = () => {
+                    if (!Array.isArray(state.failedRows)) state.failedRows = [];
+                    if (state.failedRows.indexOf(product.row) < 0) {
+                        state.failedRows.push(product.row);
+                        state.failCount++;
+                    }
+                    state.retryOf = null;
+                    state.currentIndex++;
+                    state.freshChatNext = true;   // 下一款先开新对话，防上一款的迟到图串款
+                    saveColorBatchState();
+                    showToast(`❌ row${product.row} 重试后仍未出图，已跳过（整批结束后补跑）`);
+                    console.log(`🎨 二次超时跳过: row${product.row}`);
+                    processNextBatchColor();
+                };
+                // 两次超时也是一张图都没出：先记账，后台判「连续 3 次生成不出图」就直接换号重跑本款
+                if (typeof colorGenFailReport === 'function'
+                    && colorGenFailReport(product.row, '超时未出图（重试 1 次后仍无图）', 'timeout', skipRow)) return;
+                skipRow();
                 return;
             }
             // 第一次超时：同款重发一次，不前进

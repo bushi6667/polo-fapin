@@ -724,6 +724,25 @@ async function runColorTask(task, onAccepted) {
     // 任务完成后停止心跳
     stopHeartbeatForColorTask();
 
+    // 账号能力记账：出图 = 这个号能生图；一张图都没出（且不是额度） = 记一次生成失败。
+    // 连续 3 次由 background 判「不支持生图」（被平台限制的号），页面据此换号。
+    // fire-and-forget：不 await、不阻塞主流程，失败只打 warn。
+    // 额度命中的分支不上报（额度有独立机制），否则会把「没额度」误记成「不会生图」。
+    if (!quota) {
+        const hasImage = results.success === true
+            && Array.isArray(results.downloads) && results.downloads.some(d => d && d.ok === true);
+        try {
+            chrome.runtime.sendMessage({
+                action: 'doubaoGenResult',
+                ok: hasImage,
+                row: rowNum,
+                reason: hasImage ? '' : (results.error || (results.step ? '等图超时/0 图' : '结果为空'))
+            }).catch(err => log('生成结果记账失败（不影响主流程）：' + ((err && err.message) || err), 'warn'));
+        } catch (err) {
+            log('生成结果记账异常（不影响主流程）：' + ((err && err.message) || err), 'warn');
+        }
+    }
+
     const completeMessage = {
         action: 'colorTaskComplete',
         results: results,

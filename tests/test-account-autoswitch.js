@@ -259,7 +259,7 @@ const BG_FNS = ['doubaoLocalDateKey', 'doubaoEmptyLedger', 'doubaoNormStatus', '
     'doubaoWriteProbe', 'doubaoMergeAccountList', 'doubaoReadCurrentName', 'doubaoIsFreshExhausted',
     'doubaoProbeOrder', 'doubaoBuildCandidates', 'doubaoAutoSwitchAction'];
 const BG_SRC = ['DOUBAO_LEDGER_KEY', 'DOUBAO_STATUS_OK', 'DOUBAO_STATUS_EXHAUSTED',
-    'DOUBAO_STATUS_UNKNOWN', 'DOUBAO_CHANNEL_CLOSED_RE'].map(extractBgConst)
+    'DOUBAO_STATUS_UNSUPPORTED', 'DOUBAO_STATUS_UNKNOWN', 'DOUBAO_CHANNEL_CLOSED_RE'].map(extractBgConst)
     .concat(['var doubaoScanInFlight = false;'])
     .concat(BG_FNS.map(extractBgFn)).join('\n\n');
 
