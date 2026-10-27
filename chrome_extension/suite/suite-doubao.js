@@ -24,11 +24,65 @@ const SuiteDoubao = (() => {
         sending: false,
         sent: false,
         quotaSnapshot: null,      // 额度检测的时间边界快照（suite-baseline 时记录）
-        quotaHits: 0              // 额度连续命中次数（与换色侧同口径：连续 2 次才算，未命中清零）
+        quotaHits: 0,             // 额度连续命中次数（与换色侧同口径：连续 2 次才算，未命中清零）
+        rowStart: 0,              // 当前行开始时间（suite-baseline 记），用于「耗时」列
+        lastPollLogAt: 0,         // 轮询进度上次打印时间（节流）
+        lastPollCount: 0          // 轮询进度上次打印的图片数（0 起算：首轮 0 张不误报「增加」）
     };
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-    const log = (m, t = 'info') => console.log(`[suite-doubao][${t}] ${m}`);
+
+    /* ---------- 控制台日志（逐步可见，线上照着控制台就能定位卡在哪一步） ----------
+       前缀与换色侧 [豆包AI换色] 对齐：按 [豆包套图] 过滤即可看到整套流程。
+       规则：
+         · 级别：普通节点 console.log；异常/超时/切号 console.warn；真正出错 console.error
+         · 每条带「行号 + 相对本行开始的耗时」：row85 +12.3s 上传图片: row85_main.jpg
+         · SUITE_VERBOSE=false 时只留关键节点（行开始/出图/失败/切号/行完成）
+         · 提示词最多 40 字、URL 只留最后一段文件名，绝不整段回显（防刷屏/防泄露签名）
+         · 轮询进度 5 秒最多一条（当前轮询 500ms 一次，不节流会直接刷屏）
+         · 日志自身绝不阻断业务：整段 try/catch，console 不存在（vm 沙箱）直接跳过
+       ---------------------------------------------------------------- */
+    const SUITE_VERBOSE = true;
+    const LOG_PREFIX = '[豆包套图]';
+    const PROMPT_LOG_MAX = 40;            // 提示词在日志里最多显示的字数
+    const POLL_LOG_THROTTLE_MS = 5000;    // 轮询进度节流：5 秒最多一条
+    const POLL_LOG_HEARTBEAT_MS = 30000;  // 图片数没变化时，每 30 秒报一次「仍在等待」
+
+    const msNow = () => { try { return Date.now(); } catch (_) { return 0; } };
+    const fmtSec = (ms) => (Math.max(0, Number(ms) || 0) / 1000).toFixed(1) + 's';
+    const clipText = (s, max) => {
+        const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+        return t.length > max ? t.slice(0, max) + '…' : t;
+    };
+    // URL → 最后一段文件名（不打印域名与签名参数，避免刷屏/泄露）
+    const shortUrl = (u) => {
+        try {
+            const s = String(u || '');
+            const seg = s.split('#')[0].split('?')[0].split('/').filter(Boolean);
+            return clipText(seg.length ? decodeURIComponent(seg[seg.length - 1]) : s, 60);
+        } catch (_) { return clipText(u, 60); }
+    };
+
+    function emit(level, msg, opt) {
+        try {
+            if (opt && opt.verbose && !SUITE_VERBOSE) return;
+            if (typeof console === 'undefined' || !console) return;
+            const fn = level === 'error' ? console.error : (level === 'warn' ? console.warn : console.log);
+            if (typeof fn !== 'function') return;
+            let tag = '';
+            if (!(opt && opt.noTag)) {
+                const row = rowLabel();
+                const el = S.rowStart ? ('+' + fmtSec(msNow() - S.rowStart)) : '';
+                tag = [row, el].filter(Boolean).join(' ');
+            }
+            fn.call(console, LOG_PREFIX, tag ? tag + ' ' + msg : msg);
+        } catch (_) { /* 日志异常（含 console 被替换成会抛的桩）绝不影响业务 */ }
+    }
+    const rowLabel = () => (S.bound && S.bound.rowNum != null) ? ('row' + S.bound.rowNum) : '';
+    const log = (m) => emit('info', m);                        // 普通节点
+    const vlog = (m) => emit('info', m, { verbose: true });    // 细节节点（仅 SUITE_VERBOSE）
+    const wlog = (m) => emit('warn', m);                       // 异常/超时/切号
+    const elog = (m) => emit('error', m);                      // 错误
 
     /* ---------- 忙态（必须与 content/doubao.js 的 DOUBAO_BUSY_SEL 完全一致） ----------
        只认「生成中/打字中」两类状态类，且**可见才算忙**：视口外的占位节点带同样的类，
@@ -107,12 +161,21 @@ const SuiteDoubao = (() => {
 
     async function prepareSettings(settings) {
         const buttons=()=>Array.from(document.querySelectorAll('button,[role="combobox"]')).filter(e=>e.getClientRects().length&&!e.disabled);
-        if(!buttons().some(e=>/seedream/i.test(e.textContent||''))) {
+        const ready=()=>buttons().some(e=>/seedream/i.test(e.textContent||''));
+        if(!ready()) {
+            vlog('切换到图像生成模式...');
             const enter=buttons().find(e=>(e.textContent||'').trim()==='图像生成');
-            if(enter)enter.click();
-            for(let i=0;i<40&&!buttons().some(e=>/seedream/i.test(e.textContent||''));i++)await sleep(250);
+            if(enter){
+                enter.click();
+                vlog('已点击图像生成按钮');
+            }else{
+                wlog('未找到「图像生成」按钮，沿用当前模式');
+            }
+            for(let i=0;i<40&&!ready();i++)await sleep(250);
         }
-        return verifySettings(settings);
+        const r = verifySettings(settings);
+        vlog('图像生成模式已就绪');
+        return r;
     }
 
     /* ---------- 图片采集 ---------- */
@@ -337,11 +400,15 @@ const SuiteDoubao = (() => {
 
     /* ---------- 上传素材 ---------- */
     async function urlToFile(url, name) {
+        const t0 = msNow();
+        const file = name || shortUrl(url);
+        vlog(`上传图片: ${shortUrl(url)}`);
         const resp = await fetch(url, { credentials: 'include' });
-        if (!resp.ok) throw new Error(`素材读取失败 HTTP ${resp.status}：${name}`);
+        if (!resp.ok) throw new Error(`素材读取失败 HTTP ${resp.status}：${file}`);
         const blob = await resp.blob();
-        if (!blob || !blob.size) throw new Error(`素材为空：${name}`);
-        return new File([blob], name, { type: blob.type || 'image/png' });
+        if (!blob || !blob.size) throw new Error(`素材为空：${file}`);
+        vlog(`上传完成: ${clipText(file, 60)} (${Math.round(msNow() - t0)}ms)`);
+        return new File([blob], file, { type: blob.type || 'image/png' });
     }
 
     async function uploadAssets(assets) {
@@ -351,6 +418,7 @@ const SuiteDoubao = (() => {
         const fileInput = document.querySelector('input[type="file"]');
         if (!fileInput) throw new Error('未找到豆包的文件选择控件，无法上传素材');
 
+        vlog(`准备上传素材: ${assets.length} 张`);
         const files = [];
         for (const a of assets) files.push(await urlToFile(a.url, a.filename || (a.color + '.png')));
 
@@ -368,10 +436,12 @@ const SuiteDoubao = (() => {
             }).length;
         };
         const beforeCount = previewCount();
+        const t0 = msNow();
         const dt = new DataTransfer();
         for (const f of files) dt.items.add(f);
         fileInput.files = dt.files;
         fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        vlog(`已提交 ${files.length} 张到输入框，等待预览出现...`);
 
         // 实际等待"上传完成"：预览数量增加，而不是固定等待后假定成功
         const deadline = Date.now() + 120000;
@@ -380,9 +450,11 @@ const SuiteDoubao = (() => {
             const pending = document.querySelector('[role="progressbar"], [class*="uploading"], [class*="upload-error"]');
             const now = previewCount();
             if (now >= beforeCount + files.length && !pending) {
+                vlog(`上传已确认: ${files.length} 张预览就绪 (${Math.round(msNow() - t0)}ms)`);
                 return { ok: true, uploaded: files.length, previews: now, waitedMs: 120000 - (deadline - Date.now()) };
             }
         }
+        wlog(`上传超时（已等待 ${fmtSec(msNow() - t0)}）：期望 ${files.length} 张，实际预览 ${previewCount() - beforeCount} 张`);
         throw new Error(`上传未在 120 秒内完成（期望 ${files.length} 张，实际预览 ${previewCount() - beforeCount} 张）`);
     }
 
@@ -403,9 +475,12 @@ const SuiteDoubao = (() => {
     }
 
     async function typePrompt(text) {
+        const t0 = msNow();
         let input = findInput();
         if (!input) throw new Error('豆包输入框未就绪，无法输入提示词');
         input.focus();
+        const full = String(text == null ? '' : text);
+        vlog(`输入提示词: ${clipText(full, PROMPT_LOG_MAX)}`);
 
         await nativeInput('begin');
         try {
@@ -430,8 +505,10 @@ const SuiteDoubao = (() => {
         // ProseMirror 的软换行可能表现为双换行；只归一空白，不放过文字缺失或替换。
         const comparable=value=>value.replace(/\s+/g,' ').trim();
         if (comparable(got) !== comparable(want)) {
+            wlog(`提示词输入不完整（期望 ${want.length} 字，实际 ${got.length} 字，已耗时 ${fmtSec(msNow() - t0)}），已取消发送`);
             throw new Error(`提示词输入不完整（期望 ${want.length} 字，实际 ${got.length} 字），已取消发送`);
         }
+        vlog(`提示词已输入（${got.length} 字，${Math.round(msNow() - t0)}ms）`);
         return { ok: true, length: got.length };
     }
 
@@ -440,14 +517,18 @@ const SuiteDoubao = (() => {
         if (S.sending || S.sent) throw new Error('该执行已发送或正在发送，拒绝重复发送');
         S.sending = true;
         try {
+            const t0 = msNow();
             const input = findInput();
             if (!input) throw new Error('输入框消失，未发送');
             const before = getAllImageUrls();
             const btn = findSendButton();
             if (btn) {
                 S.sent = true; // ambiguous send failures must not be retried automatically
+                vlog('发送消息...');
                 btn.click();
+                vlog('消息已发送');
             } else {
+                wlog('未找到可用发送按钮，未发送');
                 throw new Error('未找到可用发送按钮，未发送');
             }
             // 发送证据：出现"生成中"（与忙态同一套选择器，可见才算）或图片数变化。
@@ -459,9 +540,11 @@ const SuiteDoubao = (() => {
                 const now = getAllImageUrls();
                 const busy = isBusyVisible() || !!document.querySelector('[class*="loading"]');
                 if (busy || now.length !== before.length) {
+                    vlog(`发送已生效（证据: ${busy ? '生成中' : '图片数变化'}，${Math.round(msNow() - t0)}ms）`);
                     return { ok: true, baselineUrls: before, evidence: busy ? 'generating' : 'images-changed' };
                 }
             }
+            wlog(`发送后 15 秒内未见生成中或结果变化（已等待 ${fmtSec(msNow() - t0)}），无法确认已发送`);
             throw new Error('发送后 15 秒内未见生成中或结果变化，无法确认已发送');
         } finally {
             S.sending = false;
@@ -469,14 +552,29 @@ const SuiteDoubao = (() => {
     }
 
     /* ---------- 等待并采集本次新结果 ---------- */
+    // 「已捕获无水印原图」：结果 URL 里已带 image_raw 的条数（与换色侧同口径的口径展示）
+    function countRawCaptured() {
+        try { return getAllImageUrls().filter(u => /image_raw/i.test(String(u))).length; }
+        catch (_) { return 0; }
+    }
+
     async function waitForNewImages(baselineUrls, expectCount, timeoutMs) {
         const base = Array.isArray(baselineUrls) ? baselineUrls : S.baselineUrls;
-        const deadline = Date.now() + (timeoutMs || 600000);
+        const target = expectCount || 5;
+        const budget = timeoutMs || 600000;
+        const t0 = msNow();
+        if (!S.rowStart) S.rowStart = t0;
+        S.lastPollLogAt = 0;
+        S.lastPollCount = 0;
+        const deadline = t0 + budget;
+        log(`等待 ${target} 张图片出现（最多 ${budget >= 60000 ? Math.round(budget / 60000) + ' 分钟' : Math.round(budget / 1000) + ' 秒'}）...`);
+        vlog(`已有 ${base.length} 张图片作为基准，已捕获无水印原图 ${countRawCaptured()} 张`);
         let last = [];
         while (Date.now() < deadline) {
             await sleep(2000);
             const quotaHit = quotaHitStreak();   // 等图阶段同样顺手判额度（连续 2 次命中才算）
             if (quotaHit && quotaHit.exhausted) {
+                wlog(`🔀 额度已用完${quotaHit.resumeAt ? `（预计 ${quotaHit.resumeAt} 恢复）` : ''}，需切号重跑 ${rowLabel() || '当前行'}（已等待 ${fmtSec(msNow() - t0)}）`);
                 return { ok: false, images: [], rawCount: 0, dedupedByUrlKey: 0, mergedGroups: 0, baselineCount: base.length, quota: quotaHit };
             }
             // 豆包在视口外保留SVG占位图；逐张滚入视口触发真实图片加载。
@@ -490,7 +588,8 @@ const SuiteDoubao = (() => {
             const fresh = all.filter(u => !base.includes(u));
             last = fresh;
             const busy = isBusyVisible();   // 与忙态同一套选择器，可见才算忙
-            if (fresh.length >= expectCount && !busy) break;
+            logProgress(fresh.length);
+            if (fresh.length >= target && !busy) break;
             if (!busy && fresh.length > 0 && Date.now() + 8000 > deadline) break;
         }
         // 归并"同图不同尺寸/链接"的疑似重复（内容指纹由页面侧进一步确认）
@@ -501,6 +600,11 @@ const SuiteDoubao = (() => {
             groups.get(k).push(u);
         }
         const images = Array.from(groups.values()).map(g => g[0]);
+        if (images.length >= target) {
+            log(`✅ 检测到 ${images.length} 张新图 (已达到目标 ${target} 张)`);
+        } else {
+            wlog(`等待超时（已等待 ${fmtSec(msNow() - t0)}）：只检测到 ${images.length}/${target} 张新图，请检查会话`);
+        }
         return {
             ok: images.length > 0,
             images,
@@ -511,21 +615,54 @@ const SuiteDoubao = (() => {
         };
     }
 
+    /* 轮询进度（节流）：数量有变化且距上次 ≥5s 才打一条；数量长期不变时每 30s 报一次“仍在等待”。
+       当前调度 500ms 轮询一次，不节流会在 10 分钟里刷出上千行。 */
+    function logProgress(count) {
+        try {
+            const t = msNow();
+            const lastAt = S.lastPollLogAt || 0;
+            const changed = count !== S.lastPollCount;
+            if (changed ? (t - lastAt < POLL_LOG_THROTTLE_MS) : (t - lastAt < POLL_LOG_HEARTBEAT_MS)) return;
+            S.lastPollLogAt = t;
+            S.lastPollCount = count;
+            const sec = S.rowStart ? Math.round((t - S.rowStart) / 1000) : 0;
+            vlog(changed ? `[${sec}s] 图片增加: ${count} 张` : `[${sec}s] 仍在等待，暂无新图（${count} 张）`);
+        } catch (_) { /* 日志不得影响等图 */ }
+    }
+
     // 在豆包页面读取带签名的结果，不让file助手页跨源抓取CDN。
     // 返回自包含图片，后续识别/缓存/恢复都不再依赖临时服务器或过期URL。
-    async function materializeImages(urls) {
+    // labels（可选）：与 urls 一一对应的编号/颜色名，仅用于日志，缺省回落到文件名。
+    async function materializeImages(urls, labels) {
         document.dispatchEvent(new CustomEvent('_poloRawReplay'));
         const result = [];
-        for (const previewUrl of urls) {
+        const list = Array.isArray(urls) ? urls : [];
+        const total = list.length;
+        const t0 = msNow();
+        for (let i = 0; i < total; i++) {
+            const previewUrl = list[i];
+            const label = clipText((labels && labels[i]) || shortUrl(previewUrl).replace(/\.[a-z0-9]{2,5}$/i, ''), 40);
             const url = typeof getRawUrl === 'function' ? getRawUrl(previewUrl) : previewUrl;
             const parsed = new URL(url);
-            if (!parsed.pathname.includes('image_raw') && !parsed.searchParams.has('image_raw')) throw new Error('尚未取得本次图片的无水印原图，已保留生成结果，请仅重试取图，不会下载带水印预览图');
+            if (!parsed.pathname.includes('image_raw') && !parsed.searchParams.has('image_raw')) {
+                wlog(`  ✗ ${i + 1}/${total}: ${label} 尚未取得无水印原图（保留生成结果，只重试取图）`);
+                throw new Error('尚未取得本次图片的无水印原图，已保留生成结果，请仅重试取图，不会下载带水印预览图');
+            }
             let response;
             try { response = await fetch(url, { credentials: 'omit' }); }
-            catch (_) { throw new Error('结果图片请求失败：原对话图片链接可能已失效，请恢复已有结果，勿重新生成'); }
-            if (!response.ok) throw new Error(`结果图片读取失败 HTTP ${response.status}`);
+            catch (_) {
+                wlog(`  ✗ ${i + 1}/${total}: ${label} 取图请求失败（原对话链接可能已失效）`);
+                throw new Error('结果图片请求失败：原对话图片链接可能已失效，请恢复已有结果，勿重新生成');
+            }
+            if (!response.ok) {
+                wlog(`  ✗ ${i + 1}/${total}: ${label} 读取失败 HTTP ${response.status}`);
+                throw new Error(`结果图片读取失败 HTTP ${response.status}`);
+            }
             const blob = await response.blob();
-            if (!blob.size || blob.size > 20 * 1024 * 1024 || !/^image\//.test(blob.type)) throw new Error('结果图片为空、过大或不是图片');
+            if (!blob.size || blob.size > 20 * 1024 * 1024 || !/^image\//.test(blob.type)) {
+                wlog(`  ✗ ${i + 1}/${total}: ${label} 内容为空、过大或不是图片`);
+                throw new Error('结果图片为空、过大或不是图片');
+            }
             const dataUrl = await new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = () => resolve(reader.result);
@@ -533,23 +670,31 @@ const SuiteDoubao = (() => {
                 reader.readAsDataURL(blob);
             });
             result.push(dataUrl);
+            vlog(`  ✓ ${i + 1}/${total}: ${label} (无水印原图) → ${shortUrl(url)}`);
         }
+        vlog(`下载任务结束: 成功 ${result.length}/${total}，其中无水印 ${result.length} 张 (${Math.round(msNow() - t0)}ms)`);
         return result;
     }
 
     /* ---------- 消息入口 ---------- */
     async function pollNewImages(baselineUrls,expectCount) {
+        const target = expectCount || 5;
         const quotaHit=quotaHitStreak();   // 每轮轮询顺手判额度：连续 2 次命中才让任务失败
-        if(quotaHit&&quotaHit.exhausted)return {ready:false,count:0,quota:quotaHit};
+        if(quotaHit&&quotaHit.exhausted){
+            wlog(`🔀 额度已用完${quotaHit.resumeAt?`（预计 ${quotaHit.resumeAt} 恢复）`:''}，需切号重跑 ${rowLabel() || '当前行'}`);
+            return {ready:false,count:0,quota:quotaHit};
+        }
         for(const image of document.querySelectorAll('img'))if(String(image.className||'').startsWith('image-')&&String(image.src||'').startsWith('data:image/svg')){image.scrollIntoView({block:'center',behavior:'instant'});await sleep(400);}
         const base=baselineUrls||S.baselineUrls;
         const baseKeys=new Set(base.map(contentKeyOf));
         const raw=getAllImageUrls().filter(u=>!baseKeys.has(contentKeyOf(u)));
         const groups=new Map();for(const url of raw){const key=contentKeyOf(url);if(!groups.has(key))groups.set(key,url);}
         const images=[...groups.values()];
+        logProgress(images.length);        // 节流后的进度行（5s 最多一条）
         const busy=isBusyVisible();   // 同上：统一选择器，可见才算忙
-        if(busy||images.length<expectCount)return {ready:false,count:images.length};
-        if(images.length>expectCount)throw new Error(`生成结果数量不符：期望${expectCount}张，去重后${images.length}张，请检查本次对话`);
+        if(busy||images.length<target)return {ready:false,count:images.length};
+        if(images.length>target)throw new Error(`生成结果数量不符：期望${target}张，去重后${images.length}张，请检查本次对话`);
+        log(`✅ 检测到 ${images.length} 张新图 (已达到目标 ${target} 张)`);
         return {ready:true,images:await materializeImages(images),rawCount:images.length,baselineCount:base.length,mergedGroups:0};
     }
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -564,6 +709,8 @@ const SuiteDoubao = (() => {
                     // 恢复场景取不到「发送前」快照 → 清空后等价于「额度检测关闭」：
                     // 退化路径已改为直接返回 null（宁漏不误），不会把历史额度气泡当成这一轮的证据。
                     S.quotaHits=0;S.quotaSnapshot=null;
+                    S.rowStart=msNow();S.lastPollLogAt=0;S.lastPollCount=0;
+                    emit('info',`▶ ${rowLabel()||'套图'} 恢复执行（不重新生成）`,{noTag:true});
                     sendResponse({success:true});return;
                 }
                 if (a === 'suite-baseline') {
@@ -572,6 +719,8 @@ const SuiteDoubao = (() => {
                     S.sent = false;
                     S.baselineUrls = getAllImageUrls();
                     markQuotaBaseline();    // 额度检测的时间边界：发送前快照
+                    S.rowStart = msNow();S.lastPollLogAt = 0;S.lastPollCount = 0;
+                    emit('info',`▶ ${rowLabel()||'套图'} 开始`,{noTag:true});   // 行开始（关键节点）
                     sendResponse({ success: true, baselineUrls: S.baselineUrls });
                     return;
                 }
@@ -580,16 +729,24 @@ const SuiteDoubao = (() => {
                 if (a === 'suite-upload') { sendResponse({ success: true, result: await uploadAssets(request.assets) }); return; }
                 if (a === 'suite-type') { sendResponse({ success: true, result: await typePrompt(request.text) }); return; }
                 if (a === 'suite-send') { sendResponse(Object.assign({ success: true }, await sendOnce())); return; }
-                if(a==='suite-poll'){sendResponse({success:true,result:await pollNewImages(request.baselineUrls,request.expectCount||5)});return;}
+                if(a==='suite-poll'){
+                    const r=await pollNewImages(request.baselineUrls,request.expectCount||5);
+                    if(r&&r.ready)emit('info',`✔ ${rowLabel()||'套图'} 完成（耗时 ${fmtSec(msNow()-S.rowStart)}）`,{noTag:true});
+                    sendResponse({success:true,result:r});return;
+                }
                 if (a === 'suite-wait') {
-                    const r = await waitForNewImages(request.baselineUrls, request.expectCount || 5, request.timeoutMs);
-                    if (r.images && r.images.length === (request.expectCount || 5)) r.images = await materializeImages(r.images);
+                    const expect = request.expectCount || 5;
+                    const r = await waitForNewImages(request.baselineUrls, expect, request.timeoutMs);
+                    if (r.images && r.images.length === expect) {
+                        r.images = await materializeImages(r.images);
+                        emit('info',`✔ ${rowLabel()||'套图'} 完成（耗时 ${fmtSec(msNow()-S.rowStart)}）`,{noTag:true});
+                    }
                     sendResponse({ success: true, result: r });
                     return;
                 }
                 sendResponse({ success: false, error: '未知套图动作：' + a });
             } catch (e) {
-                log(e.message, 'error');
+                elog(`执行失败（${S.rowStart?('已耗时 '+fmtSec(msNow()-S.rowStart)):'未开始计时'}）: ${e && e.message}`);
                 sendResponse({ success: false, error: e.message });
             }
         })();

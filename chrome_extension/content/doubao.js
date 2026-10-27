@@ -11,8 +11,11 @@ let isProcessing = false;
 let heartbeatTimer = null;
 
 // 统一日志前缀
+// 级别按 type 区分：error → console.error，warn → console.warn，其余（info）→ console.log。
+// 只改级别不改文案，线上可直接在控制台按级别过滤出真正的失败。
 function log(msg, type = 'info') {
-    console.log('[豆包AI换色]', msg);
+    const out = type === 'error' ? console.error : (type === 'warn' ? console.warn : console.log);
+    out('[豆包AI换色]', msg);
 }
 
 // 心跳保活：防止 MV3 Service Worker 休眠导致 assistantPort 丢失
