@@ -7,8 +7,9 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const SUITE_SRC = fs.readFileSync(path.join(__dirname, '..', 'chrome_extension', 'suite', 'suite-doubao.js'), 'utf8');
-const COLOR_SRC = fs.readFileSync(path.join(__dirname, '..', 'chrome_extension', 'content', 'doubao.js'), 'utf8');
+// 统一为 LF：函数体切片依赖 indexOf('\n}\n')，CRLF 会导致截断。
+const SUITE_SRC = fs.readFileSync(path.join(__dirname, '..', 'chrome_extension', 'suite', 'suite-doubao.js'), 'utf8').replace(/\r\n/g, '\n');
+const COLOR_SRC = fs.readFileSync(path.join(__dirname, '..', 'chrome_extension', 'content', 'doubao.js'), 'utf8').replace(/\r\n/g, '\n');
 
 let pass = 0, fail = 0;
 const failures = [];

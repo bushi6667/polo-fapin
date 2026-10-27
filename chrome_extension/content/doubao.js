@@ -569,6 +569,15 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
             }
         }
 
+        // 豆包在视口外保留 SVG 占位图，滚入视口才触发真实加载（与套图 waitForNewImages 同一套做法）。
+        // 不滚的话第 4 张可能永远不进 DOM —— 无人值守批次里这就成了"生成失败"，冤枉的是账号。
+        for (const image of document.querySelectorAll('img')) {
+            if (String(image.className || '').startsWith('image-') && String(image.currentSrc || image.src || '').startsWith('data:image/svg')) {
+                image.scrollIntoView({ block: 'center', behavior: 'instant' });
+                await sleep(400);
+            }
+        }
+
         const currentUrls = getAllImageUrls();
         const newUrls = currentUrls.filter(u => {
             const h = getHashFromUrl(u);
@@ -577,6 +586,8 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
 
         if (newUrls.length > lastImageCount) {
             lastImageCount = newUrls.length;
+            // 没凑满也先存着：超时后按已有部分下载，3/4 张不再当 0 张整批丢掉（对账号判定同样是冤案）
+            allNewUrls = newUrls.slice(0, totalImages);
             log(`[${elapsed}s] 图片增加: ${lastImageCount} 张`);
         }
 
@@ -587,15 +598,18 @@ async function downloadImagesIncremental(rowNum, timeout = 600000, totalImages =
         }
 
         if (elapsed % 15 === 0 && elapsed > 0) {
-            log(`[${elapsed}s] 当前新图 ${newUrls.length}/${totalImages} 张，请手动滚动显示更多`);
+            log(`[${elapsed}s] 当前新图 ${newUrls.length}/${totalImages} 张`);
         }
     }
 
     const downloads = [];
 
     if (allNewUrls.length === 0) {
-        log('⚠️ 超时，未检测到足够新图', 'warn');
+        log('⚠️ 超时，未检测到任何新图', 'warn');
         return downloads;
+    }
+    if (allNewUrls.length < totalImages) {
+        log(`⚠️ 超时，只等到 ${allNewUrls.length}/${totalImages} 张，按已有部分继续下载`, 'warn');
     }
 
     log(`开始一次性下载 ${allNewUrls.length} 张图...`);
@@ -724,19 +738,22 @@ async function runColorTask(task, onAccepted) {
     // 任务完成后停止心跳
     stopHeartbeatForColorTask();
 
-    // 账号能力记账：出图 = 这个号能生图；一张图都没出（且不是额度） = 记一次生成失败。
+    // 账号能力记账：拿到任何一张图 = 这个号能生图；一张都没拿到且不是平台报错 = 记一次生成失败。
     // 连续 3 次由 background 判「不支持生图」（被平台限制的号），页面据此换号。
     // fire-and-forget：不 await、不阻塞主流程，失败只打 warn。
     // 额度命中的分支不上报（额度有独立机制），否则会把「没额度」误记成「不会生图」。
     if (!quota) {
-        const hasImage = results.success === true
-            && Array.isArray(results.downloads) && results.downloads.some(d => d && d.ok === true);
+        // 判据只能看「有没有拿到任何一张」：d.ok 是落盘成败、不是有没有生成，否则 3 张里 1 张下载失败就把好号记成「不会生图」
+        const gotImage = (results.downloads || []).length > 0;
+        // 平台自身报错（出了点问题/请稍后重试/网络/超时）说明号没问题、只是这次没成：只打日志不记账，否则抖一下就把好号判死
+        const platformError = /出了点问题|请稍后重试|网络|超时|timeout/i.test(String(results.error || ''));
         try {
-            chrome.runtime.sendMessage({
+            if (!gotImage && platformError) log('平台侧报错/超时，不计账号生成失败：' + results.error, 'warn');
+            else chrome.runtime.sendMessage({
                 action: 'doubaoGenResult',
-                ok: hasImage,
+                ok: gotImage,
                 row: rowNum,
-                reason: hasImage ? '' : (results.error || (results.step ? '等图超时/0 图' : '结果为空'))
+                reason: gotImage ? '' : (results.error || (results.step ? '等图超时/0 图' : '结果为空'))
             }).catch(err => log('生成结果记账失败（不影响主流程）：' + ((err && err.message) || err), 'warn'));
         } catch (err) {
             log('生成结果记账异常（不影响主流程）：' + ((err && err.message) || err), 'warn');

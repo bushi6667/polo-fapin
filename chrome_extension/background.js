@@ -373,7 +373,6 @@ async function setPublishSettings(patch) {
         const t = await loadPublishTask();
         if (t && t.state === 'paused') {
             t.batchSize = next.batchSize;
-            t.pageLimit = next.pageLimit;
             t.rowTimeoutMs = next.rowTimeoutMs;
             await savePublishTask(t);
         }
@@ -514,7 +513,8 @@ async function buildPublishStatePayload() {
         resourceBlockDetail: t ? (t.resourceBlockDetail || '') : '',
         currentRow: t ? t.currentRow : null,
         pages,
-        pageLimit: t ? t.pageLimit : settings.pageLimit
+        // 仅用于面板显示的分母（页面 N/M），不参与任何判断：没有开页硬闸，到上限只提示不拦。
+        pageLimit: PUBLISH_BATCH_MAX
     };
 }
 
@@ -962,10 +962,9 @@ async function resumePublishTask() {
         return { ok: false, message: d };
     }
 
-    // 继续前同步最新设置（每批款数 / 页面上限 / 行超时），使界面上改的批次真正生效
+    // 继续前同步最新设置（每批款数 / 行超时），使界面上改的批次真正生效
     const s = await getPublishSettings();
     t.batchSize = s.batchSize;
-    t.pageLimit = s.pageLimit;
     t.rowTimeoutMs = s.rowTimeoutMs;
 
     // 设置读取期间若收到停止请求 → 保持暂停，不继续（不覆盖本请求开始后新到达的停止）
@@ -2091,6 +2090,9 @@ const DOUBAO_GEN_DEDUPE_MS = 8000;             // 同一次失败会被内容脚
 const DOUBAO_CHANNEL_CLOSED_RE = /message port closed|Receiving end does not exist|message channel closed|Could not establish connection/i;
 let doubaoScanInFlight = false;   // 自动切号重入闸（同一时刻只允许一轮）
 let doubaoGenLastReport = null;   // { name, row, ok, at }：生成结果双上报去重用
+// 同一行的失败只记一次的标记（内容脚本+页面双报、超时重试、整批补跑都会对同一行重复上报，
+// 不按行去重的话一次超时就能被记成 2-3 次，好号会被冤枉）。内存态即可：账本里另有跨天的 genFailStreak。
+let doubaoGenCountedRows = new Set();   // '账号\0行号'
 
 // 本地日期键（YYYY-MM-DD）：额度按自然日刷新，跨天必须把旧结论作废
 function doubaoLocalDateKey(ts) {
@@ -2500,6 +2502,14 @@ async function doubaoGenResultAction(request, tabId) {
         const reason = String((request && request.reason) || '').slice(0, 120);
         let tid = Number(tabId) || 0;
         if (!tid) {
+            // 只有「执行页」知道这次失败属于哪个号。但换色 exec 可能是上一轮遗留的，
+            // 所以必须用行号校验：exec.rowNum === 本次上报的 row 才认，否则回退（套图因此自动走回退分支）。
+            if (typeof getActiveColorExec === 'function') {
+                const ex = await getActiveColorExec();
+                if (ex && ex.tabId && Number(ex.rowNum) === row) tid = Number(ex.tabId);
+            }
+        }
+        if (!tid) {
             const tab = await findDoubaoTab();
             if (!tab) return { ok: false, error: '未找到豆包页面' };
             tid = tab.id;
@@ -2532,11 +2542,16 @@ async function doubaoGenResultAction(request, tabId) {
             return { ok: true, name, row, streak: 0, disabled: false, recovered: wasUnsupported };
         }
 
-        // 去重：内容脚本 + 页面可能对同一次失败各报一次 → 只算一次
+        // 去重：同一行的失败只记一次（行号有效时按「账号+行」终身去重，防重试/补跑重复计数；
+        // 行号缺失退回 8 秒窗口兜底，避免把不同失败互相当成重复）。
         const prev = doubaoGenLastReport;
-        const dup = !!(prev && prev.ok === false && prev.name === name && prev.row === row
-            && (now - prev.at) < DOUBAO_GEN_DEDUPE_MS);
+        const rowKey = row > 0 ? (name + '\0' + row) : '';
+        const dup = rowKey
+            ? doubaoGenCountedRows.has(rowKey)
+            : !!(prev && prev.ok === false && prev.name === name && prev.row === row
+                && (now - prev.at) < DOUBAO_GEN_DEDUPE_MS);
         if (!dup) {
+            if (rowKey) doubaoGenCountedRows.add(rowKey);
             a.genFailStreak = (Number(a.genFailStreak) || 0) + 1;
             a.genFailAt = now;
             if (a.genFailStreak >= DOUBAO_GEN_FAIL_LIMIT) {
@@ -3285,7 +3300,6 @@ async function handleSharedAction(request, sendResponse, sender) {
                 batchSize: s.batchSize,
                 batchFilled: 0,
                 batchFilledDone: 0,
-                pageLimit: s.pageLimit,
                 rowTimeoutMs: s.rowTimeoutMs,
                 state: 'running',
                 pauseReason: '',

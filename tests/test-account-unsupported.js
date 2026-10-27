@@ -48,7 +48,7 @@ const BG_FNS = ['doubaoLocalDateKey', 'doubaoEmptyLedger', 'doubaoNormStatus', '
 const BG_SRC = ['DOUBAO_LEDGER_KEY', 'DOUBAO_STATUS_OK', 'DOUBAO_STATUS_EXHAUSTED',
     'DOUBAO_STATUS_UNSUPPORTED', 'DOUBAO_STATUS_UNKNOWN', 'DOUBAO_GEN_FAIL_LIMIT', 'DOUBAO_GEN_DEDUPE_MS']
     .map(n => sliceConst(BG, n))
-    .concat(['let doubaoGenLastReport = null;', 'let doubaoGenQueue = Promise.resolve();'])
+    .concat(['let doubaoGenLastReport = null;', 'let doubaoGenCountedRows = new Set();', 'let doubaoGenQueue = Promise.resolve();'])
     .concat(BG_FNS.map(n => sliceFn(BG, n))).join('\n\n');
 
 function dateKeyNow() {
@@ -536,8 +536,14 @@ function suiteEnv(options) {
     {
         const quotaBranch = /if \(!quota\) \{[\s\S]{0,900}?action: 'doubaoGenResult'/.test(DOUBAO_JS);
         ok(quotaBranch, 'doubao.js：doubaoGenResult 上报被 !quota 包住（额度命中不记生成失败）');
-        ok(/results\.downloads\.some\(d => d && d\.ok === true\)/.test(DOUBAO_JS),
-            'doubao.js：出图判定按「有任意一张 ok 的下载」');
+        ok(/const gotImage = \(results\.downloads \|\| \[\]\)\.length > 0/.test(DOUBAO_JS),
+            'doubao.js：出图判定按「拿到任意一张」，不按落盘是否全部成功');
+        ok(!/some\(d => d && d\.ok === true\)/.test(DOUBAO_JS),
+            'doubao.js：不再用 d.ok（落盘成功）当生成判据');
+        ok(/platformError = \/出了点问题\|请稍后重试\|网络\|超时\|timeout\/i/.test(DOUBAO_JS),
+            'doubao.js：平台自身报错/超时只打日志，不计账号失败');
+        ok(/if \(!gotImage && platformError\)/.test(DOUBAO_JS),
+            'doubao.js：只有「一张没拿到 + 非平台报错」才上报 ok:false');
         ok(/\.catch\(err => log\('生成结果记账失败/.test(DOUBAO_JS),
             'doubao.js：上报是 fire-and-forget，失败只打 warn 日志');
         ok(!/await chrome\.runtime\.sendMessage\(\{\s*action: 'doubaoGenResult'/.test(DOUBAO_JS),
@@ -556,6 +562,45 @@ function suiteEnv(options) {
         ok(/doubao\\\.com/.test(branch), 'background：来源校验用的是豆包域名正则');
         ok(/fromDoubaoTab \? sender\.tab\.id : 0/.test(branch),
             'background：非豆包来源一律传 0（由 findDoubaoTab 兜底）');
+    }
+
+    // ---- 16) 按行去重 + 滚动 + 部分图不丢弃 + 二次超时恢复记账 ----
+    {
+        // 16a 同一行的失败终身只记一次（双报/重试/补跑都不会重复计数）
+        {
+            const env = bgEnv({});
+            await env.report({ ok: false, row: 9, reason: '超时未出图' });
+            const before = env.acct('acct1').genFailStreak;
+            const r2 = await env.report({ ok: false, row: 9, reason: '超时未出图' });
+            ok(before === 1 && env.acct('acct1').genFailStreak === 1 && r2.deduped === true,
+                '同一行第二次失败被按行去重（streak 不重复累计）');
+            const r3 = await env.report({ ok: false, row: 10, reason: '超时未出图' });
+            ok(r3.deduped === false && env.acct('acct1').genFailStreak === 2,
+                '不同行照常累计');
+        }
+        // 16b 行号缺失时退回 8 秒窗口（不能把不同失败互相当重复）
+        {
+            const env = bgEnv({});
+            await env.report({ ok: false, row: 0, reason: 'a' });
+            const r2 = await env.report({ ok: false, row: 0, reason: 'b' });
+            // 立即双报在 8 秒窗口内本来就该去重（这正是窗口的用途）；
+            // 终身去重只对 row>0 生效，用源码判据锁死，防止以后把 row=0 也改成终身去重。
+            ok(env.acct('acct1').genFailStreak === 1 && r2.deduped === true,
+                'row=0 立即双报仍被 8 秒窗口去重（窗口用途不变）');
+            ok(/const rowKey = row > 0 \? \(name \+ '\\0' \+ row\) : ''/.test(BG),
+                'row=0 不进终身去重（源码判据）');
+        }
+        // 16c 换色等图循环：滚动 + 部分图保留 + 二次超时上报（源码断言）
+        ok(/image\.scrollIntoView\(\{ block: 'center', behavior: 'instant' \}\)/.test(DOUBAO_JS)
+            && /startsWith\('data:image\/svg'\)/.test(DOUBAO_JS),
+            'doubao.js：等图循环把 SVG 占位图滚进视口（与套图同做法）');
+        ok(/allNewUrls = newUrls\.slice\(0, totalImages\);\s*\n\s*log\(`\[\$\{elapsed\}s\] 图片增加/.test(DOUBAO_JS),
+            'doubao.js：图片增加时就保留部分结果（超时不再当 0 张丢）');
+        ok(/只等到 \$\{allNewUrls\.length\}\/\$\{totalImages\} 张，按已有部分继续下载/.test(DOUBAO_JS),
+            'doubao.js：部分图有自己的日志（不再冒充"未检测到足够新图"）');
+        const retryBranch = HTML.slice(HTML.indexOf('function setupBatchColorTimeout'), HTML.indexOf('function checkAllColorsReady'));
+        ok(/colorGenFailReport\(product\.row, '超时未出图（重试 1 次后仍无图）', 'timeout', skipRow\)/.test(retryBranch),
+            '发品助手.html：二次超时恢复上报账号失败（连续 3 次换号的口径）');
     }
 
     console.log(`通过 ${pass}，失败 ${fail}`);

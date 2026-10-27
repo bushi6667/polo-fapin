@@ -6500,7 +6500,8 @@ function setupBatchColorTimeout(product) {
                     console.log(`🎨 二次超时跳过: row${product.row}`);
                     processNextBatchColor();
                 };
-                // 两次超时也是一张图都没出：先记账，后台判「连续 3 次生成不出图」就直接换号重跑本款
+                // 二次超时 = 同款重发后仍无新图，算一次「生成失败」（口径：连续 3 次失败就换号，不细究是哪个原因）。
+                // 单次超时只重试不记：第一次可能是慢，重发后还是没有才值得记账。后台按「账号+行」去重，同一行最多记一次。
                 if (typeof colorGenFailReport === 'function'
                     && colorGenFailReport(product.row, '超时未出图（重试 1 次后仍无图）', 'timeout', skipRow)) return;
                 skipRow();
