@@ -136,6 +136,23 @@ function waitForPredictCategoryRender(timeoutMs = 15000) {
 // 页2自动填表主流程：标题逐字输入 → 上传主图 → 等待预测类目 → 选择类目；
 // 批量模式（URL 带 row=）最后自动点击「发布产品」跳转页3
 async function autoFillPage2(product) {
+    // 重填前清掉该行的页3 预填标记（键格式与 page3.js 一致：polo_page3_prefilled::task::row，同源同标签页共享 sessionStorage）。
+    // 手动「一键填入 ⚡」重做和批量自动填入都走这里，否则页3 会判该行「已填过」而拒绝重填。
+    try {
+        const prefilledRow = (product && product.row !== undefined && product.row !== null)
+            ? product.row : getRowFromUrl();
+        if (prefilledRow !== null && prefilledRow !== undefined) {
+            // 与 page3 的 completedTask 同序取值：_publishTaskId → URL 的 task=（退回 polo_batch_task）→ _publishFileKey → ''
+            let prefilledTask = product && (product._publishTaskId || product._publishFileKey);
+            if (!prefilledTask) {
+                try { prefilledTask = new URLSearchParams(window.location.search).get('task') || sessionStorage.getItem('polo_batch_task') || ''; }
+                catch (_e) { prefilledTask = ''; }
+            }
+            sessionStorage.removeItem('polo_page3_prefilled::' + (prefilledTask || '') + '::' + prefilledRow);
+            log('已清除该行的页3预填标记（重填）', 'info');
+        }
+    } catch (_e) {}
+
     // 页面不可见时先激活标签页
     if (document.visibilityState !== 'visible') {
         try {

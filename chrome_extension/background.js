@@ -895,6 +895,11 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
             return { ok: false, message: '非顶层框架消息，已拒绝' };
         }
         if (row !== t.currentRow) return { ok: false, message: `行号不匹配（当前 ${t.currentRow}），已拒绝` };
+        // 队列首行一致性：shift() 会删队列头部，若首行不是本行就会删错行（该行既不在待填也不在已完成，
+        // 等于静默丢行，且后续 remaining[0] 永远对不上 currentRow → 任务卡死）。此校验必须在任何状态修改之前。
+        if (!Array.isArray(t.remaining) || t.remaining.length === 0 || Number(t.remaining[0]) !== Number(row)) {
+            return { ok: false, message: `队列首行 ${t.remaining && t.remaining[0]} 与 ${row} 不一致，已拒绝（防止删错行）` };
+        }
 
         // 记录填写完成。暂停中也接受：当前页的有效完成必须入账，只是不自动开新页。
         const wasPaused = t.state === 'paused';
@@ -2957,14 +2962,15 @@ async function handleSharedAction(request, sendResponse, sender) {
                     && Number(t.currentRow) === Number(rowNum) && !!sender.tab && sender.tab.id === t.currentTabId;
                 if (t.products && Object.prototype.hasOwnProperty.call(t.products, String(rowNum))) {
                     const data = t.products[String(rowNum)];
-                    sendResponse({ ok: !!data, autoFillAllowed, data: data ? { ...data, _publishTaskId: t.taskId, _publishFileKey: taskFileKey(t), _publishImageDir: t.imageDir } : null });
+                    // filled 告诉页3：队列里这一行是否已记完成，避免重复补发 publishFilled 把队列推进到下一行
+                    sendResponse({ ok: !!data, autoFillAllowed, filled: alreadyFilled, data: data ? { ...data, _publishTaskId: t.taskId, _publishFileKey: taskFileKey(t), _publishImageDir: t.imageDir } : null });
                 } else if (!t.products) {
                     // 兼容已存在的旧任务；未完成任务期间存储写入已被拒绝。
-                    finish(taskFileKey(t), { autoFillAllowed });
+                    finish(taskFileKey(t), { autoFillAllowed, filled: alreadyFilled });
                 } else sendResponse({ ok: false, error: '该行不属于任务产品快照' });
             });
         } else {
-            finish(getFilePrefix());
+            finish(getFilePrefix(), { filled: false });
         }
         return true;
     }

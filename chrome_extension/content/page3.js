@@ -4036,22 +4036,43 @@ function createPage3Panel() {
                 } catch (_) {}
 
             for (const r of results) log(r, r.startsWith('✅') ? 'success' : r.startsWith('⚠️') ? 'warn' : 'info');
-            
-            log(results.some(r => /^[⚠️❌]/u.test(r)) ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', results.some(r => /^[⚠️❌]/u.test(r)) ? 'warn' : 'success');
-            log('💡 请检查填写内容后，手动点击页面底部的保存按钮', 'success');
-            
-            const saveBtn = Array.from(document.querySelectorAll('button')).find(b => 
-                (b.innerText || b.textContent || '').trim() === '保存' && b.offsetHeight > 0
-            );
-            if (saveBtn) {
-                saveBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                log('🔍 已滚动到保存按钮位置', 'info');
+
+            const hasProblems = results.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+            log(hasProblems ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', hasProblems ? 'warn' : 'success');
+
+            let autoSaved = false;
+            if (hasProblems) {
+                // 有警告/失败：不自动保存，避免把填错的内容存出去，留人工核对
+                log('💡 请检查填写内容后，手动点击页面底部的保存按钮', 'warn');
+                const saveBtn = Array.from(document.querySelectorAll('button')).find(b =>
+                    (b.innerText || b.textContent || '').trim() === '保存' && b.offsetHeight > 0
+                );
+                if (saveBtn) {
+                    saveBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    log('🔍 已滚动到保存按钮位置', 'info');
+                }
+            } else {
+                // 全部填入成功：自动保存，保存成功后才上报完成
+                try {
+                    const saveResults = await saveDraft(currentProduct);
+                    const saveFailed = (saveResults || []).some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+                    if (saveFailed) {
+                        log('⚠️ 自动保存未完成：' + saveResults.join('；') + '，请手动点击页面底部的保存按钮', 'warn');
+                    } else {
+                        autoSaved = true;
+                        log('✅ 已自动保存', 'success');
+                    }
+                } catch (e) {
+                    log('⚠️ 自动保存异常: ' + e.message + '，请手动点击页面底部的保存按钮', 'warn');
+                }
             }
-            
+
             const rowNum = getRowFromUrl();
             if (rowNum !== null) {
                 // 填写完成 ≠ 保存完成：只上报 publishFilled（携带任务标识），不写任何已保存标记
-                log(`🔄 批量模式：第${rowNum}行填写完成，待你核对后手动保存`, 'success');
+                log(autoSaved
+                    ? `🔄 批量模式：第${rowNum}行已自动保存`
+                    : `🔄 批量模式：第${rowNum}行填写完成，待你核对后手动保存`, autoSaved ? 'success' : 'warn');
                 await sendMessageRetry({
                     action: 'publishFilled',
                     row: rowNum,
@@ -4263,26 +4284,38 @@ async function loadBatchProduct(rowNum) {
             log('✓ 从批量数据加载产品: 行' + rowNum, 'success');
 
             let alreadyPrefilled = false;
+            const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
             try {
-                const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
                 alreadyPrefilled = sessionStorage.getItem('polo_page3_prefilled::' + completedTask + '::' + rowNum) === '1';
             } catch (_) {}
+            // 后台要求填这一行（autoFillAllowed === true）= 重填派发：清掉上次留下的预填标记后正常填入。
+            // autoFillAllowed === false（队列已推进/已保存）绝不清标记，保留「通知丢失只补通知」的语义。
+            if (alreadyPrefilled && resp.autoFillAllowed === true) {
+                try { sessionStorage.removeItem('polo_page3_prefilled::' + completedTask + '::' + rowNum); } catch (_) {}
+                log('该行被重新派发，已清除预填标记，重新自动填入', 'info');
+                alreadyPrefilled = false;
+            }
+            // 已保存行必须先判、并且要"上报跳过"。
+            // 为什么放在前面：填完即自动保存后，每一行都会进保存记录；若先走
+            // autoFillAllowed === false 那条分支，就会静默 return、不上报，
+            // 队列停在当前行直到 10 分钟超时（同文件同几行重发时 100% 命中）。
+            const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows', taskId: getTaskFromUrl() });
+            if (uploadedResp && uploadedResp.ok && uploadedResp.rows && uploadedResp.rows[rowNum]) {
+                log(`⚠️ 第${rowNum}行已保存过，跳过自动填入并推进队列`, 'warn');
+                await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true });
+                return false;
+            }
+
             if (alreadyPrefilled || resp.autoFillAllowed === false) {
                 log('该页已填入或不允许自动填写，刷新不重复填入；未保存内容待保存', 'info');
-                if (alreadyPrefilled) {
+                // 队列已记过这一行完成时不能再补发（后台会当成下一行完成而跳行）；
+                // 只有队列确实没有记录（消息真丢了）才补发。
+                if (alreadyPrefilled && !resp.filled) {
                     await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl() });
                 }
                 return true;
             }
 
-            const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows', taskId: getTaskFromUrl() });
-            // 已保存页跳过；待保存由填写完成记录拦截，二者不混用。
-            if (uploadedResp && uploadedResp.ok && uploadedResp.rows && uploadedResp.rows[rowNum]) {
-                log(`⚠️ 第${rowNum}行已标记保存，跳过自动填入`, 'warn');
-                await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true });
-                return false;
-            }
-            
             const stopHeartbeat = startHeartbeat(15000);
             log('💓 保活心跳已启动（每15秒）', 'info');
             
@@ -4301,19 +4334,40 @@ async function loadBatchProduct(rowNum) {
                 } catch (_) {}
 
                 for (const r of results) log(r, r.startsWith('✅') ? 'success' : r.startsWith('⚠️') ? 'warn' : 'info');
-                
-                log(results.some(r => /^[⚠️❌]/u.test(r)) ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', results.some(r => /^[⚠️❌]/u.test(r)) ? 'warn' : 'success');
-                log('💡 请检查填写内容后，手动点击页面底部的保存按钮', 'success');
-                
-                const saveBtn = Array.from(document.querySelectorAll('button')).find(b => 
-                    (b.innerText || b.textContent || '').trim() === '保存' && b.offsetHeight > 0
-                );
-                if (saveBtn) {
-                    saveBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    log('🔍 已滚动到保存按钮位置', 'info');
+
+                const hasProblems = results.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+                log(hasProblems ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', hasProblems ? 'warn' : 'success');
+
+                let autoSaved = false;
+                if (hasProblems) {
+                    // 有警告/失败：不自动保存，避免把填错的内容存出去，留人工核对
+                    log('💡 请检查填写内容后，手动点击页面底部的保存按钮', 'warn');
+                    const saveBtn = Array.from(document.querySelectorAll('button')).find(b => 
+                        (b.innerText || b.textContent || '').trim() === '保存' && b.offsetHeight > 0
+                    );
+                    if (saveBtn) {
+                        saveBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        log('🔍 已滚动到保存按钮位置', 'info');
+                    }
+                } else {
+                    // 全部填入成功：自动保存，保存成功后才上报完成
+                    try {
+                        const saveResults = await saveDraft(currentProduct);
+                        const saveFailed = (saveResults || []).some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+                        if (saveFailed) {
+                            log('⚠️ 自动保存未完成：' + saveResults.join('；') + '，请手动点击页面底部的保存按钮', 'warn');
+                        } else {
+                            autoSaved = true;
+                            log('✅ 已自动保存', 'success');
+                        }
+                    } catch (e) {
+                        log('⚠️ 自动保存异常: ' + e.message + '，请手动点击页面底部的保存按钮', 'warn');
+                    }
                 }
-                
-                log(`🔄 批量模式：第${rowNum}行填写完成，待核对后手动保存`, 'success');
+
+                log(autoSaved
+                    ? `🔄 批量模式：第${rowNum}行已自动保存`
+                    : `🔄 批量模式：第${rowNum}行填写完成，待核对后手动保存`, autoSaved ? 'success' : 'warn');
                 try {
                     await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl() });
                 } finally {

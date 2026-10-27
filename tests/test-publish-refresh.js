@@ -54,15 +54,17 @@ function page(e, task, row, tab, { store = new Map(), dropCompletion = false, st
     await p.run('loadBatchProduct(412)');
     assert.equal(p.writes.length, 16);
     assert.equal(e.store.polo_publish_task.filledCount, 1);
-    assert.equal((await e.sendExternal({ action: 'getPublishState' })).savedCount, 0, '自动填完不标记保存');
+    // 2026-10-27 起填完即自动保存，此处由 0 改为 1
+    assert.equal((await e.sendExternal({ action: 'getPublishState' })).savedCount, 1, '自动填完即自动保存');
     p.store.set('polo_page3_prefilled::' + opened.taskId + '::412', '1');
     const unsavedRefresh = page(e, opened.taskId, 412, firstTab, { store: p.store });
     await unsavedRefresh.run('loadBatchProduct(412)');
-    assert.equal(unsavedRefresh.writes.length, 0, '已填完待保存页刷新不重复填入');
+    assert.equal(unsavedRefresh.writes.length, 0, '已自动保存页刷新不重复填入');
     assert.equal(e.store.polo_publish_task.filledCount, 1, '重新填入不能重复推进队列');
-    console.log('PASS 待保存页刷新不重填，队列不重复计数');
+    console.log('PASS 已自动保存页刷新不重填，队列不重复计数');
+    // 2026-10-27 起填完即自动保存：上面 loadBatchProduct 已点过 1 次保存，这里再显式保存 1 次 → 累计 2 次
     await p.run('saveDraft(currentProduct)'); // 用户定义：菜单点击保存即记账；不伪造平台成功响应。
-    assert.equal(p.clicks.length, 1);
+    assert.equal(p.clicks.length, 2);
     const refreshed = page(e, opened.taskId, 412, firstTab, { store: p.store });
     await refreshed.run('loadBatchProduct(412)');
     assert.equal(refreshed.writes.length, 0);
@@ -91,25 +93,34 @@ function page(e, task, row, tab, { store = new Map(), dropCompletion = false, st
     assert.equal(e.store.polo_publish_task.state, 'done');
     const finishedUnsaved = page(e, opened.taskId, 415, secondTab);
     await finishedUnsaved.run('loadBatchProduct(415)');
-    assert.equal(finishedUnsaved.writes.length, 0, '队列结束后待保存旧页也不重填');
+    assert.equal(finishedUnsaved.writes.length, 0, '队列结束后已保存旧页也不重填');
     assert.equal(e.store.polo_publish_task.filledCount, 2);
     const strippedUrl = await e.sendInternal({ action: 'getProductByRow', rowNum: 415, taskId: opened.taskId }, { tab: { id: secondTab, url: 'https://post.alibaba.com/product/publish.htm' }, frameId: 0 });
-    assert.equal(strippedUrl.autoFillAllowed, false, '平台去掉查询参数后，待保存页仍不自动重填');
-    console.log('PASS 新页填一次、通知丢失只补通知、队列结束待保存页不重填');
+    assert.equal(strippedUrl.autoFillAllowed, false, '平台去掉查询参数后，已保存页仍不自动重填');
+    console.log('PASS 新页填一次、通知丢失只补通知、队列结束已保存页不重填');
 
     await refreshed.run('fillAllPage3(currentProduct)');
     assert.equal(refreshed.writes.length, 16, '人工明确重填仍可操作');
+    // 2026-10-27 起填完即自动保存：row415 在旧任务里已被自动保存（完成通知丢失不影响保存）。
+    // 新任务遇到「该行已保存」时：页3 不重填，但**上报 skipped 让队列推进**，
+    // 否则队列会停在该行直到 10 分钟超时（同文件重发同一行 100% 命中）。
     const restarted = await e.sendExternal({ action: 'openBatchPublish', rows: [415], products: [{ row: 415 }] });
     const next = page(e, restarted.taskId, 415, e.store.polo_publish_task.currentTabId, { store: second.store });
-    await next.run('loadBatchProduct(415)'); assert.equal(next.writes.length, 16);
-    console.log('PASS 人工明确重填和新任务同一行仍可执行，旧任务标记不误拦');
-    await p.run('saveDraft(currentProduct)');
-    assert.equal(Object.keys(e.store.polo_publish_verified_saved['']).length, 1, '重复保存不增加已保存款数');
-    assert.equal((await e.sendExternal({ action: 'getPublishState' })).savedCount, 0, '旧任务保存不混入新任务计数');
+    await next.run('loadBatchProduct(415)');
+    assert.equal(next.writes.length, 0, '已自动保存的行新任务不重填');
+    const restartedTask = await e.run('loadPublishTask()');
+    assert.equal(restartedTask.filledCount, 1, '已保存行不入账才是错的：上报 skipped 后应记为已完成');
+    assert.equal(restartedTask.remaining.length, 0, '队列应推进，不能停在已保存行');
+    assert.equal(restartedTask.currentRow, null, '推进后当前行清空');
+    console.log('PASS 人工明确重填可操作；新任务遇已自动保存行不重填，队列正常推进');
+    await p.run('saveDraft(currentProduct)');   // 旧任务页重复保存 412（已保存）→ 不新增记录
+    assert.equal(Object.keys(e.store.polo_publish_verified_saved['']).length, 2, '重复保存不增加已保存款数（412/415 各一条）');
+    assert.deepEqual(Object.keys(e.store.polo_publish_verified_saved['']).sort(), ['412', '415']);
+    assert.equal((await e.sendExternal({ action: 'getPublishState' })).savedCount, 1, '旧任务的 412 不计入新任务（新任务内 415 已保存）');
     const missing = page(e, restarted.taskId, 415, e.store.polo_publish_task.currentTabId);
     missing.c.document.querySelectorAll = () => [];
-    await missing.run('saveDraft({row:415,_publishTaskId:"' + restarted.taskId + '",_publishFileKey:""})');
-    assert.equal(e.store.polo_publish_verified_saved[''][415], undefined, '找不到按钮不记保存');
+    await missing.run('saveDraft({row:417,_publishTaskId:"' + restarted.taskId + '",_publishFileKey:""})');
+    assert.equal(e.store.polo_publish_verified_saved[''][417], undefined, '找不到按钮不记保存');
     const denied = await e.sendInternal({ action: 'savePublishProduct', row: 415, x: 60, y: 30, fileKey: '' }, { tab: { id: firstTab, url: 'https://example.com/' }, frameId: 0 });
     assert.equal(denied.ok, false);
     await e.sendExternal({ action: 'setCurrentFilename', filename: '新文件.xlsx' });
