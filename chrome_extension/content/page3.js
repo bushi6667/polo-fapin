@@ -323,8 +323,30 @@ function normalizeCompare(a, b) {
     return na.includes(nb) || nb.includes(na);
 }
 
+// 下拉选择器（next-select）的真实值在 .next-select-values 的 em 里，输入框只是搜索框、
+// value 恒为空。以前只读 input.value，于是「省份」这种已选好 Zhejiang 的字段会被判成"值为空"，
+// 进而整行带 ⚠️ → 不触发自动保存（实测：填完 FAQ 就停在等人工保存）。
+function readSelectValueText(container) {
+    try {
+        const host = container.querySelector('.next-select, .next-select-trigger, .next-select-inner');
+        if (!host) return '';
+        const em = host.querySelector('.next-select-values em, em[title]');
+        const text = String((em && (em.getAttribute('title') || em.textContent)) || '').trim();
+        if (text) return text;
+        const values = host.querySelector('.next-select-values, .next-select-value');
+        const v = String((values && values.innerText) || '').trim();
+        if (v && v.indexOf('请选择') < 0 && v.indexOf('请输入') < 0) return v;
+        return '';
+    } catch (_) { return ''; }
+}
+
 function getFieldCurrentValue(container, mode) {
     if (!container) return '';
+    // 先读下拉值：命中就返回，避免被下面的 input.value（搜索框，恒空）抢先判成空值
+    const selectText = readSelectValueText(container);
+    if (selectText && (mode === 'select' || mode === 'search' || mode === 'auto' || mode === 'direct' || mode === 'input')) {
+        return selectText;
+    }
     if (mode === 'direct' || mode === 'input' || mode === 'auto') {
         const inp = container.querySelector('input:not([readonly]):not([type="hidden"])');
         if (inp) return inp.value || '';
@@ -4361,12 +4383,15 @@ async function loadBatchProduct(rowNum) {
                 for (const r of results) log(r, r.startsWith('✅') ? 'success' : r.startsWith('⚠️') ? 'warn' : 'info');
 
                 const hasProblems = results.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+                // 只有「硬失败」才阻断自动保存。⚠️ 多半是"某项没找到/未确认"这类可容忍项，
+                // 若也阻断，一行一个警告就会让整批停在等人工保存（实测：省份误判导致每行都不保存）。
+                const hasErrors = results.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
                 log(hasProblems ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', hasProblems ? 'warn' : 'success');
 
                 let autoSaved = false;
-                if (hasProblems) {
-                    // 有警告/失败：不自动保存，避免把填错的内容存出去，留人工核对
-                    log('💡 请检查填写内容后，手动点击页面底部的保存按钮', 'warn');
+                if (hasErrors) {
+                    // 有硬失败：不自动保存，避免把填错的内容存出去，留人工核对
+                    log('💡 有填失败项，已跳过自动保存；请检查后手动点击页面底部的保存按钮', 'warn');
                     const saveBtn = Array.from(document.querySelectorAll('button')).find(b => 
                         (b.innerText || b.textContent || '').trim() === '保存' && b.offsetHeight > 0
                     );
@@ -4386,7 +4411,7 @@ async function loadBatchProduct(rowNum) {
                             log((hardFail ? '❌ ' : '⚠️ ') + '自动保存未完成：' + saveList.join('；') + '，请手动点击页面底部的保存按钮', hardFail ? 'error' : 'warn');
                         } else {
                             autoSaved = true;
-                            log('✅ 已自动保存', 'success');
+                            log('✅ 已自动保存' + (hasProblems ? '（有警告项，已保存，建议抽查）' : ''), 'success');
                         }
                     } catch (e) {
                         log('⚠️ 自动保存异常: ' + e.message + '，请手动点击页面底部的保存按钮', 'warn');
