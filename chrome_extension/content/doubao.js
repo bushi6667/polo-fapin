@@ -3,7 +3,11 @@
 // 职责：在豆包网页上模拟真人操作完成「AI 换色」流程：
 //   切换图像生成模式 → 上传图片 → 输入提示词 → 发送 → 轮询下载
 //   4 张新图（white/black/gray/navy，无水印原图优先，见 doubao_raw.js）
-// 通信：监听 background 的 startColorTask / startAiEditTask / getColorTaskStatus
+// 通信：监听 background 的以下消息（现在真实支持的全部动作）：
+//   换色/改图：startColorTask / startAiEditTask / getColorTaskStatus / cancelColorTask
+//   忙态：    doubaoBusyState             —— 自动换号前判忙
+//   账号原语：doubaoListAccounts         —— 列账号 + 当前账号
+//             doubaoSwitchAccount        —— 切到指定账号（切完页面会重载）
 // 注意：依赖豆包页面 DOM 结构（类名随站点改版可能变化）
 // ============================================================
 let colorTask = null;
@@ -331,50 +335,6 @@ function getAllImageUrls() {
     return urls;
 }
 
-// 获取最后一条消息的元信息（条数/文本/是否 AI/是否生成中），用于判断生成状态
-function getLastMessageInfo() {
-    const msgSelectors = [
-        '.chat-message',
-        '[class*="message-item"]',
-        '[class*="msg-content"]',
-        '[class*="message"]',
-        '[class*="chat-item"]',
-        '[class*="conversation-item"]',
-        'div[data-message-id]',
-        'div[data-testid*="message"]',
-    ];
-    let msgs = [];
-    for (const sel of msgSelectors) {
-        const found = document.querySelectorAll(sel);
-        if (found.length > 0) { msgs = Array.from(found); break; }
-    }
-    if (msgs.length === 0) {
-        return { count: 0, text: '', hasLoading: true, isAI: false };
-    }
-    const last = msgs[msgs.length - 1];
-    const text = last.innerText || '';
-    const html = last.innerHTML || '';
-    const htmlLower = html.toLowerCase();
-    const txtLower = text.toLowerCase();
-
-    const classAttr = (last.getAttribute('class') || '').toLowerCase();
-    const userKeywords = ['user', 'self', 'my-message', 'mine', 'sender-me'];
-    const aiKeywords = ['assistant', 'model', 'ai-message', 'bot', 'agent', 'doubao', 'seedream', 'gpt'];
-    const hasUserClass = userKeywords.some(k => classAttr.includes(k));
-    const hasAiClass = aiKeywords.some(k => classAttr.includes(k));
-    const isUser = hasUserClass && !hasAiClass;
-    const isAI = !isUser;
-
-    // 生成中判定：HTML 含 loading 类特征 或 文本含「生成中/思考中」等关键词
-    const loadingHtml = ['loading', 'spinner', 'animate', 'skeleton', 'progress', 'pending']
-        .some(k => htmlLower.includes(k));
-    const loadingText = ['生成中', '思考中', '正在', '绘制中', '创作中']
-        .some(k => txtLower.includes(k));
-    const hasLoading = isAI && (loadingHtml || loadingText);
-
-    return { count: msgs.length, text: text.slice(0, 120), hasLoading, isAI, isUser };
-}
-
 // ============================================================
 // 豆包额度耗尽检测（「近 7 天额度已用完」/「当前时段额度已用完」）
 //
@@ -420,7 +380,7 @@ function parseQuotaResumeAt(t) {
     } catch (_) { return null; }
 }
 
-// 额度检测专用的消息节点（只给额度检测用，getLastMessageInfo 的选择器保持原样）
+// 额度检测专用的消息节点（只给额度检测用）
 // 只用精确、稳定的选择器，并按稳定性排序取第一个非空：
 //   div[data-message-id] > .chat-message > [class*="message-item"]
 // 禁用 [class*="message"]：会同时命中 .message-list-* 容器、气泡外层和内层段落，
@@ -573,56 +533,6 @@ function detectQuotaExhausted() {
     } catch (_) {
         return null;
     }
-}
-
-// 轮询等待图片生成完成：以现有图为基准，检测到 >= minImages 张新图即返回；
-// 超时（默认 10 分钟）返回已检测到的新图（可能不足）
-async function waitForGenerationComplete(timeout = 600000, minImages = 4) {
-    log(`等待图片生成完成（最多${Math.round(timeout/60000)}分钟，至少${minImages}张）...`);
-
-    const existingUrls = getAllImageUrls();
-    const existingSet = new Set(existingUrls);
-    log(`已有图片 ${existingUrls.length} 张作为基准`);
-    log(`💡 提示：如果只显示 ${minImages-1} 张，请手动向上/向下滚动显示第 ${minImages} 张`);
-
-    const startTime = Date.now();
-    let lastImageCount = existingUrls.length;
-
-    while (Date.now() - startTime < timeout) {
-        await sleep(2000);
-        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-
-        const currentUrls = getAllImageUrls();
-        const currentCount = currentUrls.length;
-        const newUrls = currentUrls.filter(u => !existingSet.has(u));
-
-        if (currentCount > lastImageCount) {
-            log(`[${elapsed}s] 图片增加: ${lastImageCount} → ${currentCount} (新图${newUrls.length}张)`);
-            lastImageCount = currentCount;
-        }
-
-        if (newUrls.length >= minImages) {
-            log(`✨ 检测到 ${newUrls.length} 张新图，满足要求`);
-            await sleep(1500);
-            return getAllImageUrls().filter(u => !existingSet.has(u));
-        }
-
-        if (elapsed % 15 === 0 && elapsed > 0) {
-            log(`[${elapsed}s] 当前新图 ${newUrls.length}/${minImages} 张，请手动滚动显示更多`);
-        }
-    }
-
-    log('⚠️ 等待超时', 'warn');
-    const finalUrls = getAllImageUrls();
-    const finalNew = finalUrls.filter(u => !existingSet.has(u));
-
-    if (finalNew.length >= minImages) {
-        log(`✅ 超时后检测到 ${finalNew.length} 张新图`);
-        return finalNew;
-    }
-
-    log(`❌ 超时，只检测到 ${finalNew.length} 张新图`, 'error');
-    return finalNew;
 }
 
 // 增量下载新图：按 white/black/gray/navy 顺序命名 row{rowNum}_{color}.png，
@@ -864,29 +774,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ ok: true, isProcessing, task: colorTask });
         return true;
     }
-    // 忙态（供 background 扫描/自动切号前判断）：套图生成不设 isProcessing，只能看 DOM 忙类。
+    // 忙态（供 background 自动切号前判断）：套图生成不设 isProcessing，只能看 DOM 忙类。
+    // 忙态只用 generating/typing 两类状态类，不引入 loading —— 懒加载占位与骨架屏都带 loading 类，会把空闲判成生成中。
     // 刚因额度被拒的 30s 内忽略 DOM 忙信号（quotaRecent），否则额度气泡会把换号永久挡住。
     if (request.action === 'doubaoBusyState') {
         sendResponse(Object.assign({ ok: true }, doubaoComputeBusyState()));
         return true;
     }
-    // ---------- 账号原语（只对调用方负责，不参与任何轮询/自动流程） ----------
+    // ---------- 账号原语（自动换号链路用；也可由调用方直接调） ----------
     if (request.action === 'doubaoListAccounts') {
         listDoubaoAccounts().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
-    if (request.action === 'doubaoQuotaPercent') {
-        readQuotaPercent().then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
-        return true;
-    }
     if (request.action === 'doubaoSwitchAccount') {
         switchDoubaoAccount(request.name).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
-        return true;
-    }
-    // 试生图探测：真实发一条生图请求判「这个号现在能不能生成」。
-    // 会消耗 1 张图片额度，只允许 background 的账号探测路径调用。
-    if (request.action === 'doubaoProbeGenerate') {
-        probeAccountByGenerate().then(sendResponse).catch(e => sendResponse({ ok: false, reason: 'error', error: e.message }));
         return true;
     }
 });
@@ -1329,72 +1230,6 @@ async function listDoubaoAccounts() {
     }
 }
 
-// 额度用量条目（真机实测有两种文案，随账号状态切换）：
-//   已用满的账号：「近 7 天消耗消耗 100%」
-//   新账号/未消耗：「当前时段额度用量 0%」
-// 文案可能重复字（消耗消耗）、可能跨 span 换行，先抹掉所有空白再抓。
-// 返回 { label, percent }；label 用于区分是哪个额度池，调用方不要混为一谈。
-function parseDoubaoQuotaPercent(text) {
-    try {
-        const flat = String(text || '').replace(/[\s\u00a0]+/g, '');
-        const m = flat.match(/(近7天消耗|当前时段额度用量)\D{0,12}?(\d{1,3})%/);
-        if (!m) return null;
-        const v = parseInt(m[2], 10);
-        if (!(Number.isFinite(v) && v >= 0 && v <= 100)) return null;
-        return { label: m[1], percent: v };
-    } catch (_) { return null; }
-}
-
-// 原文片段（只截断，不做改写），便于调用方/人工排查
-function doubaoRawSnippet(text, max) {
-    try {
-        const s = String(text == null ? '' : text);
-        const n = max > 0 ? max : 400;
-        return s.length > n ? s.slice(0, n) + '…' : s;
-    } catch (_) { return ''; }
-}
-
-// 读额度百分比：只在被调用时开一次菜单（不进任何轮询循环）
-// 返回三态（调用方必须按 reason 区分，ok:false 一律表示「额度未知」）：
-//   { ok:true,  percent, raw, loginWall }                       读到百分比
-//   { ok:false, reason:'menuFailed', error, loginWall }         菜单没打开 → 完全不知道额度
-//   { ok:false, reason:'noQuotaRow', error, raw, loginWall }    菜单开了但没有「近 7 天消耗」这一项
-//                                                               （部分套餐/无消耗时不渲染，不是读取失败）
-//   { ok:false, reason:'exception',  error, loginWall }         过程抛异常
-async function readQuotaPercent() {
-    try {
-        const opened = await openAccountMenu();
-        if (!opened) {
-            return {
-                ok: false,
-                reason: 'menuFailed',
-                error: '未能打开账号菜单（未找到头像按钮或菜单未出现）',
-                loginWall: detectLoginWall().needLogin
-            };
-        }
-        // 只读真正的那个菜单节点（DOM 里可能还留着早先的 closed 节点）
-        const menu = document.querySelector(DOUBAO_MENU_SEL + '[data-state="open"]')
-            || document.querySelector(DOUBAO_MENU_SEL);
-        const text = String((menu && menu.innerText) || '');
-        await closeAccountMenu();
-        const loginWall = detectLoginWall().needLogin;
-        const percent = parseDoubaoQuotaPercent(text);
-        if (percent === null) {
-            return {
-                ok: false,
-                reason: 'noQuotaRow',
-                error: '账号菜单里没有额度用量条目（未渲染，不代表额度正常）',
-                raw: doubaoRawSnippet(text, 400),
-                loginWall
-            };
-        }
-        return { ok: true, percent: percent.percent, label: percent.label, raw: doubaoRawSnippet(text, 400), loginWall };
-    } catch (e) {
-        await closeAccountMenu();
-        return { ok: false, reason: 'exception', error: e.message, loginWall: detectLoginWall().needLogin };
-    }
-}
-
 // 登录墙识别：强特征不看输入框，弱特征（单个「登录」）必须配合「没有输入框/有登录按钮」
 var DOUBAO_LOGIN_STRONG = ['扫码登录', '手机号登录', '验证码登录', '密码登录', '登录后继续', '登录/注册', '请先登录'];
 var DOUBAO_LOGIN_WEAK = ['请登录', '立即登录', '登录'];
@@ -1470,8 +1305,7 @@ async function readCurrentDoubaoAccountName() {
 // DOM 忙类判忙。选择器与套图保持一致（[class*="generating"], [class*="typing"]）——
 // 套图里三处（sendOnce / waitForNewImages / pollNewImages）用同一个 BUSY_SEL，
 // 这里改就必须同步改那边，否则「页面说忙、换号说闲」会互相打架。
-// 只认「生成中/打字中」两类状态类，且可见才算忙：不引入 loading —— 图片懒加载占位、
-// 骨架屏大量带 loading 类，会把它判成"正在生成"，导致自动换号永远被挡住。
+// 忙态只用 generating/typing 两类状态类，不引入 loading —— 懒加载占位与骨架屏都带 loading 类，会把空闲判成生成中。
 var DOUBAO_BUSY_SEL = '[class*="generating"], [class*="typing"]';
 
 // 刚因额度被拒的时间点（模块级，不落 storage：跨页面重载没有意义，重载后会话也清了）。
@@ -1499,9 +1333,10 @@ function isDoubaoBusyInDom() {
 }
 
 // 忙态合成（唯一真值来源）：
-//   isProcessing —— 换色/改图/探测真在跑，任何情况下都算忙（换色途中切号会连页面带任务一起销毁）
+//   isProcessing —— 换色/改图真在跑，任何情况下都算忙（换色途中切号会连页面带任务一起销毁）
 //   quotaRecent  —— 刚被额度拒过：DOM 忙信号不可信（额度气泡自带 generating 类），忽略
 //   domBusy      —— 套图生成中（套图不设 isProcessing，只能看 DOM）
+// 忙态只用 generating/typing 两类状态类，不引入 loading —— 懒加载占位与骨架屏都带 loading 类，会把空闲判成生成中。
 function doubaoComputeBusyState() {
     const processing = !!isProcessing;
     const quotaRecent = isDoubaoQuotaRecent();
@@ -1627,159 +1462,6 @@ async function switchDoubaoAccount(name) {
         // g) 任何异常都关掉菜单兜底，避免浮层挡住后续生图操作
         try { await closeAccountMenu(); } catch (_) {}
         return { ok: false, error: e.message };
-    }
-}
-
-// ============================================================
-// 账号可用性探测：真的发一条生图请求，看能不能出图
-//
-// 为什么不用菜单里的额度百分比：菜单里有两种额度条目（近 7 天消耗 / 当前时段额度用量），
-// 百分比与「这一次能不能生成」不是一回事（100% 只是已用量，不代表本次被拒）；
-// 而且额度每天刷新，昨天判死的号今天可能已经恢复。唯一可信的判据是「发一条 → 出不出图」。
-//
-// 代价：每次探测真实消耗 1 张图片额度 → 只允许 background 的探测路径调用。
-// 返回（ok:false 时 reason 必须区分，调用方不能把 timeout 当成「没额度」）：
-//   { ok:true, evidence:'image'|'text', elapsedMs }        出图 = 这个号现在能生成
-//   { ok:false, reason:'exhausted', resumeAt, text }        命中「额度已用完」→ 立刻返回，不等满 90s
-//   { ok:false, reason:'needLogin', hint }                  落在登录墙
-//   { ok:false, reason:'busy' }                             页面正在生成/执行任务，不探测
-//   { ok:false, reason:'timeout', elapsedMs }               90s 内既没图也没额度文案（结论未知）
-//   { ok:false, reason:'error', error }                     异常
-// ============================================================
-
-var DOUBAO_PROBE_PROMPT = '生成一张纯白背景的图片，1:1';
-var DOUBAO_PROBE_TIMEOUT = 90000;     // 发送后最长等待
-var DOUBAO_PROBE_POLL = 500;          // 轮询间隔
-var DOUBAO_PROBE_INPUT_WAIT = 10000;  // 开新对话后等输入框就绪
-var DOUBAO_PROBE_DONE_TEXT_RE = /(已生成|已经生成|生成完成|生成完毕|生成好了)/;
-
-// 页面上「已加载完成」的生成图 URL：只认豆包 CDN + naturalWidth>0（占位图/骨架图不算出图）
-// 只在**消息节点内**取图：整页 img 会把侧边栏会话缩略图、头像的延迟加载也算进来，
-// 导致「切到一个其实没额度的号也被判成出图」（真机风险，见 2026-10-27 评估）。
-// 拿不到消息节点时才退回整页（宁可多判，也不至于永远 timeout）。
-function collectProbeImageSrcs() {
-    const out = [];
-    try {
-        let roots = [];
-        try { roots = collectQuotaMessageNodes(); } catch (_) { roots = []; }
-        const scopes = (Array.isArray(roots) && roots.length) ? roots : [document];
-        const seen = [];
-        for (const root of scopes) {
-            const imgs = root.querySelectorAll ? root.querySelectorAll('img') : [];
-            for (const img of imgs) {
-                const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
-                if (!src) continue;
-                if (!src.includes('byteimg.com') && !src.includes('tos-alistore')) continue;
-                if (!(img.naturalWidth > 0)) continue;
-                if (seen.indexOf(src) >= 0) continue;
-                seen.push(src);
-                out.push(src);
-            }
-        }
-    } catch (_) {}
-    return out;
-}
-
-// 「出图了」的文案判定：必须排除「正在生成中」这类进行时，否则一开始就误判成功
-function isProbeDoneText(t) {
-    const s = String(t || '');
-    if (!s) return false;
-    if (/生成中|正在生成|绘制中|创作中|排队中/.test(s)) return false;
-    return DOUBAO_PROBE_DONE_TEXT_RE.test(s);
-}
-
-function collectProbeMessageTexts() {
-    try {
-        return collectQuotaMessageNodes().map(el => String((el && el.innerText) || ''));
-    } catch (_) { return []; }
-}
-
-// 本轮新增消息里是否出现「已生成/生成完成」：只认基线之后的新节点，
-// 以及基线末条节点原地追加的内容（老节点没变化就不算本轮证据 → 宁漏不误）
-function hasProbeDoneText(baseTexts) {
-    try {
-        const base = Array.isArray(baseTexts) ? baseTexts : [];
-        const nodes = collectQuotaMessageNodes();
-        for (let i = Math.max(0, base.length - 1); i < nodes.length; i++) {
-            const t = String((nodes[i] && nodes[i].innerText) || '');
-            if (!t) continue;
-            if (i < base.length && t === base[i]) continue;   // 基线里的老节点没变化
-            if (isProbeDoneText(t)) return true;
-        }
-    } catch (_) {}
-    return false;
-}
-
-// 等输入框可用（新对话切换/整页渲染都需要时间）
-async function waitProbeInput(timeoutMs) {
-    const start = Date.now();
-    while (Date.now() - start < (timeoutMs || 0)) {
-        if (findChatInput()) return true;
-        if (detectLoginWall().needLogin) return false;
-        await sleep(200);
-    }
-    return !!findChatInput();
-}
-
-async function probeAccountByGenerate() {
-    const startedAt = Date.now();
-    let wasProcessing = false;
-    try {
-        if (isProcessing || isDoubaoBusyInDom()) return { ok: false, reason: 'busy' };
-
-        // a) 先判登录墙：墙上的输入框不存在，硬发只会白等 90s
-        const wall0 = detectLoginWall();
-        if (wall0.needLogin) return { ok: false, reason: 'needLogin', hint: wall0.hint };
-
-        // b) 优先开新对话：避免探测消息污染用户正在看的会话
-        await startNewChat();
-        if (!(await waitProbeInput(DOUBAO_PROBE_INPUT_WAIT))) {
-            const wall = detectLoginWall();
-            if (wall.needLogin) return { ok: false, reason: 'needLogin', hint: wall.hint };
-            return { ok: false, reason: 'error', error: '新对话后 10s 内未出现输入框' };
-        }
-
-        // c) 打额度快照（必须在本轮发送前，否则会命中历史残留的额度文案）
-        markQuotaBaseline();
-        const baseImages = new Set(collectProbeImageSrcs());
-        const baseTexts = collectProbeMessageTexts();
-
-        // d) 发送探测提示词
-        if (!(await typePrompt(DOUBAO_PROBE_PROMPT))) {
-            return { ok: false, reason: 'error', error: '未找到输入框，探测提示词未输入' };
-        }
-        isProcessing = true;      // 探测期间占住会话：真实任务不会被接进来抢这一条消息
-        wasProcessing = true;
-        await sendMessage();
-        const sentAt = Date.now();   // 90s 从「发送完成」开始算，前面的开新对话不计入
-
-        // e) 轮询判定：额度优先（命中即返回），其次出图，再次出图文案
-        while (Date.now() - sentAt < DOUBAO_PROBE_TIMEOUT) {
-            await sleep(DOUBAO_PROBE_POLL);
-            const wall = detectLoginWall();
-            if (wall.needLogin) {
-                return { ok: false, reason: 'needLogin', hint: wall.hint, elapsedMs: Date.now() - startedAt };
-            }
-            const quota = detectQuotaExhausted();
-            if (quota && quota.exhausted) {
-                return {
-                    ok: false, reason: 'exhausted', resumeAt: quota.resumeAt || null,
-                    text: String(quota.text || '').slice(0, 200), elapsedMs: Date.now() - startedAt
-                };
-            }
-            for (const src of collectProbeImageSrcs()) {
-                if (!baseImages.has(src)) return { ok: true, evidence: 'image', elapsedMs: Date.now() - startedAt };
-            }
-            if (hasProbeDoneText(baseTexts)) {
-                return { ok: true, evidence: 'text', elapsedMs: Date.now() - startedAt };
-            }
-        }
-        // f) 没图也没额度文案：结论未知，绝不能当成「没额度」
-        return { ok: false, reason: 'timeout', elapsedMs: Date.now() - startedAt };
-    } catch (e) {
-        return { ok: false, reason: 'error', error: e.message || String(e) };
-    } finally {
-        if (wasProcessing) isProcessing = false;
     }
 }
 
