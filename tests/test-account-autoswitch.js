@@ -682,6 +682,25 @@ function busyEnv(opts) {
         ok(env.sb.doubaoScanInFlight === false, '全切不过去：重入闸已释放');
     }
 
+    // ---- 16b) 基础设施失败（内容脚本失联）：立刻停手，且不给候选记 unknown ----
+    // 真机教训：扩展更新后旧标签注入脚本失效时，7 个候选会全部失败并被逐个记成 unknown，
+    // probeSeq/checkedAt 被刷一遍，好号的候选排序被污染。
+    {
+        const statuses = { acct1: 'ok' };
+        TEN.slice(1).forEach(n => { statuses[n] = 'unknown'; });
+        const before = { acct2: 2, acct3: 3 };
+        const env = bgEnv({ current: 'acct1', accounts: TEN, ledger: mkLedger(statuses),
+            switchFn: () => ({ ok: false, infra: true, error: '重载后读不到账号列表：内容脚本无响应',
+                expect: 'acct2', actualSeq: [] }) });
+        const res = await env.call({ exclude: [] });
+        ok(res.ok === false && res.reason === 'infra', '失联：reason=infra（不是 none 也不是 allExhausted）', JSON.stringify(res));
+        ok(env.switches.length === 1, '失联：只试 1 个号就停手（不把 9 个号全试一遍）', String(env.switches.length));
+        const led = env.ledger();
+        ok(led.accounts.acct2.probeSeq === before.acct2, '失联：不给好号写 unknown（probeSeq 未变）', String(led.accounts.acct2.probeSeq));
+        ok(led.accounts.acct3.probeSeq === before.acct3, '失联：后续候选一个都没被记账', String(led.accounts.acct3.probeSeq));
+        ok(env.sb.doubaoScanInFlight === false, '失联：重入闸已释放');
+    }
+
     // ---- 17) 当天全都判过 exhausted → reason:'allExhausted'，一次都不切 ----
     {
         const statuses = {};

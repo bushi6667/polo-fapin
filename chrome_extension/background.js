@@ -2047,25 +2047,52 @@ async function recoverDoubaoAccountSwitch(tabId, name) {
         const reloaded = await waitDoubaoTabReloaded(tabId);
         if (!reloaded) return { ok: false, reloaded: false, error: '切号后未等到页面重载完成（页面可能已关闭或未重载）' };
         await doubaoAccountSleep(2000);
-        let list = null, wallStreak = 0;
-        for (let i = 0; i < 10; i++) {
-            list = await chrome.tabs.sendMessage(tabId, { action: 'doubaoListAccounts' }).catch(() => null);
-            const wall = !!(list && list.loginWall === true);
-            wallStreak = wall ? wallStreak + 1 : 0;
-            if (list && list.ok) break;          // 账号列表读到了：名字可读也可能仍是登录墙，交给下面判
-            if (wallStreak >= 2) break;          // 连续两次登录墙才认（单次可能是重载瞬间的过渡页），认了就不再空耗 8s
-            if (i < 9) await doubaoAccountSleep(1000);   // 新文档的内容脚本可能还没就绪
+        let repaired = false;
+        // 一次轮询尝试：返回 { list, wallStreak, gotAny }。
+        // gotAny=false 表示 10 次一次响应都没拿到 —— 这不是「读错名字」而是「内容脚本根本没活着」，
+        // 常见原因是扩展刚更新过，旧标签里的注入脚本失效。此时刷新页面才是唯一验证过的救法。
+        const pollOnce = async (times) => {
+            let list = null, wallStreak = 0, gotAny = false;
+            const seq = [];
+            for (let i = 0; i < times; i++) {
+                list = await chrome.tabs.sendMessage(tabId, { action: 'doubaoListAccounts' }).catch(() => null);
+                const wall = !!(list && list.loginWall === true);
+                wallStreak = wall ? wallStreak + 1 : 0;
+                if (list) gotAny = true;
+                if (list && list.ok) seq.push(list.current || '');
+                // 命中目标就立刻收：现在不 break 在「列表读到了」，因为重载后第一次读到的
+                // 常常还是上一个账号（账号态比 DOM 晚），拿它比对就是「用户名不匹配」的误报来源。
+                if (list && list.ok && list.current === name) return { list, wallStreak, gotAny, seq, hit: true };
+                if (wallStreak >= 2) break;   // 连续两次登录墙才认（单次可能是重载瞬间的过渡页）
+                if (i < times - 1) await doubaoAccountSleep(1000);   // 新文档的内容脚本可能还没就绪
+            }
+            return { list, wallStreak, gotAny, seq, hit: false };
+        };
+
+        let r = await pollOnce(10);
+        if (!r.gotAny) {
+            // 一次响应都没拿到 = 内容脚本是死的。刷一次页面重新注入（不是热注入：
+            // doubao.js 顶层有 let/const，重复注入会因重复声明直接抛错，且会造成双监听）。
+            repaired = true;
+            try { await chrome.tabs.reload(tabId); } catch (_) {}
+            await waitDoubaoTabReloaded(tabId, 25000);
+            await doubaoAccountSleep(2000);
+            r = await pollOnce(5);
         }
         // 登录墙优先于一切：ok:true 的名字可读的墙也不能当切号成功
-        if (list && list.loginWall === true) {
-            return { ok: false, needLogin: true, reloaded: true, error: '该账号需要重新登录' };
+        if (r.list && r.list.loginWall === true) {
+            return { ok: false, needLogin: true, reloaded: true, repaired, expect: name, actualSeq: r.seq };
         }
-        if (!list || !list.ok) {
-            return { ok: false, reloaded: true, error: '重载后读不到账号列表：' + ((list && list.error) || '内容脚本无响应') };
+        if (!r.list || !r.list.ok) {
+            return { ok: false, reloaded: true, repaired, infra: true, expect: name, actualSeq: r.seq,
+                error: (repaired ? '自动刷新豆包页面后仍读不到账号列表：' : '重载后读不到账号列表：')
+                    + ((r.list && r.list.error) || '内容脚本无响应（扩展刚更新时常见，手动刷新豆包标签页即可恢复）') };
         }
-        if (list.current === name) return { ok: true, name, reloaded: true };
-        return { ok: false, reloaded: true, actual: list.current || '',
-            error: '切换后用户名不匹配（实际：' + (list.current || '未知') + '）' };
+        if (r.hit) return { ok: true, name, reloaded: true, repaired, expect: name, actualSeq: r.seq };
+        // 轮询了多次都不是目标：把整个读取序列带回给调用方，用来区分
+        // 「前几次是旧账号、后来变了但没到目标」（读早了/页面残留）和「一直是同一个别的号」（真切错）。
+        return { ok: false, reloaded: true, repaired, actual: r.list.current || '', expect: name, actualSeq: r.seq,
+            error: '切换后用户名不匹配（实际：' + (r.list.current || '未知') + '）' };
     } catch (e) {
         return { ok: false, reloaded: true, error: e.message };
     }
@@ -2449,8 +2476,16 @@ async function doubaoAutoSwitchAction(request) {
                 if (sw && sw.ok === true) {
                     return { ok: true, name, scanned: false, ledger, tried };
                 }
-                // 切号失败（含需重新登录）：如实记 unknown，接着试下一个候选
+                // 基础设施失败（内容脚本失联/页面读不到）：试再多的号也是同样的结果，
+                // 继续循环只会把好号逐个记成 unknown、污染候选排序 —— 立刻收手，如实报 infra。
                 const why = sw && sw.needLogin ? 'needLogin' : ((sw && sw.error) || '切号失败');
+                if (sw && sw.infra === true) {
+                    tried.push({ name, error: why });
+                    return { ok: false, reason: 'infra', ledger, tried,
+                        expect: sw.expect, actualSeq: sw.actualSeq || [],
+                        error: String(why) };
+                }
+                // 切号失败（含需重新登录）：如实记 unknown，接着试下一个候选
                 doubaoWriteProbe(ledger, name, {
                     status: DOUBAO_STATUS_UNKNOWN, percent: null, label: '', resumeAt: '',
                     note: String(why).slice(0, 80)

@@ -4128,7 +4128,9 @@ function colorQuotaAutoSwitch(rowNum, reason, opts) {
     // 已试过的号全部排除：切过又不可用的号不能再切回去（否则原地打转）
     const exclude = colorQuotaTriedAccounts.slice();
     if (state.lastSwitchAccount && exclude.indexOf(state.lastSwitchAccount) < 0) exclude.push(state.lastSwitchAccount);
-    doubaoAccountMessage('doubaoAutoSwitch', { exclude })
+    // quotaExhausted=false：连续 3 次生成不出图 ≠ 这个号没额度，别把它记成「额度用完」
+    // （后台会把当前号记 exhausted；记错的话好号当天就不再当候选了）。只有额度命中才让它记。
+    doubaoAccountMessage('doubaoAutoSwitch', { exclude, quotaExhausted: kind !== 'genfail' })
         .then(res => applyColorAutoSwitch(state, rowNum, res, null),
               err => applyColorAutoSwitch(state, rowNum, null, err))
         .then(done, done);

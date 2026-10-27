@@ -440,6 +440,11 @@ function suiteEnv(options) {
             '换号计数/已试列表共用额度那套（attempts=1、已试=号B）',
             `${env.run('colorQuotaAttempts')}/${env.run('colorQuotaTriedAccounts.slice()')}`);
         ok(env.run('colorAutoSwitchRunning') === false, '换号结束：防重入 flag 已清');
+        // 连续生成失败 ≠ 没额度：必须告诉后台别把当前号记成 quotaExhausted，
+        // 否则好号当天就不再当候选（真机上就是这样被误伤的）。
+        const swReq = (env.reqs || []).map(x => x && x.req).filter(r => r && r.action === 'doubaoAutoSwitch').pop();
+        ok(swReq && swReq.quotaExhausted === false,
+            '生图失败换号：请求带 quotaExhausted:false（不许记成额度用完）', JSON.stringify(swReq));
     }
 
     // ---- 8) 换色：generationFailed + disabled:false → 记失败跳款，绝不换号 ----
