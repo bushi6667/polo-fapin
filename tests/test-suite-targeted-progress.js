@@ -80,6 +80,8 @@ console.log('=== 指定重生成进度口径 ===');
     ok(calls.length > 0 && missing.length === 0,
         'runSuiteFiveJob：所有 suiteSetProgress 调用都传 total（' + calls.length + ' 处）',
         missing.join(' | '));
+    ok(/let doneCount = targeted \? 0 : SUITE_STEP_KEYS\.filter/.test(fn),
+        'runSuiteFiveJob：指定重生成从 0 开始计数（否则出现 5/1 这种倒挂进度）');
     ok(/const names = selected\.map\(s => `\$\{s\.key\} \$\{s\.name\}`\)/.test(fn) && /指定重生成完成/.test(fn),
         '完成提示改成「指定重生成完成（N 张：…）」');
     ok(/if \(missingKeys\.length && !targeted\)/.test(fn),
