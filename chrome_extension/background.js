@@ -228,6 +228,13 @@ const PUBLISH_VERIFIED_SAVED_KEY = 'polo_publish_verified_saved';   // 保存记
 const SAVE_VERIFY_WAIT_MS = 2500;
 const PUBLISH_LEGACY_UPLOADED_KEY = 'polo_publish_legacy_uploaded'; // 旧 uploaded 标记：历史待核，仅供展示
 const PUBLISH_TICK_MS = 30000;                          // 运行期资源巡检间隔上限
+// 扩展自己点保存后的「自记账窗口」时长（内存，不落盘）：
+// CDP 注入的点击在渲染器里 isTrusted === true，页3 的点击监听会把它当成用户手动点击再回传一次
+// recordPublishSaveClick；第二条会把第一条的 unverified / 判失败不写记录 覆盖成 verified。
+// 8 秒 = 保存锁内校验 2.5s + 排队余量 + 页面回传延迟，足够覆盖整条回声链路。
+const AUTO_SAVE_CLICK_TTL_MS = 8000;
+// 页面侧标记（window.__poloAutoSaveAt）有效期：只用于吞掉紧接着的那次注入点击，越短越不易误挡真人点击。
+const AUTO_SAVE_PAGE_MARK_MS = 3000;
 
 const PUBLISH_DEFAULTS = {
     batchSize: 50,          // 每批款数默认值（用户可在界面上改）
@@ -496,6 +503,8 @@ async function buildPublishStatePayload() {
         pendingSaveCount,
         savedCount,
         unverifiedSavedCount,
+        // 已保存过、被页3 跳过重填的行数：这些行既不算"已填"，也不算"待保存"
+        skippedCount: (t && Array.isArray(t.skippedRows)) ? t.skippedRows.length : 0,
         pauseReason: t ? t.pauseReason : '',
         pauseDetail: t ? t.pauseDetail : '',
         // 行失效状态与资源暂停原因分开：界面按 rowRetryable 决定是否显示重试/跳过
@@ -642,6 +651,86 @@ async function verifyPublishSaved(tabId, beforeUrl) {
     return decideSaveVerification(raw);
 }
 
+// ---------- 自记账窗口：挡住「扩展自己点的保存」被页3 二次记账 ----------
+// 语义：background 亲自 CDP 点保存时先登记一个 (fileKey,row) 窗口；随后到达的
+// recordPublishSaveClick（clickButton === false，只可能来自页3 的点击监听）若命中未消费的窗口，
+// 就是这次注入点击的回声 —— 丢弃，不写任何保存记录，也不动 unverified。
+// 一次性消费：窗口命中后立刻移除，真人随后再点保存（哪怕几秒内）不会被连坐。
+const autoSaveSelfClicks = new Map();
+
+function autoSaveClickKey(fileKey, row) {
+    return String(fileKey === null || fileKey === undefined ? '' : fileKey) + '\u0000' + String(row);
+}
+
+function removeAutoSaveToken(token) {
+    if (!token) return;
+    if (token.timer) { clearTimeout(token.timer); token.timer = null; }
+    const list = autoSaveSelfClicks.get(token.key);
+    if (!list) return;
+    const i = list.indexOf(token);
+    if (i >= 0) list.splice(i, 1);
+    if (list.length === 0) autoSaveSelfClicks.delete(token.key);
+}
+
+// 登记窗口（必须在 CDP 点击之前）。baseline：点击前页面记录的「已吞掉的注入点击」计数。
+function pushAutoSaveSelfClick(fileKey, row, baseline) {
+    const key = autoSaveClickKey(fileKey, row);
+    const token = { key, row: Number(row), at: Date.now(), baseline: (typeof baseline === 'number' ? baseline : null), timer: null };
+    const list = autoSaveSelfClicks.get(key) || [];
+    list.push(token);
+    // 同一行短时间内最多留 4 个未消费窗口，防异常情况下无界增长
+    while (list.length > 4) removeAutoSaveToken(list[0]);
+    autoSaveSelfClicks.set(key, list);
+    // 到期自清：保证任何路径（成功/失败/异常/页面没回传）都不会永久挡住真人点击
+    token.timer = setTimeout(() => removeAutoSaveToken(token), AUTO_SAVE_CLICK_TTL_MS);
+    return token;
+}
+
+// 消费一个窗口：返回 true 表示这条记账是扩展自己点击的回声
+function consumeAutoSaveSelfClick(fileKey, row) {
+    const list = autoSaveSelfClicks.get(autoSaveClickKey(fileKey, row));
+    if (!list || list.length === 0) return false;
+    const token = list[0];
+    const expired = Date.now() - token.at > AUTO_SAVE_CLICK_TTL_MS;
+    removeAutoSaveToken(token);   // 命中或过期都清，绝不留着挡下一次
+    return !expired;
+}
+
+// 在页面上打标记（点击之前）：页3 的点击监听见到 3 秒内的标记就 return，不二次记账。
+// 返回值 = 点击前页面已吞掉的注入点击计数（取不到返回 null，只靠内存窗口兜底）。
+async function markAutoSaveInPage(tabId) {
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId }, args: [AUTO_SAVE_PAGE_MARK_MS],
+            func: (markMs) => {
+                try {
+                    window.__poloAutoSaveAt = Date.now();
+                    window.__poloAutoSaveMarkMs = Number(markMs) || 3000;
+                } catch (_) {}
+                return Number(window.__poloAutoSaveHits || 0);
+            }
+        });
+        const v = results && results[0] ? results[0].result : null;
+        return (typeof v === 'number' && Number.isFinite(v)) ? v : null;
+    } catch (_) { return null; }
+}
+
+// 点击后确认页3 是否已自己吞掉这次注入点击：吞掉了就不会再回传，内存窗口可立即撤掉，
+// 免得"页3 已挡住 + 内存窗口还在"把用户紧接着的真人点击也挡掉。
+async function confirmAutoSaveSwallowedInPage(tabId, token) {
+    if (!token || token.baseline === null) return false;
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => Number(window.__poloAutoSaveHits || 0)
+        });
+        const v = results && results[0] ? results[0].result : null;
+        if (typeof v !== 'number' || !Number.isFinite(v)) return false;
+        if (v > token.baseline) { removeAutoSaveToken(token); return true; }
+        return false;
+    } catch (_) { return false; }
+}
+
 // 页3人工保存入口：点击与记账在后台完成，保存触发页面刷新也不会丢失记账。
 async function savePublishProduct(request, sender, clickButton = true) {
     return withPublishLock(async () => {
@@ -664,19 +753,41 @@ async function savePublishProduct(request, sender, clickButton = true) {
         } else if (request.taskId) return { ok: false, error: '原任务文件信息缺失，未记入其他文件' };
         else fileKey = getFilePrefix();
 
-        const beforeUrl = String((sender.tab && sender.tab.url) || sender.url || '');
-        let clicked = clickButton ? await realClickCDP(tabId, x, y) : { ok: true };
-        if (!clicked.ok) {
-            try {
-                const results = await chrome.scripting.executeScript({ target: { tabId }, args: [x, y], func: (px, py) => {
-                    const button = document.elementFromPoint(px, py)?.closest('button');
-                    if (!button || (button.innerText || button.textContent || '').trim() !== '保存') return false;
-                    button.click(); return true;
-                } });
-                clicked = { ok: results.some(r => r.result === true) };
-            } catch (_) {}
+        // 回声拦截：clickButton === false 只可能来自页3 的点击监听。
+        // 命中扩展自己刚点出来的窗口 → 直接丢弃（不写记录、不改 unverified、不广播），
+        // 否则它会覆盖第一条的 unverified / 把平台拒绝的那一行写成已保存。
+        if (!clickButton && consumeAutoSaveSelfClick(fileKey, row)) {
+            console.log(`ℹ️ 第 ${row} 行：忽略扩展自动保存的自记账回声（窗口期内），保存记录不变`);
+            return { ok: true, ignored: true, reason: 'auto-save-window', row, fileKey };
         }
-        if (!clicked.ok) return { ok: false, error: '保存按钮未点击，未标记已保存' };
+
+        const beforeUrl = String((sender.tab && sender.tab.url) || sender.url || '');
+        let clicked;
+        let autoSaveToken = null;
+        if (clickButton) {
+            // 打标记 → 点击：顺序不能反，页3 监听靠"新鲜的标记"识别这次注入点击
+            const baseline = await markAutoSaveInPage(tabId);
+            autoSaveToken = pushAutoSaveSelfClick(fileKey, row, baseline);
+            clicked = await realClickCDP(tabId, x, y);
+            if (!clicked.ok) {
+                try {
+                    const results = await chrome.scripting.executeScript({ target: { tabId }, args: [x, y], func: (px, py) => {
+                        const button = document.elementFromPoint(px, py)?.closest('button');
+                        if (!button || (button.innerText || button.textContent || '').trim() !== '保存') return false;
+                        button.click(); return true;
+                    } });
+                    clicked = { ok: results.some(r => r.result === true) };
+                } catch (_) {}
+            }
+            if (!clicked.ok) {
+                removeAutoSaveToken(autoSaveToken);   // 没点成 → 窗口立刻撤掉，别挡住真人点击
+                return { ok: false, error: '保存按钮未点击，未标记已保存' };
+            }
+            // 页3 已自己吞掉这次注入点击 → 不会再有回声，窗口可以提前撤掉
+            await confirmAutoSaveSwallowedInPage(tabId, autoSaveToken);
+        } else {
+            clicked = { ok: true };
+        }
         // 点成功 ≠ 保存成功：平台可能只飘红不跳转。先采集反馈，再决定记不记账。
         // recordPublishSaveClick（人工点击）不校验：报错用户自己看得见，且旧行为是"点了就记"。
         const verdict = clickButton
@@ -1044,13 +1155,23 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
             return { ok: false, message: `队列首行 ${t.remaining && t.remaining[0]} 与 ${row} 不一致，已拒绝（防止删错行）` };
         }
 
+        // 已保存过的行被页3 跳过重填：单独记账，不冒充"已填"。
+        // 旧行为把它算进 filledCount/filledRows，于是一批全跳过时面板显示"已填 100/100 · 待保存 0"，
+        // 实际 0 份草稿。skip 只推进队列，填/保存两类计数都不动。
+        const isSkipped = msg.skipped === true;
+
         // 记录填写完成。暂停中也接受：当前页的有效完成必须入账，只是不自动开新页。
         const wasPaused = t.state === 'paused';
         t.remaining.shift();
-        t.filledCount += 1;
-        if (!Array.isArray(t.filledRows)) t.filledRows = [];
-        t.filledRows.push(row);
-        t.batchFilledDone = (t.batchFilledDone || 0) + 1;
+        if (isSkipped) {
+            if (!Array.isArray(t.skippedRows)) t.skippedRows = [];
+            if (!t.skippedRows.some(r => Number(r) === Number(row))) t.skippedRows.push(row);
+        } else {
+            t.filledCount += 1;
+            if (!Array.isArray(t.filledRows)) t.filledRows = [];
+            t.filledRows.push(row);
+            t.batchFilledDone = (t.batchFilledDone || 0) + 1;
+        }
         t.currentRow = null;
         t.currentTabId = null;
         t.currentStartedAt = 0;
@@ -1058,7 +1179,7 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
         t.currentRowFailure = '';  // 行已成功填写，失效状态清除
         t.resourceBlockDetail = '';
         await savePublishTask(t);
-        await appendPublishLog({ level: 'filled', row, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilledDone, paused: wasPaused });
+        await appendPublishLog({ level: isSkipped ? 'skipped' : 'filled', row, skipped: isSkipped, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilledDone, paused: wasPaused });
 
         if (t.remaining.length === 0) {
             t.state = 'done';
@@ -1066,13 +1187,13 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
             t.pauseDetail = '';
             await savePublishTask(t);
             stopPublishTick();
-            await appendPublishLog({ level: 'done', filled: t.filledCount, total: t.total });
-            notifyAssistant('publishAllFilled', { filled: t.filledCount, total: t.total });
+            await appendPublishLog({ level: 'done', filled: t.filledCount, skipped: (t.skippedRows || []).length, total: t.total });
+            notifyAssistant('publishAllFilled', { filled: t.filledCount, skipped: (t.skippedRows || []).length, total: t.total });
             await broadcastPublishState();
-            return { ok: true, done: true };
+            return { ok: true, done: true, skipped: isSkipped };
         }
 
-        notifyAssistant('publishFilledAck', { row, filled: t.filledCount, total: t.total, remaining: t.remaining.length });
+        notifyAssistant('publishFilledAck', { row, skipped: isSkipped, filled: t.filledCount, total: t.total, remaining: t.remaining.length });
         await broadcastPublishState();
         // 只在运行中自动开下一款；暂停状态保持暂停（等用户主动继续）
         if (!wasPaused) {
@@ -1172,6 +1293,12 @@ async function skipPublishRow() {
         if (!t) return { ok: false, message: '没有发品任务' };
         if (t.currentRow === null) return { ok: false, message: '当前没有可跳过的行' };
         const row = t.currentRow;
+        // 与 onPublishFilled 同一条守卫：shift() 删的是队列头部，首行不是当前行就会删错行
+        // （该行既不在待填也不在已跳过 → 静默丢行，后续 remaining[0] 永远对不上 currentRow）。
+        // 必须在任何状态修改之前拒绝。
+        if (!Array.isArray(t.remaining) || t.remaining.length === 0 || Number(t.remaining[0]) !== Number(row)) {
+            return { ok: false, message: `队列首行 ${t.remaining && t.remaining[0]} 与当前行 ${row} 不一致，已拒绝（防止删错行）` };
+        }
         t.remaining.shift();
         if (!Array.isArray(t.skippedRows)) t.skippedRows = [];
         t.skippedRows.push(row);
@@ -3154,6 +3281,7 @@ async function handleSharedAction(request, sendResponse, sender) {
                 remaining: [...rows],
                 filledCount: 0,
                 filledRows: [],
+                skippedRows: [],
                 batchSize: s.batchSize,
                 batchFilled: 0,
                 batchFilledDone: 0,

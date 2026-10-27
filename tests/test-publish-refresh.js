@@ -96,12 +96,14 @@ function page(e, task, row, tab, { store = new Map(), dropCompletion = false, st
     const refreshBeforeAck = page(e, opened.taskId, 415, secondTab, { store: second.store });
     await refreshBeforeAck.run('loadBatchProduct(415)');
     assert.equal(refreshBeforeAck.writes.length, 0, '完成通知丢失也只补通知，不重复填写');
-    assert.equal(e.store.polo_publish_task.filledCount, 2);
+    // 新语义：该行是「已保存过 → 跳过重填」，不算已填，只记 skippedCount
+    assert.equal(e.store.polo_publish_task.filledCount, 1, '跳过行不计入已填（只有 412 是真填过的）');
+    assert.equal(e.store.polo_publish_task.skippedRows.length, 1);
     assert.equal(e.store.polo_publish_task.state, 'done');
     const finishedUnsaved = page(e, opened.taskId, 415, secondTab);
     await finishedUnsaved.run('loadBatchProduct(415)');
     assert.equal(finishedUnsaved.writes.length, 0, '队列结束后已保存旧页也不重填');
-    assert.equal(e.store.polo_publish_task.filledCount, 2);
+    assert.equal(e.store.polo_publish_task.filledCount, 1);
     const strippedUrl = await e.sendInternal({ action: 'getProductByRow', rowNum: 415, taskId: opened.taskId }, { tab: { id: secondTab, url: 'https://post.alibaba.com/product/publish.htm' }, frameId: 0 });
     assert.equal(strippedUrl.autoFillAllowed, false, '平台去掉查询参数后，已保存页仍不自动重填');
     console.log('PASS 新页填一次、通知丢失只补通知、队列结束已保存页不重填');
@@ -116,7 +118,10 @@ function page(e, task, row, tab, { store = new Map(), dropCompletion = false, st
     await next.run('loadBatchProduct(415)');
     assert.equal(next.writes.length, 0, '已自动保存的行新任务不重填');
     const restartedTask = await e.run('loadPublishTask()');
-    assert.equal(restartedTask.filledCount, 1, '已保存行不入账才是错的：上报 skipped 后应记为已完成');
+    // 2026-10-27 新语义：skipped 只推进队列，不冒充「已填」也不进 filledRows（否则面板显示已填 N/N 而实际 0 份草稿）
+    assert.equal(restartedTask.filledCount, 0, '已保存行跳过 ≠ 已填');
+    assert.equal(restartedTask.skippedRows.length, 1, '跳过单独记账');
+    assert.equal((await e.sendExternal({ action: 'getPublishState' })).skippedCount, 1, '面板可见跳过数');
     assert.equal(restartedTask.remaining.length, 0, '队列应推进，不能停在已保存行');
     assert.equal(restartedTask.currentRow, null, '推进后当前行清空');
     console.log('PASS 人工明确重填可操作；新任务遇已自动保存行不重填，队列正常推进');

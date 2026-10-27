@@ -4268,10 +4268,22 @@ function getTaskFromUrl() {
 }
 
 // 菜单保存由后台点击并记账；用户直接点平台保存也按相同规则记账。
+// 但后台用 CDP 注入的点击在渲染器里同样 isTrusted === true，会被这里当成"用户手动点保存"再记一次，
+// 把后台刚写的 unverified（或"平台拒绝、根本没写记录"）覆盖成 verified。所以后台点击前会在页面
+// window.__poloAutoSaveAt 打标记，见到新鲜标记就 return（后台另有内存窗口兜底）。
 function observePage3SaveClick() {
     document.addEventListener('click', event => {
         const button = event.target?.closest?.('button');
         if (!event.isTrusted || !button || (button.innerText || button.textContent || '').trim() !== '保存' || !currentProduct) return;
+        try {
+            const autoAt = Number(window.__poloAutoSaveAt || 0);
+            const markMs = Number(window.__poloAutoSaveMarkMs || 3000);
+            if (autoAt && Date.now() - autoAt <= markMs) {
+                // 记下"吞掉了一次注入点击"，后台据此提前撤掉内存窗口，避免误挡用户紧接着的真人点击
+                try { window.__poloAutoSaveHits = Number(window.__poloAutoSaveHits || 0) + 1; } catch (_) {}
+                return;
+            }
+        } catch (_) {}
         const product = currentProduct;
         sendMessageRetry({ action: 'recordPublishSaveClick', row: product.row,
             taskId: product._publishTaskId || getTaskFromUrl(), fileKey: product._publishFileKey, x: 0, y: 0
