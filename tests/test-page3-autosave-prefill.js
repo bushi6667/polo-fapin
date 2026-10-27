@@ -149,33 +149,31 @@ const logHas = (env, kw, type) => env.logs.some(l => l.m.includes(kw) && (type =
     }
 
     // ------------------------------------------------------------
-    console.log('\n【2】填入有 ⚠️ → 不自动保存，仍 publishFilled，提示手动保存（批量路径）');
+    // 口径变更（真机反馈）：⚠️ 不再阻断自动保存，只有 ❌ 才阻断。
+    console.log('【2】批量路径：有 ⚠️ → 照常自动保存，日志标注建议抽查');
     {
         const env = await runBatch({ results: ['✅ 标题', '⚠️ 属性: 2 项未填写'] });
-        ok(env.events.filter(e => e === 'saveDraft').length === 0, 'saveDraft 未被调用');
-        ok(has(env.events, 'scroll'), '仍滚动到保存按钮');
-        ok(logHas(env, '手动点击页面底部的保存按钮', 'warn'), '提示手动保存（warn）');
-        ok(!logHas(env, '✅ 已自动保存'), '没有「已自动保存」日志');
+        ok(env.events.filter(e => e === 'saveDraft').length === 1, '⚠️ 仍调用 saveDraft');
+        ok(logHas(env, '已自动保存', 'success'), '日志有「已自动保存」');
+        ok(logHas(env, '有警告项，已保存，建议抽查'), '日志提示含警告项');
         ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, 'publishFilled 仍发 1 次');
-        ok(logHas(env, '待核对后手动保存'), '日志说明待人工核对');
     }
 
-    console.log('\n【2b】单件路径：有 ⚠️ 同样不自动保存');
+    console.log('【2b】单件路径：⚠️ 仍按原口径不自动保存（人在旁边，保守处理）');
     {
         const env = await runSingle({ results: ['⚠️ FAQs: 1/2 条核对正确'] });
-        ok(env.events.filter(e => e === 'saveDraft').length === 0, 'saveDraft 未被调用');
+        ok(env.events.filter(e => e === 'saveDraft').length === 0, '单件路径 saveDraft 未被调用');
         ok(logHas(env, '手动点击页面底部的保存按钮', 'warn'), '提示手动保存（warn）');
         ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, 'publishFilled 仍发 1 次');
     }
 
-    // ❌ 也算失败
+    console.log('【2c】❌ 硬失败 → 不自动保存');
     {
         const env = await runBatch({ results: ['❌ 主图上传失败'] });
-        ok(env.events.filter(e => e === 'saveDraft').length === 0, '❌ 结果同样不自动保存');
+        ok(env.events.filter(e => e === 'saveDraft').length === 0, '❌ 结果不自动保存');
         ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, '❌ 结果仍上报 publishFilled');
     }
 
-    // ------------------------------------------------------------
     console.log('\n【3】saveDraft 抛异常 → 不崩、不阻断 publishFilled');
     {
         const env = await runBatch({ results: ['✅ 全部字段处理完毕'], saveThrows: true });
