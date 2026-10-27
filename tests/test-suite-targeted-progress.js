@@ -85,9 +85,14 @@ console.log('=== 指定重生成进度口径 ===');
     ok(/if \(missingKeys\.length && !targeted\)/.test(fn),
         '指定重生成不再报「缺 111/222…」');
 }
-// 6) 顶部横幅按 state.total 渲染
-ok(/\$\{state\.done\|\|0\}\/\$\{state\.total\|\|5\}/.test(HTML),
-    '顶部横幅读 state.total（不再写死 /5）');
+// 6) 顶部横幅：标题与分母都跟着「是否指定重生成」走
+ok(/bannerGoal=Number\(state\.total\)\|\|/.test(HTML) && /\$\{state\.done\|\|0\}\/\$\{bannerGoal\}/.test(HTML),
+    '顶部横幅分母走 bannerGoal（不再写死 /5）');
+ok(/bannerKind=.*'指定重生成':'套图任务'/.test(HTML),
+    '顶部横幅标题区分「指定重生成」与「套图任务」');
+const UNI = fs.readFileSync(path.join(ROOT, 'unified-task-progress.js'), 'utf8').replace(/\r\n/g, '\n');
+ok(/const suiteGoal = \(\) => Number\(suite\.total\)/.test(UNI) && !/suite\.total \|\| 5/.test(UNI),
+    '统一进度条分母走 suiteGoal()，不再出现 suite.total || 5');
 
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 if (fail) console.log('失败项：' + bad.join(' / '));
