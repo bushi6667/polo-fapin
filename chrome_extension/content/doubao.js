@@ -799,6 +799,9 @@ async function runColorTask(task, onAccepted) {
         const q = detectQuotaExhausted();
         if (q && q.exhausted) {
             quota = { exhausted: true, text: q.text, resumeAt: q.resumeAt || null };
+            // 记下被打回的时刻：这条额度气泡会一直留在会话里（还常带 generating/typing 类），
+            // 之后的忙态判定必须能在 30s 内忽略它，否则自动换号永远 busy。
+            __quotaFailedAt = Date.now();
             log('⚠️ 豆包额度已用完' + (q.resumeAt ? `（预计 ${q.resumeAt} 恢复）` : ''), 'warn');
         }
     }
@@ -858,11 +861,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ ok: true, isProcessing, task: colorTask });
         return true;
     }
-    // 忙态（供 background 扫描/自动切号前判断）：套图生成不设 isProcessing，只能看 DOM 忙类
+    // 忙态（供 background 扫描/自动切号前判断）：套图生成不设 isProcessing，只能看 DOM 忙类。
+    // 刚因额度被拒的 30s 内忽略 DOM 忙信号（quotaRecent），否则额度气泡会把换号永久挡住。
     if (request.action === 'doubaoBusyState') {
-        let domBusy = false;
-        try { domBusy = isDoubaoBusyInDom(); } catch (_) {}
-        sendResponse({ ok: true, busy: !!(isProcessing || domBusy), processing: !!isProcessing, domBusy: !!domBusy });
+        sendResponse(Object.assign({ ok: true }, doubaoComputeBusyState()));
         return true;
     }
     // ---------- 账号原语（只对调用方负责，不参与任何轮询/自动流程） ----------
@@ -1462,8 +1464,27 @@ async function readCurrentDoubaoAccountName() {
 }
 
 // 切号安全阀：套图（suite-doubao.js 的 IIFE）不设 isProcessing，只能靠它自己在用的
-// DOM 忙类判忙。选择器与套图保持一致（[class*="generating"], [class*="typing"]），可见才算忙。
+// DOM 忙类判忙。选择器与套图保持一致（[class*="generating"], [class*="typing"]）——
+// 套图里三处（sendOnce / waitForNewImages / pollNewImages）用同一个 BUSY_SEL，
+// 这里改就必须同步改那边，否则「页面说忙、换号说闲」会互相打架。
+// 只认「生成中/打字中」两类状态类，且可见才算忙：不引入 loading —— 图片懒加载占位、
+// 骨架屏大量带 loading 类，会把它判成"正在生成"，导致自动换号永远被挡住。
 var DOUBAO_BUSY_SEL = '[class*="generating"], [class*="typing"]';
+
+// 刚因额度被拒的时间点（模块级，不落 storage：跨页面重载没有意义，重载后会话也清了）。
+// 只用于「忙态判定」：额度气泡本身常带 generating/typing 类，会一直留在会话里，
+// 若照常按 DOM 判忙，自动换号就会永远 busy → 页面一句"豆包正在生成中"卡死。
+// 用 var 声明：内容脚本重复注入时不因重复声明抛错。
+var __quotaFailedAt = 0;
+// 额度被拒后多久之内忽略 DOM 忙信号。额度气泡的类不会自己消失，窗口太长等于长期关掉判忙，
+// 30s 足够覆盖「切号→重跑这一款」的间隔，又不至于掩盖新任务真在跑。
+var DOUBAO_QUOTA_RECENT_MS = 30000;
+
+function isDoubaoQuotaRecent() {
+    try {
+        return __quotaFailedAt > 0 && (Date.now() - __quotaFailedAt) < DOUBAO_QUOTA_RECENT_MS;
+    } catch (_) { return false; }
+}
 
 function isDoubaoBusyInDom() {
     try {
@@ -1472,6 +1493,20 @@ function isDoubaoBusyInDom() {
         }
     } catch (_) {}
     return false;
+}
+
+// 忙态合成（唯一真值来源）：
+//   isProcessing —— 换色/改图/探测真在跑，任何情况下都算忙（换色途中切号会连页面带任务一起销毁）
+//   quotaRecent  —— 刚被额度拒过：DOM 忙信号不可信（额度气泡自带 generating 类），忽略
+//   domBusy      —— 套图生成中（套图不设 isProcessing，只能看 DOM）
+function doubaoComputeBusyState() {
+    const processing = !!isProcessing;
+    const quotaRecent = isDoubaoQuotaRecent();
+    let domBusy = false;
+    if (!quotaRecent) {
+        try { domBusy = isDoubaoBusyInDom(); } catch (_) { domBusy = false; }
+    }
+    return { busy: !!(processing || domBusy), processing, domBusy, quotaRecent };
 }
 
 // 在菜单里找目标行：先一级行，找不到再展开「更多账号」。
@@ -1513,8 +1548,10 @@ async function switchDoubaoAccount(name) {
     try {
         if (!target) return { ok: false, error: '缺少账号名' };
         // 换色/改图执行中（isProcessing）或套图生成中（DOM 忙）都不能切号：
-        // 整页重载会把执行中的任务连页面一起销毁
-        if (isProcessing || isDoubaoBusyInDom()) {
+        // 整页重载会把执行中的任务连页面一起销毁。
+        // 用合成后的忙态：刚被额度拒的 30s 内 DOM 忙信号来自那条额度气泡本身，
+        // 若这里仍按原始 DOM 判忙，前面 doubaoBusyState 放行了、这里又把换号挡回去，等于没修。
+        if (doubaoComputeBusyState().busy) {
             return { ok: false, busy: true, error: '豆包正在生成中，暂不切换账号' };
         }
 
@@ -1546,7 +1583,8 @@ async function switchDoubaoAccount(name) {
 
         // d) 点目标行 → 等重载（最长 25s）→ 再额外等 2s 让输入框出现
         //    点之前再判一次忙：从入口到找到账号行可能已过去数秒，期间套图可能刚开跑
-        if (isProcessing || isDoubaoBusyInDom()) {
+        //    （同样用合成忙态：额度窗口内忽略的只是那条额度气泡的残留类）
+        if (doubaoComputeBusyState().busy) {
             await closeAccountMenu();
             return { ok: false, busy: true, error: '豆包正在生成中，暂不切换账号' };
         }

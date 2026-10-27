@@ -310,7 +310,7 @@ function bgEnv(opts) {
                 if (r.ok === true) sb.__current = payload.name;
                 return Promise.resolve(r);
             }
-            if (payload.action === 'doubaoBusyState') return Promise.resolve({ ok: true, busy: false });
+            if (payload.action === 'doubaoBusyState') return Promise.resolve(o.busyState || { ok: true, busy: false });
             return Promise.resolve({ ok: false, error: '未预期的 action: ' + payload.action });
         }
     };
@@ -320,6 +320,48 @@ function bgEnv(opts) {
         sb, store, sent, switches,
         ledger: () => store.get('polo_doubao_accounts_v1'),
         call: req => sb.doubaoAutoSwitchAction(req || {})
+    };
+}
+
+// ---------- 内容脚本侧：忙态合成（从 content/doubao.js 抽真实函数） ----------
+const DOUBAO_JS = fs.readFileSync(path.join(__dirname, '..', 'chrome_extension', 'content', 'doubao.js'), 'utf8');
+const SUITE_DOUBAO_SRC = fs.readFileSync(path.join(__dirname, '..', 'chrome_extension', 'suite', 'suite-doubao.js'), 'utf8');
+
+function sliceFn(src, name) {
+    const lines = src.split('\n').map(l => l.replace(/\r$/, ''));
+    const startRe = new RegExp('^(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+    const s = lines.findIndex(l => startRe.test(l));
+    if (s < 0) throw new Error('未找到函数: ' + name);
+    for (let j = s + 1; j < lines.length; j++) if (lines[j] === '}') return lines.slice(s, j + 1).join('\n');
+    throw new Error('函数未闭合: ' + name);
+}
+function sliceDecl(src, name) {
+    const m = new RegExp('^\\s*(?:var|const|let)\\s+' + name + '\\s*=[^\\n]*$', 'm').exec(src);
+    if (!m) throw new Error('未找到声明: ' + name);
+    return m[0].trim();
+}
+const lit = s => { const m = /'([^']*)'/.exec(String(s || '')); return m ? m[1] : ''; };
+
+const BUSY_SRC = ['DOUBAO_BUSY_SEL', 'DOUBAO_QUOTA_RECENT_MS', '__quotaFailedAt'].map(n => sliceDecl(DOUBAO_JS, n))
+    .concat([sliceDecl(DOUBAO_JS, 'isProcessing')])
+    .concat(['isDoubaoVisible', 'isDoubaoQuotaRecent', 'isDoubaoBusyInDom', 'doubaoComputeBusyState'].map(n => sliceFn(DOUBAO_JS, n)))
+    .join('\n\n');
+
+// busyEls：DOM 里"可见的生成中节点"个数（0 = 页面不忙）
+function busyEnv(opts) {
+    const o = opts || {};
+    const els = Array.from({ length: o.busyEls || 0 }, () => ({ getClientRects: () => [{}], offsetHeight: 12 }));
+    const sb = { console: { log() {}, warn() {}, error() {} }, Date, Number, String, Array, Object,
+        document: { querySelectorAll: () => els } };
+    vm.createContext(sb);
+    vm.runInContext(BUSY_SRC, sb, { filename: 'doubao.js:busy-fns' });
+    return {
+        sb,
+        state: () => sb.doubaoComputeBusyState(),
+        // 模拟"刚被额度拒过 ms 毫秒"（ms 很大 = 窗口早就过去了）
+        setQuotaAgo: ms => vm.runInContext('__quotaFailedAt = Date.now() - ' + Number(ms) + ';', sb),
+        clearQuota: () => vm.runInContext('__quotaFailedAt = 0;', sb),
+        setProcessing: v => vm.runInContext('isProcessing = ' + (v ? 'true' : 'false') + ';', sb)
     };
 }
 
@@ -666,6 +708,98 @@ function bgEnv(opts) {
         ok(led.accounts.acct2.status === 'exhausted', '轮转：acct2 已被记成 exhausted（下轮也不会再选它）');
         const r3 = await env.call({ exclude: ['acct2', 'acct3'] });
         ok(r3.ok === true && r3.name === 'acct4', '轮转：第 3 轮切到 acct4', r3.name);
+    }
+
+    // ============================================================
+    // 忙态真值表：额度刚被拒 → 忽略 DOM 忙信号（否则额度气泡把换号永久挡住）
+    // ============================================================
+    const UNIFIED_SEL = '[class*="generating"], [class*="typing"]';
+
+    // ---- 19) 三处忙态选择器是同一个集合，且不含 loading ----
+    {
+        const contentSel = lit(sliceDecl(DOUBAO_JS, 'DOUBAO_BUSY_SEL'));
+        const suiteSel = lit((/const BUSY_SEL = ('[^']*');/.exec(SUITE_DOUBAO_SRC) || [])[1]);
+        ok(contentSel === UNIFIED_SEL, `内容脚本忙态选择器 = ${UNIFIED_SEL}`, contentSel);
+        ok(suiteSel === UNIFIED_SEL, '套图忙态选择器与内容脚本一致', suiteSel);
+        ok(!/loading/.test(contentSel) && !/loading/.test(suiteSel), '忙态集合里没有 loading（避免把懒加载占位判成生成中）');
+        const staleLoading = /class\*="loading"\], \[class\*="generating"\]/.test(SUITE_DOUBAO_SRC);
+        ok(!staleLoading, '套图里没有残留旧的 loading+generating 组合选择器');
+        ok(/sendResponse\(Object\.assign\(\{ ok: true \}, doubaoComputeBusyState\(\)\)\)/.test(DOUBAO_JS),
+            'doubaoBusyState 动作返回的就是 doubaoComputeBusyState（没有第二套判定）');
+        // 切号守卫必须也用合成忙态，否则前台放行、切号自己再挡回去 = 没修
+        const switchSrc = sliceFn(DOUBAO_JS, 'switchDoubaoAccount');
+        ok(!/isProcessing \|\| isDoubaoBusyInDom\(\)/.test(switchSrc),
+            'switchDoubaoAccount 里没有残留的 "isProcessing || isDoubaoBusyInDom()" 原始判忙');
+        ok((switchSrc.match(/doubaoComputeBusyState\(\)\.busy/g) || []).length === 2,
+            'switchDoubaoAccount 的两处忙态守卫都走合成忙态（入口 + 点击前）', String((switchSrc.match(/doubaoComputeBusyState\(\)\.busy/g) || []).length));
+    }
+
+    // ---- 20) 单点验证：30s 窗口内忽略 DOM；超过 30s 恢复；isProcessing 永远优先 ----
+    {
+        const e1 = busyEnv({ busyEls: 1 });
+        e1.setQuotaAgo(0);
+        let st = e1.state();
+        ok(st.busy === false && st.quotaRecent === true && st.domBusy === false,
+            '额度刚命中（DOM 有 generating）→ busy:false / quotaRecent:true', JSON.stringify(st));
+
+        const e2 = busyEnv({ busyEls: 1 });
+        e2.setQuotaAgo(31000);
+        st = e2.state();
+        ok(st.busy === true && st.domBusy === true && st.quotaRecent === false,
+            '超过 30s → 恢复按 DOM 判忙', JSON.stringify(st));
+
+        const e3 = busyEnv({ busyEls: 1 });
+        e3.setProcessing(true); e3.setQuotaAgo(0);
+        st = e3.state();
+        ok(st.busy === true && st.processing === true && st.quotaRecent === true,
+            'isProcessing 为真 → 即使 quotaRecent 在 30s 内仍返回 busy（换色在跑不能切号）', JSON.stringify(st));
+
+        const e4 = busyEnv({ busyEls: 0 });
+        e4.setQuotaAgo(29000);
+        st = e4.state();
+        ok(st.busy === false && st.quotaRecent === true, '窗口内且 DOM 不忙 → 依然 free', JSON.stringify(st));
+
+        const e5 = busyEnv({ busyEls: 1 });
+        e5.clearQuota();
+        st = e5.state();
+        ok(st.busy === true && st.quotaRecent === false, '从未额度失败（时间戳 0）→ 照常按 DOM 判忙', JSON.stringify(st));
+    }
+
+    // ---- 21) 8 种组合逐一核对：busy = isProcessing || (domBusy && !quotaRecent) ----
+    {
+        const bad = [];
+        for (const p of [false, true]) {
+            for (const q of [false, true]) {
+                for (const d of [false, true]) {
+                    const e = busyEnv({ busyEls: d ? 1 : 0 });
+                    e.setProcessing(p);
+                    e.setQuotaAgo(q ? 0 : 31000);
+                    const s = e.state();
+                    const expBusy = p || (d && !q);
+                    const expDom = d && !q;
+                    if (s.busy !== expBusy || s.domBusy !== expDom || s.processing !== p || s.quotaRecent !== q) {
+                        bad.push(`P${+p}Q${+q}D${+d}→${JSON.stringify(s)}`);
+                    }
+                }
+            }
+        }
+        ok(bad.length === 0, '8 种组合全部符合真值表', bad.join(' '));
+    }
+
+    // ---- 22) background 把 quotaRecent 透传出去（页面日志要能区分） ----
+    {
+        const env = bgEnv({ current: 'acct1', accounts: TEN, ledger: mkLedger({ acct1: 'ok' }),
+            busyState: { ok: true, busy: true, processing: false, domBusy: true, quotaRecent: true } });
+        const res = await env.call({ exclude: [] });
+        ok(res.ok === false && res.reason === 'busy' && res.quotaRecent === true,
+            '被忙态挡住时返回 reason:busy + quotaRecent:true', JSON.stringify(res));
+        ok(env.switches.length === 0, '被挡住时一次都不切号');
+
+        const env2 = bgEnv({ current: 'acct1', accounts: TEN, ledger: mkLedger({ acct1: 'ok' }),
+            busyState: { ok: true, busy: false, processing: false, domBusy: false, quotaRecent: true } });
+        const res2 = await env2.call({ exclude: [] });
+        ok(res2.ok === true, 'quotaRecent 单独存在（已忽略 DOM）不会把换号挡住', JSON.stringify(res2));
+        ok(env2.switches.length === 1, '该场景照常切号');
     }
 
     console.log(`通过 ${pass}，失败 ${fail}`);

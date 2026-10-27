@@ -17,7 +17,14 @@ function backend() {
     const c = { require, __dirname, console, setTimeout, clearTimeout, setInterval, clearInterval,
         URLSearchParams, AbortController, TextDecoder, process };
     vm.createContext(c); vm.runInContext(source.slice(0, source.indexOf('(async function main()')), c);
-    return vm.runInContext('createEnv()', c);
+    const env = vm.runInContext('createEnv()', c);
+    // 保存后真实性校验需要页面上采集信号；沙箱没有真实页面，这里默认返回"平台已确认成功"，
+    // 让"已保存行刷新不重填"的既有断言继续覆盖 verified 行（各用例可用 env.run 覆盖此 mock）。
+    env.ctx.chrome.scripting.executeScript = async ({ func }) => [{
+        result: (func && func.name === 'saveVerifyProbe')
+            ? { success: true, signals: ['successToast:保存成功'] } : true
+    }];
+    return env;
 }
 function page(e, task, row, tab, { store = new Map(), dropCompletion = false, stage = 3 } = {}) {
     const writes = [], clicks = [], messages = [], logs = [], listeners = {};

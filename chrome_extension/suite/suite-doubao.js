@@ -30,6 +30,24 @@ const SuiteDoubao = (() => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const log = (m, t = 'info') => console.log(`[suite-doubao][${t}] ${m}`);
 
+    /* ---------- 忙态（必须与 content/doubao.js 的 DOUBAO_BUSY_SEL 完全一致） ----------
+       只认「生成中/打字中」两类状态类，且**可见才算忙**：视口外的占位节点带同样的类，
+       按存在性判忙会把"图已出完"一直当成"还在生成"。
+       不引入 loading —— 图片懒加载占位/骨架屏大量带 loading 类，会持续误判为生成中。 */
+    const BUSY_SEL = '[class*="generating"], [class*="typing"]';
+
+    function isBusyVisible() {
+        try {
+            for (const el of document.querySelectorAll(BUSY_SEL)) {
+                if (!el) continue;
+                if (typeof el.getClientRects === 'function' && el.getClientRects().length === 0) continue;
+                if (typeof el.offsetHeight === 'number' && el.offsetHeight <= 0) continue;
+                return true;
+            }
+        } catch (_) {}
+        return false;
+    }
+
     /* ---------- 页面就绪 / 登录检查 ---------- */
     function findInput() {
         const sels = [
@@ -432,12 +450,14 @@ const SuiteDoubao = (() => {
             } else {
                 throw new Error('未找到可用发送按钮，未发送');
             }
-            // 发送证据：出现"生成中"或消息数增加
+            // 发送证据：出现"生成中"（与忙态同一套选择器，可见才算）或图片数变化。
+            // 这里额外认 loading：它只回答"点击有没有生效"，不参与忙态判定，多认一个类只会让
+            // "已发送"更保守（宁多等一会儿也不误报"无法确认已发送"）；忙态集合里绝不能加回 loading。
             const deadline = Date.now() + 15000;
             while (Date.now() < deadline) {
                 await sleep(400);
                 const now = getAllImageUrls();
-                const busy = !!document.querySelector('[class*="loading"], [class*="generating"], [class*="typing"]');
+                const busy = isBusyVisible() || !!document.querySelector('[class*="loading"]');
                 if (busy || now.length !== before.length) {
                     return { ok: true, baselineUrls: before, evidence: busy ? 'generating' : 'images-changed' };
                 }
@@ -469,7 +489,7 @@ const SuiteDoubao = (() => {
             const all = getAllImageUrls();
             const fresh = all.filter(u => !base.includes(u));
             last = fresh;
-            const busy = !!document.querySelector('[class*="loading"], [class*="generating"], [class*="typing"]');
+            const busy = isBusyVisible();   // 与忙态同一套选择器，可见才算忙
             if (fresh.length >= expectCount && !busy) break;
             if (!busy && fresh.length > 0 && Date.now() + 8000 > deadline) break;
         }
@@ -527,7 +547,7 @@ const SuiteDoubao = (() => {
         const raw=getAllImageUrls().filter(u=>!baseKeys.has(contentKeyOf(u)));
         const groups=new Map();for(const url of raw){const key=contentKeyOf(url);if(!groups.has(key))groups.set(key,url);}
         const images=[...groups.values()];
-        const busy=!!document.querySelector('[class*="generating"],[class*="typing"]');
+        const busy=isBusyVisible();   // 同上：统一选择器，可见才算忙
         if(busy||images.length<expectCount)return {ready:false,count:images.length};
         if(images.length>expectCount)throw new Error(`生成结果数量不符：期望${expectCount}张，去重后${images.length}张，请检查本次对话`);
         return {ready:true,images:await materializeImages(images),rawCount:images.length,baselineCount:base.length,mergedGroups:0};

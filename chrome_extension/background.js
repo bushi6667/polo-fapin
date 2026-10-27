@@ -224,6 +224,8 @@ const PUBLISH_LOG_KEY = 'polo_publish_log';
 const PUBLISH_LOG_MAX = 500;
 const PUBLISH_SETTINGS_KEY = 'polo_publish_settings';
 const PUBLISH_VERIFIED_SAVED_KEY = 'polo_publish_verified_saved';   // 保存记录（用户定义：页3菜单点击保存；记录来源）
+// 点击保存后等待平台反馈的时长：太短采不到 toast/红字，太长拖慢批量。测试里置 0。
+const SAVE_VERIFY_WAIT_MS = 2500;
 const PUBLISH_LEGACY_UPLOADED_KEY = 'polo_publish_legacy_uploaded'; // 旧 uploaded 标记：历史待核，仅供展示
 const PUBLISH_TICK_MS = 30000;                          // 运行期资源巡检间隔上限
 
@@ -473,6 +475,9 @@ async function buildPublishStatePayload() {
     const savedMap = await getVerifiedSavedMap(fileKey);
     const taskRows = t ? new Set(Object.keys(t.products || {}).concat((t.remaining || []).map(String), (t.filledRows || []).map(String))) : null;
     const savedCount = Object.keys(savedMap).filter(row => !taskRows || taskRows.has(row)).length;
+    // 未确认的保存：数量仍计入 savedCount（用户定义：点了保存即记账），但单独暴露出来便于核对
+    const unverifiedSavedCount = Object.keys(savedMap)
+        .filter(row => (!taskRows || taskRows.has(row)) && isUnverifiedSave(savedMap[row])).length;
     const filledRows = (t && Array.isArray(t.filledRows)) ? t.filledRows : [];
     const pendingSaveCount = filledRows.filter(r => !savedMap[r]).length;
     return {
@@ -490,6 +495,7 @@ async function buildPublishStatePayload() {
         remaining: t ? t.remaining.length : 0,
         pendingSaveCount,
         savedCount,
+        unverifiedSavedCount,
         pauseReason: t ? t.pauseReason : '',
         pauseDetail: t ? t.pauseDetail : '',
         // 行失效状态与资源暂停原因分开：界面按 rowRetryable 决定是否显示重试/跳过
@@ -517,6 +523,125 @@ async function getVerifiedSavedMap(fileKey) {
     return all[key] || {};
 }
 
+// 未确认的保存记录：点了保存但页面上既没成功反馈也没报错（例如提交后异步校验还没结束）。
+// 语义：草稿重复保存 ≠ 重复发布，所以这类行「允许重发时重填」，不当成"已保存过"跳过。
+function isUnverifiedSave(entry) {
+    return !!(entry && entry.unverified === true);
+}
+
+// 保存后在页面上采集反馈信号。必须是自包含函数（会被序列化进页3执行），不能引用外部变量。
+// 返回：{ error, success, navigated, buttonGone, buttonDisabled, signals[] }
+async function saveVerifyProbe(waitMs) {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const out = { error: false, success: false, navigated: false, buttonGone: false, buttonDisabled: false, signals: [] };
+    const txt = el => el ? String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    const visible = el => {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const r = el.getBoundingClientRect();
+        if (!r || r.width <= 0 || r.height <= 0) return false;
+        let st = null;
+        try { st = window.getComputedStyle(el); } catch (_) {}
+        if (st && (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0)) return false;
+        return true;
+    };
+    const redText = el => {
+        try {
+            const st = window.getComputedStyle(el);
+            const m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(st.color || '');
+            if (!m) return false;
+            return Number(m[1]) >= 150 && Number(m[2]) <= 110 && Number(m[3]) <= 110;
+        } catch (_) { return false; }
+    };
+    // 明确的校验错误文案（故意不含"请输入/请选择"：这两句大量出现在常驻占位提示里，会误判）
+    // HARD_TEXT：自身就能定性为校验失败（必填类语义只出现在真报错里）
+    const HARD_TEXT = /必填|不能为空|格式不正确/;
+    // SOFT_TEXT：「请上传/上传失败」在阿里发品页是常驻提示（"请上传主图/建议白底图"），
+    // 纯文案命中会把每一款都判成校验失败。必须同时有 error 类/红字/父项 has-error 才算失败，
+    // 否则只记进 signals 当诊断（formWarnText），不影响结论。
+    const SOFT_TEXT = /请上传|上传失败/;
+    const ERR_TOAST = /失败|错误|异常/;
+    const OK_TOAST = /保存成功|已保存|操作成功/;
+    const url0 = location.href;
+    // 同一个信号每轮都会命中，去重后再累积（否则 2.5s 窗口能把 signals 刷满重复项）
+    const pushSignal = (s) => {
+        const v = String(s || '').slice(0, 80);
+        if (v && out.signals.indexOf(v) < 0) out.signals.push(v);
+    };
+    const saveButtons = () => Array.from(document.querySelectorAll('button')).filter(b => txt(b) === '保存');
+    const deadline = Date.now() + Math.max(0, Number(waitMs) || 0);
+    while (true) {
+        for (const help of Array.from(document.querySelectorAll('.next-form-item-help,[class*="form-item-help"]'))) {
+            if (!visible(help)) continue;
+            const t = txt(help);
+            if (!t) continue;
+            const item = help.closest ? help.closest('.next-form-item,[class*="form-item"]') : null;
+            const hard = String(help.className || '').includes('error') || redText(help)
+                || (!!item && String(item.className || '').includes('error'));
+            if (hard || HARD_TEXT.test(t)) {
+                out.error = true;
+                pushSignal('formError:' + t.slice(0, 40));
+                break;
+            }
+            // 只有"常驻提示"文案、没有任何报错样式 → 诊断信号，不判失败
+            if (SOFT_TEXT.test(t)) pushSignal('formWarnText:' + t.slice(0, 40));
+        }
+        for (const el of Array.from(document.querySelectorAll('[class*="toast"],[class*="notification"],[class*="Message"],[class*="Notification"],[role="alert"]'))) {
+            if (!visible(el)) continue;
+            const t = txt(el);
+            if (!t || t.length > 80) continue;
+            if (ERR_TOAST.test(t)) { out.error = true; pushSignal('errorToast:' + t.slice(0, 40)); }
+            else if (OK_TOAST.test(t)) { out.success = true; pushSignal('successToast:' + t.slice(0, 40)); }
+        }
+        if (location.href !== url0) { out.navigated = true; pushSignal('url:' + String(location.href).slice(0, 60)); }
+        const now = saveButtons();
+        if (now.length === 0) { out.buttonGone = true; pushSignal('buttonGone'); }
+        else if (now.every(b => !!b.disabled)) { out.buttonDisabled = true; pushSignal('buttonDisabled'); }
+        // 只有「明确报错 / 明确成功 / 已跳转」才提前结束轮询。
+        // buttonGone / buttonDisabled 只是"提交已生效"的旁证，不能 break：点保存后按钮往往
+        // 0-200ms 就 disabled，一 break 整个 2.5s 窗口就作废了，异步返回的拒绝文案永远采不到。
+        if (out.error || out.success || out.navigated) break;
+        if (Date.now() >= deadline) break;
+        await sleep(200);
+    }
+    return out;
+}
+
+// 信号 → 结论。明确报错优先于成功（同一时刻既飘红又跳转时，宁可让人工核对也不算已保存）。
+function decideSaveVerification(raw) {
+    if (!raw || typeof raw !== 'object') return { verified: false, failure: false, signals: [] };
+    const signals = Array.isArray(raw.signals) ? raw.signals.slice(0, 8) : [];
+    if (raw.error) return { verified: false, failure: true, signals };
+    if (raw.success) return { verified: true, failure: false, signals };
+    return { verified: false, failure: false, signals };
+}
+
+// 校验本身跑不起来（标签已跳走/调试上下文失效/无 scripting 权限）→ 先看是不是"提交后跳转"，
+// 不是的话按"无法确认"处理，不能当明确失败。
+async function readTabUrl(tabId) {
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        return (tab && tab.url) || '';
+    } catch (_) { return ''; }
+}
+
+async function verifyPublishSaved(tabId, beforeUrl) {
+    let raw = null;
+    try {
+        const results = await chrome.scripting.executeScript({ target: { tabId }, args: [SAVE_VERIFY_WAIT_MS], func: saveVerifyProbe });
+        raw = (results && results[0]) ? results[0].result : null;
+    } catch (e) {
+        const nowUrl = await readTabUrl(tabId);
+        if (beforeUrl && nowUrl && nowUrl !== beforeUrl) {
+            // 提交成功后页面跳走/重载会销毁执行上下文，URL 变化本身就是成功信号
+            return { verified: true, failure: false, signals: ['url:' + String(nowUrl).slice(0, 60)] };
+        }
+        console.warn('⚠️ 保存校验未能执行，按未确认处理：' + e.message);
+        await appendPublishLog({ level: 'saveVerifyError', error: e.message });
+        return { verified: false, failure: false, signals: [] };
+    }
+    return decideSaveVerification(raw);
+}
+
 // 页3人工保存入口：点击与记账在后台完成，保存触发页面刷新也不会丢失记账。
 async function savePublishProduct(request, sender, clickButton = true) {
     return withPublishLock(async () => {
@@ -539,6 +664,7 @@ async function savePublishProduct(request, sender, clickButton = true) {
         } else if (request.taskId) return { ok: false, error: '原任务文件信息缺失，未记入其他文件' };
         else fileKey = getFilePrefix();
 
+        const beforeUrl = String((sender.tab && sender.tab.url) || sender.url || '');
         let clicked = clickButton ? await realClickCDP(tabId, x, y) : { ok: true };
         if (!clicked.ok) {
             try {
@@ -551,16 +677,33 @@ async function savePublishProduct(request, sender, clickButton = true) {
             } catch (_) {}
         }
         if (!clicked.ok) return { ok: false, error: '保存按钮未点击，未标记已保存' };
+        // 点成功 ≠ 保存成功：平台可能只飘红不跳转。先采集反馈，再决定记不记账。
+        // recordPublishSaveClick（人工点击）不校验：报错用户自己看得见，且旧行为是"点了就记"。
+        const verdict = clickButton
+            ? await verifyPublishSaved(tabId, beforeUrl)
+            : { verified: true, failure: false, signals: [] };
+        if (verdict.failure) {
+            console.warn(`⚠️ 第 ${row} 行保存后被平台拒绝，未标记已保存：${verdict.signals.join(' | ') || '（无详情）'}`);
+            await appendPublishLog({ level: 'saveRejected', row, fileKey, signals: verdict.signals });
+            return { ok: false, error: '平台校验未通过，未标记已保存', row, fileKey, source: 'page3_save_click', verified: false, signals: verdict.signals };
+        }
+        const unverified = !verdict.verified;
         const stored = await new Promise(resolve => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, resolve));
         const all = stored[PUBLISH_VERIFIED_SAVED_KEY] || {};
-        all[fileKey] = { ...(all[fileKey] || {}), [row]: { at: Date.now(), source: 'page3_save_click', taskId: request.taskId || null } };
+        const record = { at: Date.now(), source: 'page3_save_click', taskId: request.taskId || null, verified: verdict.verified };
+        if (unverified) record.unverified = true;
+        all[fileKey] = { ...(all[fileKey] || {}), [row]: record };
         await new Promise((resolve, reject) => chrome.storage.local.set({ [PUBLISH_VERIFIED_SAVED_KEY]: all }, () => {
             if (chrome.runtime.lastError) reject(new Error('已点击保存，但保存记录写入失败：' + chrome.runtime.lastError.message));
             else resolve();
         }));
-        notifyAssistant('publishSaved', { row, fileKey, source: 'page3_save_click' });
+        // 未确认时把采集到的诊断信号（含 formWarnText：常驻「请上传主图」这类纯文案）一起打出来，
+        // 人工核对该行时能看出「为什么没判成功、为什么也没判失败」。
+        if (unverified) console.warn(`⚠️ 第 ${row} 行保存未确认（既无成功反馈也无报错），已记账但允许重发重填，请人工核对`
+            + (verdict.signals.length ? `：${verdict.signals.join(' | ')}` : ''));
+        notifyAssistant('publishSaved', { row, fileKey, source: 'page3_save_click', verified: verdict.verified, unverified });
         await broadcastPublishState();
-        return { ok: true, row, fileKey, source: 'page3_save_click' };
+        return { ok: true, row, fileKey, source: 'page3_save_click', verified: verdict.verified, unverified, signals: verdict.signals };
     });
 }
 
@@ -1927,20 +2070,35 @@ function doubaoSendToTab(tabId, payload, timeoutMs) {
 }
 
 // 发品/换色/套图是否在跑（复用既有判据：套图执行锁 + 换色执行身份 + 内容脚本忙态）
+// 返回结构化状态（调用方一律只认 .busy）：
+//   processing  真在跑任务（执行锁/在途换色/内容脚本 isProcessing）
+//   domBusy     套图生成中（套图不设 isProcessing，只能看 DOM 忙类）
+//   quotaRecent 内容脚本 30s 内刚被额度拒过 → 它已按规则忽略 DOM 忙信号，
+//               这里如实透传，页面日志才能区分「真在生成」和「额度气泡把换号挡住了」
 async function doubaoIsAccountBusy() {
-    try { if (globalThis.__suiteExecLock) return true; } catch (_) {}
+    const state = { busy: false, processing: false, domBusy: false, quotaRecent: false };
+    try { if (globalThis.__suiteExecLock) { state.busy = true; state.processing = true; return state; } } catch (_) {}
     try {
         const exec = await getActiveColorExec();
-        if (exec && (exec.state === 'pending' || exec.state === 'accepted')) return true;
+        if (exec && (exec.state === 'pending' || exec.state === 'accepted')) {
+            state.busy = true;
+            state.processing = true;
+            return state;
+        }
     } catch (_) {}
     try {
         const tab = await findDoubaoTab();
         if (tab) {
             const st = await doubaoSendToTab(tab.id, { action: 'doubaoBusyState' }, 8000).catch(() => null);
-            if (st && st.ok === true && st.busy === true) return true;
+            if (st && st.ok === true) {
+                state.quotaRecent = st.quotaRecent === true;
+                state.processing = state.processing || st.processing === true;
+                state.domBusy = st.domBusy === true;
+                state.busy = state.busy || state.processing || state.domBusy;
+            }
         }
     } catch (_) {}
-    return false;
+    return state;
 }
 
 // 单次切号（含重载断通道的复核）。返回内容脚本原语的结果，或 ok:false+needLogin/busy/error
@@ -2115,7 +2273,7 @@ async function doubaoScanAccountsOnce(mode) {
     let interrupted = '';
     for (const name of targets) {
         if (interrupted) { errors.push({ name, error: interrupted }); continue; }
-        if (await doubaoIsAccountBusy()) {
+        if ((await doubaoIsAccountBusy()).busy) {
             interrupted = '发品/换色/套图任务开始执行，扫描中止';
             errors.push({ name, error: interrupted });
             continue;
@@ -2151,7 +2309,7 @@ async function doubaoScanAccountsAction(mode) {
     if (doubaoScanInFlight) return { ok: false, reason: 'busy', error: '账号扫描/自动切号已在进行' };
     doubaoScanInFlight = true;
     try {
-        if (await doubaoIsAccountBusy()) return { ok: false, reason: 'busy', error: '发品/换色/套图任务正在进行，暂不扫描账号' };
+        if ((await doubaoIsAccountBusy()).busy) return { ok: false, reason: 'busy', error: '发品/换色/套图任务正在进行，暂不扫描账号' };
         return await doubaoScanAccountsOnce(mode === 'all' ? 'all' : 'new');
     } catch (e) {
         return { ok: false, reason: 'error', error: e.message, ledger: await doubaoLoadLedger() };
@@ -2238,7 +2396,11 @@ async function doubaoAutoSwitchAction(request) {
     const tried = [];
     try {
         if (doubaoScanInFlight) return { ok: false, reason: 'busy', ledger: await doubaoLoadLedger(), tried };
-        if (await doubaoIsAccountBusy()) return { ok: false, reason: 'busy', ledger: await doubaoLoadLedger(), tried };
+        const busy0 = await doubaoIsAccountBusy();
+        if (busy0.busy) {
+            // quotaRecent：内容脚本刚被额度拒过、已按规则忽略 DOM 忙信号，页面日志要能区分
+            return { ok: false, reason: 'busy', quotaRecent: busy0.quotaRecent, ledger: await doubaoLoadLedger(), tried };
+        }
 
         const tab = await findDoubaoTab();
         if (!tab) return { ok: false, reason: 'none', error: '未找到豆包页面', ledger: await doubaoLoadLedger(), tried };
@@ -2287,8 +2449,9 @@ async function doubaoAutoSwitchAction(request) {
         doubaoScanInFlight = true;
         try {
             for (const name of cand.order) {
-                if (await doubaoIsAccountBusy()) {
-                    return { ok: false, reason: 'busy', error: '发品/换色/套图任务正在进行，暂不切号', ledger, tried };
+                const busyN = await doubaoIsAccountBusy();
+                if (busyN.busy) {
+                    return { ok: false, reason: 'busy', quotaRecent: busyN.quotaRecent, error: '发品/换色/套图任务正在进行，暂不切号', ledger, tried };
                 }
                 // 只切号：不发任何生成请求（不 probe、不试生图、不占额度）
                 const sw = await doubaoSwitchForScan(tab.id, name);
@@ -2958,7 +3121,10 @@ async function handleSharedAction(request, sendResponse, sender) {
                 // 已填入与已保存是独立状态：完成一轮后待保存，刷新不重复填入。
                 const alreadyFilled = (t.filledRows || []).some(row => Number(row) === Number(rowNum));
                 const saved = await getVerifiedSavedMap(taskFileKey(t));
-                const autoFillAllowed = !saved[rowNum] && !alreadyFilled
+                // 未确认的保存不算"已保存"：重发同一文件时允许重填核对（草稿重复保存 ≠ 重复发布）
+                const savedRow = saved[rowNum];
+                const savedVerified = !!(savedRow && !isUnverifiedSave(savedRow));
+                const autoFillAllowed = !savedVerified && !alreadyFilled
                     && Number(t.currentRow) === Number(rowNum) && !!sender.tab && sender.tab.id === t.currentTabId;
                 if (t.products && Object.prototype.hasOwnProperty.call(t.products, String(rowNum))) {
                     const data = t.products[String(rowNum)];

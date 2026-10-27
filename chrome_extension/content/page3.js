@@ -3471,11 +3471,18 @@ async function saveDraft(product) {
             x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)
         });
         if (response && response.ok) {
-            log('✅ 已点击保存，已按你的规则标记保存', 'success');
-            results.push('✅ 已保存');
+            if (response.verified === false) {
+                // 点到了保存，但页面上既没成功反馈也没报错：不能冒充"已自动保存"
+                log('⚠️ 已点击保存但未确认成功，请核对（页面无成功提示）', 'warn');
+                results.push('⚠️ 保存未确认，请核对');
+            } else {
+                log('✅ 平台已确认保存成功', 'success');
+                results.push('✅ 已保存');
+            }
         } else {
-            log('⚠️ ' + (response?.error || '保存操作未完成'), 'warn');
-            results.push('⚠️ ' + (response?.error || '保存操作未完成'));
+            // 明确失败（平台校验拒绝 / 按钮没点到）：用 error 级别，避免被当成"自动保存成功"
+            log('❌ ' + (response?.error || '保存操作未完成'), 'error');
+            results.push('❌ ' + (response?.error || '保存操作未完成'));
         }
     } else {
         log('⚠️ 未找到保存按钮', 'warn');
@@ -4055,9 +4062,12 @@ function createPage3Panel() {
                 // 全部填入成功：自动保存，保存成功后才上报完成
                 try {
                     const saveResults = await saveDraft(currentProduct);
-                    const saveFailed = (saveResults || []).some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+                    const saveList = saveResults || [];
+                    const hardFail = saveList.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
+                    const saveFailed = saveList.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
                     if (saveFailed) {
-                        log('⚠️ 自动保存未完成：' + saveResults.join('；') + '，请手动点击页面底部的保存按钮', 'warn');
+                        // 明确失败给 error，仅"未确认"给 warn；都不打「✅ 已自动保存」
+                        log((hardFail ? '❌ ' : '⚠️ ') + '自动保存未完成：' + saveList.join('；') + '，请手动点击页面底部的保存按钮', hardFail ? 'error' : 'warn');
                     } else {
                         autoSaved = true;
                         log('✅ 已自动保存', 'success');
@@ -4300,11 +4310,14 @@ async function loadBatchProduct(rowNum) {
             // autoFillAllowed === false 那条分支，就会静默 return、不上报，
             // 队列停在当前行直到 10 分钟超时（同文件同几行重发时 100% 命中）。
             const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows', taskId: getTaskFromUrl() });
-            if (uploadedResp && uploadedResp.ok && uploadedResp.rows && uploadedResp.rows[rowNum]) {
+            const savedEntry = (uploadedResp && uploadedResp.ok && uploadedResp.rows) ? uploadedResp.rows[rowNum] : null;
+            // 未确认的保存（unverified）不算"已保存过"：草稿重复保存 ≠ 重复发布，重发时允许重填核对。
+            if (savedEntry && savedEntry.unverified !== true) {
                 log(`⚠️ 第${rowNum}行已保存过，跳过自动填入并推进队列`, 'warn');
                 await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true });
                 return false;
             }
+            if (savedEntry) log(`⚠️ 第${rowNum}行上次保存未确认，重新填入由平台复核（不当作已保存跳过）`, 'warn');
 
             if (alreadyPrefilled || resp.autoFillAllowed === false) {
                 log('该页已填入或不允许自动填写，刷新不重复填入；未保存内容待保存', 'info');
@@ -4353,9 +4366,12 @@ async function loadBatchProduct(rowNum) {
                     // 全部填入成功：自动保存，保存成功后才上报完成
                     try {
                         const saveResults = await saveDraft(currentProduct);
-                        const saveFailed = (saveResults || []).some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+                        const saveList = saveResults || [];
+                        const hardFail = saveList.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
+                        const saveFailed = saveList.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
                         if (saveFailed) {
-                            log('⚠️ 自动保存未完成：' + saveResults.join('；') + '，请手动点击页面底部的保存按钮', 'warn');
+                            // 明确失败给 error，仅"未确认"给 warn；都不打「✅ 已自动保存」
+                            log((hardFail ? '❌ ' : '⚠️ ') + '自动保存未完成：' + saveList.join('；') + '，请手动点击页面底部的保存按钮', hardFail ? 'error' : 'warn');
                         } else {
                             autoSaved = true;
                             log('✅ 已自动保存', 'success');
