@@ -547,6 +547,9 @@ body::after {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    /* 控件多、面板窄时换行，而不是把文字压成竖排 */
+    flex-wrap: wrap;
+    gap: 6px 10px;
     padding: 8px 12px;
     margin-bottom: 10px;
     background: rgba(77, 150, 255, 0.1);
@@ -558,7 +561,18 @@ body::after {
 .batch-bar-left {
     display: flex;
     align-items: center;
-    gap: 8px;
+    flex-wrap: wrap;          /* 同上：宁换行不压字 */
+    gap: 6px 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+/* 工具条里所有文字都不许折行（否则窄面板会出现竖排的「全 选」「跳 过 已 保 存」） */
+.batch-bar .batch-select-all span,
+.batch-bar .batch-skip-uploaded span,
+.batch-bar .batch-count,
+.batch-bar .batch-size-field,
+.batch-bar .batch-size-field span {
+    white-space: nowrap;
 }
 .batch-select-all {
     display: flex;
@@ -609,8 +623,8 @@ body::after {
     color: rgba(255,255,255,0.6);
 }
 .batch-size-field input {
-    width: 56px;
-    padding: 3px 6px;
+    width: 48px;
+    padding: 3px 4px;
     border-radius: 8px;
     border: 1px solid rgba(255,255,255,0.18);
     background: rgba(0,0,0,0.25);
@@ -629,6 +643,10 @@ body::after {
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
+    flex: 0 0 auto;           /* 按钮不许被挤窄 */
+    white-space: nowrap;      /* 「批量发品」不折成两行 */
+    margin-left: auto;        /* 换行后仍靠右，不像个孤零零的块 */
+    min-width: 96px;
     transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast), transform 0.2s;
     box-shadow: 0 2px 8px rgba(77, 150, 255, 0.3);
 }
@@ -1747,14 +1765,15 @@ body::after {
                             <span>跳过已保存</span>
                         </div>
                         <span class="batch-count">已选 <strong id="selectedCount">0</strong> 个</span>
-                        <label class="batch-size-field" id="pubBatchSizeField"
-                               title="每批发几款（1-500）。改的是下一批，不会打断当前批次">
-                            <span>每批</span>
-                            <input type="number" id="pubBatchSize" min="1" max="500" step="1" value="50"
-                                   aria-label="每批款数（1-500）" />
-                            <span>款</span>
-                        </label>
                     </div>
+                    <!-- 「每批」放在左侧分组外：窄面板时它和按钮同一行，工具条只占两行 -->
+                    <label class="batch-size-field" id="pubBatchSizeField"
+                           title="每批发几款（1-500）。改的是下一批，不会打断当前批次">
+                        <span>每批</span>
+                        <input type="number" id="pubBatchSize" min="1" max="500" step="1" value="50"
+                               aria-label="每批款数（1-500）" />
+                        <span>款</span>
+                    </label>
                     <button class="batch-publish-btn" id="batchPublishBtn" disabled onclick="batchPublish()">批量发品</button>
                 </div>
                 <div class="product-cards" id="productCards"></div>
