@@ -5007,22 +5007,24 @@ async function syncSuiteBadge(fileKey, rowNum) {
     addSuiteGeneratedBadge(rowNum);
 }
 
-function suiteSetProgress({ jobId, fileKey, rowNum, phase, done, currentKey, paused }) {
+// total 缺省 5（整套）；指定重生成时传本次要跑的步骤数 —— 否则进度条永远按 5 张算，
+// 只重生成 1 张也会显示成"整套套图在跑"（用户实测反馈）。
+function suiteSetProgress({ jobId, fileKey, rowNum, phase, done, currentKey, paused, total }) {
     const previous = readSuiteAutoState();
     if (previous?.jobId === jobId && previous.paused) throw Error('当前套图已暂停');
-    // 与颜色图一致的进度条（done/5）
+    const goal = Math.max(1, Number(total) || SUITE_FIVE_TOTAL);
     try {
         const wrap = document.getElementById('suiteProgressWrap');
         const fill = document.getElementById('suiteFill');
         if (wrap && fill) {
             wrap.style.display = 'block';
-            const pct = Math.max(0, Math.min(100, Math.round(((done || 0) / SUITE_FIVE_TOTAL) * 100)));
+            const pct = Math.max(0, Math.min(100, Math.round(((done || 0) / goal) * 100)));
             fill.style.width = pct + '%';
         }
     } catch (_) {}
     saveSuiteAutoState({
         taskId: jobId, jobId, fileKey, rowNum,
-        phase: phase || 'generating', done: done || 0, total: SUITE_FIVE_TOTAL,
+        phase: phase || 'generating', done: done || 0, total: goal,
         currentKey: currentKey || '', paused: !!paused
     });
 }
@@ -5078,7 +5080,7 @@ async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted
         }
         if (!selected.length) {
             await clearSuiteFive(fileKey, rowNum);
-            suiteSetProgress({ jobId: frozen.jobId, fileKey, rowNum, phase: 'completed', done: SUITE_FIVE_TOTAL });
+            suiteSetProgress({ jobId: frozen.jobId, fileKey, rowNum, phase: 'completed', done: SUITE_FIVE_TOTAL, total: SUITE_FIVE_TOTAL });
             await syncSuiteBadge(fileKey, rowNum);
             updateSuiteStatus('✅ 五张成品已齐全，无需重新执行');
             return null;
@@ -5137,12 +5139,14 @@ async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted
         try { await persistSuiteFive(five); }
         catch (e) { throw new Error('任务冻结数据保存失败，未发送任何生成请求：' + e.message); }
 
-        // 进度按五张最终成品统计（跨任务补齐也计入）。
-        const total = SUITE_FIVE_TOTAL;
+        // 进度口径：整套按 5 张最终成品统计（跨任务补齐也计入）；指定重生成按本次要跑的步骤数，
+        // 否则只跑 1 步也显示成 5 张进度（用户反馈"指定重生成变成整套套图"）。
+        const total = targeted ? Math.max(1, selected.length) : SUITE_FIVE_TOTAL;
+        let targetedDone = 0;
         const indexRecs = await SuiteCore.ResultStore().list(fileKey, rowNum).catch(() => []);
         const doneSet = new Set(restart ? [] : (indexRecs || []).map(r => String(r.key)));
         let doneCount = SUITE_STEP_KEYS.filter(k => doneSet.has(k)).length;
-        suiteSetProgress({ jobId, fileKey, rowNum, phase: 'preparing', done: doneCount });
+        suiteSetProgress({ jobId, fileKey, rowNum, phase: 'preparing', done: doneCount, total });
 
         const ctxPost = {
             excelRow: window.ExcelRow.build(five.excelRowSpec),
@@ -5165,7 +5169,7 @@ async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted
             const aiSteps=selected.filter(s=>sourceOf[s.key]==='generated'&&!five.generated?.[s.key]?.dataUrl);
             if(aiSteps.length){
                 const targetKeys=aiSteps.map(s=>String(s.key));
-                suiteSetProgress({jobId,fileKey,rowNum,phase:'generating',done:doneCount});
+                suiteSetProgress({jobId,fileKey,rowNum,phase:'generating',done:doneCount,total});
                 // 断点续跑：旧的合并任务若已结束（generated/失败/中断）或已不存在，就不能再等它，必须重新发起；
                 // 只有仍在执行中的旧任务才复用，避免空等到 waitSuiteAcquired 的 100 秒超时。
                 if(five.groupTaskId){
@@ -5202,7 +5206,7 @@ async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted
             const source = sourceOf[key];
             let inputBlob;
             if (source === 'generated') {
-                suiteSetProgress({ jobId, fileKey, rowNum, phase: 'generating', done: doneCount, currentKey: key });
+                suiteSetProgress({ jobId, fileKey, rowNum, phase: 'generating', done: doneCount, currentKey: key, total });
                 if (btn) btn.textContent = `⏳ 生成中 ${key} ${step.name}（${doneCount}/${total}）`;
                 updateSuiteStatus(`⏳ 套图 ${doneCount}/${total}｜${key} ${step.name}：生成中`);
                 let gen = five.generated && five.generated[key];
@@ -5226,26 +5230,26 @@ async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted
                 inputBlob = await suiteBlobFromDataUrl(gen.dataUrl);
             } else {
                 // 直接使用产品主图：111、444 各自从冻结的原始主图开始，互不作为输入。
-                suiteSetProgress({ jobId, fileKey, rowNum, phase: 'processing', done: doneCount, currentKey: key });
+                suiteSetProgress({ jobId, fileKey, rowNum, phase: 'processing', done: doneCount, currentKey: key, total });
                 if (btn) btn.textContent = `⏳ 后处理 ${key} ${step.name}（${doneCount}/${total}）`;
                 updateSuiteStatus(`⏳ 套图 ${doneCount}/${total}｜${key} ${step.name}：直接使用产品主图，后处理中`);
                 inputBlob = mainBlob;
             }
 
-            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'processing', done: doneCount, currentKey: key });
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'processing', done: doneCount, currentKey: key, total });
             if (btn) btn.textContent = `⏳ 后处理 ${key} ${step.name}（${doneCount}/${total}）`;
             const post = await SuitePostprocess.runStep(step, key, inputBlob, ctxPost);
             if (!post.ok) throw new Error(`${key} ${step.name}：后处理失败 ${post.error || ''}`);
 
-            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'saving', done: doneCount, currentKey: key });
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'saving', done: doneCount, currentKey: key, total });
             if (btn) btn.textContent = `⏳ 保存 ${key} ${step.name}（${doneCount}/${total}）`;
             const saved = await suiteSaveOne({ key, blob: post.output, fileKey, rowNum, jobId });
             five.done[key] = { filename: saved.filename, bytes: saved.bytes, width: saved.width, height: saved.height, mode: saved.mode, applied: post.applied || 'none' };
             doneSet.add(key);
-            doneCount = SUITE_STEP_KEYS.filter(k => doneSet.has(k)).length;
-            suiteSetProgress({ jobId, fileKey, rowNum, phase: doneCount >= total ? 'completed' : 'generating', done: doneCount, currentKey: key });
+            doneCount = targeted ? (++targetedDone) : SUITE_STEP_KEYS.filter(k => doneSet.has(k)).length;
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: doneCount >= total ? 'completed' : 'generating', done: doneCount, currentKey: key, total });
             await persistSuiteFive(five);
-            updateSuiteStatus(`✅ 套图 ${doneCount}/${total}｜${key} ${step.name} 已保存：${saved.filename}`);
+            updateSuiteStatus(`${targeted ? '✅ 指定重生成' : '✅ 套图'} ${doneCount}/${total}｜${key} ${step.name} 已保存：${saved.filename}`);
         }
 
         // ⑧ 完成：清冻结、同步角标（同一 fileKey+rowNum 的 111/222/333/444/666 全部存在成品才显示「套图」）
@@ -5255,15 +5259,22 @@ async function runSuiteFiveJob({ keys, resume = false, restart = false, targeted
         const finalRecs = await SuiteCore.ResultStore().list(fileKey, rowNum).catch(() => []);
         const haveKeys = new Set((finalRecs || []).map(r => String(r.key)));
         const missingKeys = SUITE_STEP_KEYS.filter(k => !haveKeys.has(k));
-        if (missingKeys.length) {
-            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'completed', done: SUITE_STEP_KEYS.filter(k => haveKeys.has(k)).length });
+        // 指定重生成只跑部分步骤，缺的另外几张不是本次目标，不能报"缺 111/222…"。
+        if (missingKeys.length && !targeted) {
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'completed', done: SUITE_STEP_KEYS.filter(k => haveKeys.has(k)).length, total: SUITE_FIVE_TOTAL });
             await syncSuiteBadge(fileKey, rowNum);
             updateSuiteStatus(`⚠️ 本任务已保存 ${SUITE_FIVE_TOTAL - missingKeys.length}/${SUITE_FIVE_TOTAL} 张；缺 ${missingKeys.join('/')}，暂不显示「套图」角标`);
         } else {
-            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'completed', done: SUITE_FIVE_TOTAL });
+            suiteSetProgress({ jobId, fileKey, rowNum, phase: 'completed', done: targeted ? total : SUITE_FIVE_TOTAL, total: targeted ? total : SUITE_FIVE_TOTAL });
             await syncSuiteBadge(fileKey, rowNum);
-            updateSuiteStatus(`✅ 套图完成：111/222/333/444/666 五张成品已保存并校验｜${savedWhere}`);
-            showToast('✅ 套图完成（五张成品已保存）');
+            if (targeted) {
+                const names = selected.map(s => `${s.key} ${s.name}`).join('、');
+                updateSuiteStatus(`✅ 指定重生成完成：${names}｜${savedWhere}`);
+                showToast(`✅ 指定重生成完成（${selected.length} 张：${names}）`);
+            } else {
+                updateSuiteStatus(`✅ 套图完成：111/222/333/444/666 五张成品已保存并校验｜${savedWhere}`);
+                showToast('✅ 套图完成（五张成品已保存）');
+            }
         }
         if (currentProduct && currentProduct.row === rowNum && currentFileKey() === fileKey) await renderSuiteImages(currentProduct);
         return null;
