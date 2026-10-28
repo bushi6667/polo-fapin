@@ -500,9 +500,9 @@ body::after {
     align-items: center;
     justify-content: center;
     line-height: 1;
-    height: 20px;
-    font-size: 11px;
-    padding: 0 12px;
+    height: 18px;
+    font-size: 10px;
+    padding: 0 7px;
     vertical-align: middle;
     background: linear-gradient(
         135deg,
@@ -513,6 +513,23 @@ body::after {
     font-weight: 500;
     border-radius: 20px;
     box-shadow: 0 1px 4px rgba(102, 126, 234, 0.3);
+}
+
+.suite-generated-badge {
+    /* 与「颜色图」角标同款同高，配色区分（青绿），文字垂直居中 */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    height: 18px;
+    font-size: 10px;
+    padding: 0 7px;
+    vertical-align: middle;
+    background: linear-gradient(135deg, rgba(19, 194, 194, 0.9) 0%, rgba(0, 150, 136, 0.9) 100%);
+    color: white;
+    font-weight: 500;
+    border-radius: 20px;
+    box-shadow: 0 1px 4px rgba(19, 194, 194, 0.3);
 }
 
 .batch-checkbox {
@@ -721,7 +738,7 @@ body::after {
 .product-tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 4px;          /* 三个胶囊（类目/颜色图/套图）要挤在一行，间距收小 */
     margin-top: 8px;
 }
 .tag {
@@ -730,10 +747,10 @@ body::after {
     align-items: center;
     justify-content: center;
     line-height: 1;
-    height: 20px;
+    height: 18px;
     vertical-align: middle;
-    font-size: 11px;
-    padding: 0 12px;
+    font-size: 10px;
+    padding: 0 7px;
     background: rgba(255, 255, 255, 0.12);
     color: rgba(255, 255, 255, 0.9);
     border-radius: 20px;
@@ -2975,19 +2992,51 @@ function checkColorGeneratedStatus() {
 
 // 用户明确不要「套图」完成角标：这里只负责清掉历史遗留的标记，不再添加。
 function addSuiteGeneratedBadge(rowNum) {
-    const productIdx = products.findIndex(p => p.row === rowNum);
-    if (productIdx === -1) return;
-    const card = document.querySelector(`.product-card[data-idx="${productIdx}"]`);
-    const badge = card && card.querySelector('.suite-generated-badge');
-    if (badge) badge.remove();
+    // 生成/重生成结束后重新判定（5 张齐才显示角标）。
+    // 旧实现在这里是"把角标删掉"，正是它让角标永远不出现。
+    if (products.findIndex(p => p.row === rowNum) === -1) return;
+    checkSuiteGeneratedStatus().catch(() => {});
 }
 
 // 「套图」角标只按成品验收：同一 fileKey+rowNum 的 111/222/333/444/666 全部存在
 // 已保存并校验过的后处理成品才显示；跨任务补齐同样计入，单步任务完成不代表整套完成。
 // 角标已取消（用户要求）：不再做全表核验，只清理历史遗留标记。
-function checkSuiteGeneratedStatus() {
+// 「套图」角标：与颜色图并列的一条。只在 5 张成品齐全（111/222/333/444/666）
+// 时显示——缺任意一张就不标，避免"看着整套齐了"其实少图。
+async function checkSuiteGeneratedStatus() {
     if (products.length === 0) return;
-    document.querySelectorAll('.suite-generated-badge').forEach(badge => badge.remove());
+    if (typeof SuiteCore === 'undefined') return;
+    const fileKey = currentFileKey();
+    const wanted = ['111', '222', '333', '444', '666'];
+    let store;
+    try { store = SuiteCore.ResultStore(); } catch (_) { return; }
+    const queue = products.slice();
+    let cursor = 0;
+    const worker = async () => {
+        while (cursor < queue.length) {
+            if (fileKey !== currentFileKey()) return;
+            const product = queue[cursor++];
+            let recs = [];
+            try { recs = await store.list(fileKey, product.row); } catch (_) { recs = []; }
+            const have = new Set((recs || []).map(r => String(r.key)));
+            const complete = wanted.every(k => have.has(k));
+            const idx = products.findIndex(p => p.row === product.row);
+            if (idx < 0) continue;
+            const card = document.querySelector(`.product-card[data-idx="${idx}"]`);
+            if (!card) continue;
+            const existing = card.querySelector('.suite-generated-badge');
+            if (existing) existing.remove();
+            if (!complete) continue;
+            const badge = document.createElement('span');
+            badge.className = 'suite-generated-badge';
+            badge.textContent = '套图';
+            const tags = card.querySelector('.product-tags');
+            const colorBadge = tags && tags.querySelector('.color-generated-badge');
+            if (colorBadge) colorBadge.after(badge);
+            else if (tags) tags.appendChild(badge);
+        }
+    };
+    await Promise.all([worker(), worker(), worker(), worker()]);
 }
 
 function syncProductToExtension(product) {
