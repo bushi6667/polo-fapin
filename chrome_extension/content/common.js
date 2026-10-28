@@ -175,27 +175,25 @@ function findFieldContainer(containerId, labelHint) {
         window.selectors.getList('page3', 'fieldLabel') :
         ['.label', '.oly-label-container', 'label', '.next-form-item-label', '[class*="label"]'];
     
+    const cleanText = v => String(v || '').replace(/[：:\s*]/g, '').trim();
     for (const el of allElements) {
-        const lbl = el.querySelector(labelSelectors.join(','));
-        let text = (lbl?.textContent || el.textContent || '').replace(/[：:\s*]/g, '').trim();
-        
-        if (text === hintClean) {
-            exactMatch = el;
-            break;
-        }
-        if (!prefixMatch && text.startsWith(hintClean)) {
-            prefixMatch = el;
-        }
-        if (!includesMatch && text.includes(hintClean)) {
-            includesMatch = el;
-        }
+        // 一个属性项里往往有多个 label 样式的元素：只取第一个可能命中错的那个
+        // （真机：省份明明是 struct-p-1-1，却被判「字段未找到」）。这里把所有候选标签都比一遍。
+        const labels = el.querySelectorAll(labelSelectors.join(','));
+        const texts = [];
+        if (labels.length) for (const l of labels) texts.push(cleanText(l.textContent));
+        if (!texts.length) texts.push(cleanText(el.textContent));
+
+        if (texts.some(t => t === hintClean)) { exactMatch = el; break; }
+        if (!prefixMatch && texts.some(t => t.startsWith(hintClean))) prefixMatch = el;
+        if (!includesMatch && texts.some(t => t.includes(hintClean))) includesMatch = el;
     }
     
     if (exactMatch) return exactMatch;
     if (prefixMatch) return prefixMatch;
     if (includesMatch) return includesMatch;
     
-    for (const lbl of document.querySelectorAll('label, span, .field-label, .form-label')) {
+    for (const lbl of document.querySelectorAll('label, span, .label, .field-label, .form-label')) {
         if (lbl.textContent.replace(/[：:\s*]/g, '').trim() === hintClean) {
             return lbl.closest('div[id^="struct"], .sell-catProp-item, .com-struct, .next-form-item, [class*="field"]') || lbl.parentElement;
         }

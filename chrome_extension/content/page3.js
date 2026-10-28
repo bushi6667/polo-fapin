@@ -405,16 +405,21 @@ async function fillAttributeField(field, product) {
     if (!field.val) return null;
     log(`🔍 查找字段: ${field.lbl}`, 'info');
     let c = null;
-    for (let retry = 0; retry < 3; retry++) {
+    // 省份这类字段要等「原产地」填完才会渲染出来：原来只重试 3×150ms（0.45s），
+    // 真机上第一次必然找不到，只能靠后面的"补填"再捞一次。
+    // 这里把等待放宽到 ~5s（12×400ms），并在等待中滚动属性区触发渲染。
+    for (let retry = 0; retry < 12; retry++) {
         c = findFieldContainer('', field.lbl);
         if (c) break;
         const attrArea = document.querySelector('#icbuCatProp, .sell-catProp-ai-wrap, .com-struct');
         if (attrArea) attrArea.scrollIntoView({block: 'center'});
-        await sleep3(150);
+        await sleep3(400);
     }
     if (!c) {
-        log(`❌ 字段 ${field.lbl} 未找到`, 'warn');
-        return { ok: false, lbl: field.lbl, usedVal: field.val };
+        // 还没渲染出来不等于这一行失败：交给最终审查后的"补填"再试一次，
+        // 这里只记 info，避免把可恢复的中间态当成失败（会把自动保存整行挡掉）。
+        log(`⏳ 字段 ${field.lbl} 暂时未渲染，稍后由补填再试`, 'info');
+        return { ok: false, lbl: field.lbl, usedVal: field.val, pending: true };
     }
     const foundLabel = c.querySelector('.label, .oly-label-container, label, .next-form-item-label, [class*="label"]');
     log(`✅ 找到字段 ${field.lbl} -> 实际标签: ${foundLabel?.textContent || c.textContent}`, 'info');
@@ -1309,6 +1314,8 @@ async function fillAttributesPage3(product) {
         try {
             const res = await fillAttributeField(field, product);
             if (!res) continue;
+            // pending = 字段还没渲染出来（如省份要靠原产地先填）：不记结果，交给补填阶段
+            if (res.pending) { log(`⏳ ${res.lbl} 待补填`, 'info'); continue; }
             results.push(res.ok ? `✅ ${res.lbl} = ${res.usedVal}` : `⚠️ ${res.lbl}: 未找到`);
         } catch (e) {
             log(`❌ ${field.lbl} 填入异常: ${e.message}`, 'error');

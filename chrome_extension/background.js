@@ -4185,7 +4185,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // 页面关键日志落后台：页面被刷新/关闭后仍能查到这一行为什么失败
     if (request.action === 'page3Log') {
         const tabId = sender && sender.tab ? sender.tab.id : 0;
-        appendPublishLog({ level: 'page3', tabId, msg: String(request.msg || '').slice(0, 160), pageLevel: request.level || 'info' });
+        let row = 0;
+        try {
+            const u = new URL((sender && sender.tab && sender.tab.url) || '');
+            row = Number(u.searchParams.get('row')) || 0;
+        } catch (_) {}
+        appendPublishLog({ level: 'page3', tabId, row, msg: String(request.msg || '').slice(0, 160), pageLevel: request.level || 'info' });
         sendResponse({ ok: true });
         return true;
     }
