@@ -180,7 +180,11 @@ function makeFakeIDB(initial) {
         await vm.runInContext('renderSuiteImages(products[0])', env.ctx);
         await new Promise(r => setTimeout(r, 60));
         const html = env.dom.byId.suiteImagesGrid.innerHTML;
-        ok(/<img src="blob:/.test(html), 'no-permission 时仍显示缓存预览（不误判缺失）');
+        // 口径变更（用户要求）：套图预览只认磁盘，磁盘读不到就不再拿 IndexedDB 缓存顶替。
+        ok(!/<img src="blob:/.test(html), 'no-permission 时不再显示缓存预览（只认磁盘）');
+        // 磁盘一张都没有、又没进行中的任务 → 整个区域隐藏（不再用缓存撑出一个假预览）
+        ok(String(env.dom.byId.suiteImagesArea.style.display) === 'none',
+            '磁盘无文件时整区隐藏（不拿缓存充数）', env.dom.byId.suiteImagesArea.style.display);
         ok(!/文件缺失或已移动/.test(html), '不显示缺失文案');
     }
 
