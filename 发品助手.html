@@ -5782,19 +5782,26 @@ async function renderSuiteImages(product) {
 
     // 图片以磁盘为准：先按 <文件名>/rowN/<编号>.png 现读，读不到才回退旧缓存（兼容历史数据）。
     const diskMap = {};
+    let diskError = '';
     try {
         if (typeof PageDirectories !== 'undefined' && PageDirectories.handles && PageDirectories.handles.colorImgDir) {
             if (PageDirectories.ready && typeof PageDirectories.ready.then === 'function') await PageDirectories.ready.catch(() => {});
             const got = await PageDirectories.dispatch({ action: 'pageReadSuite', fileFolder: loadedFileName || '', rowNum: row, keys: SUITE_OUTPUTS.map(o => o[0]) });
             for (const f of (got && got.files) || []) if (f && f.dataUrl) diskMap[f.key] = f.dataUrl;
+        } else {
+            diskError = '未配置产品图片目录';
         }
-    } catch (_) {}
+    } catch (e) {
+        // 以前这里静默吞错，于是"磁盘读不到"会悄悄退回缓存图，看着像没问题。
+        // 用户明确要求：套图只认磁盘。读不到就把原因说出来。
+        diskError = String((e && e.message) || e);
+    }
     if (stale()) return;
 
     // 一张图都没有（且任务不在进行中）→ 整区隐藏，不留空编号占位
     const TERM_EARLY = (typeof SuiteTaskStore !== 'undefined' && Array.isArray(SuiteTaskStore.TERMINAL))
         ? SuiteTaskStore.TERMINAL : ['completed', 'failed', 'interrupted', 'generated'];
-    const hasAnyImage = Object.keys(diskMap).length > 0 || recs.some(r => r.blob && r.blob.size);
+    const hasAnyImage = Object.keys(diskMap).length > 0;
     if (!hasAnyImage && (!t || TERM_EARLY.includes(t.stage))) {
         area.style.display = 'none';
         const stHide = document.getElementById('suiteStatusText');
@@ -5806,10 +5813,7 @@ async function renderSuiteImages(product) {
         const r = byKey[key];
         let url = diskMap[key] || '';
         let fromDisk = !!diskMap[key];
-        if (!url && r && r.blob && r.blob.size) {
-            url = URL.createObjectURL(r.blob);
-            suiteObjectUrls.push(url);
-        }
+        // 不再回退到 IndexedDB 缓存：只显示磁盘文件。读不到就留空编号（下面提示原因）。
         const check = health.items.find(h => h.key === key);
         // 缓存图不得冒充磁盘：磁盘核验明确缺失/损坏时，不显示缓存；磁盘读到的则不受影响。
         const diskBad = check && ['missing', 'corrupt', 'replaced', 'error'].includes(check.status);
@@ -5838,7 +5842,12 @@ async function renderSuiteImages(product) {
     const stageCn = (t && STAGE_CN[t.stage] !== undefined) ? STAGE_CN[t.stage] : '';
     const errCn = t && t.error ? String(t.error).replace(/^(执行阶段|后处理|保存)[:：]\s*/, '') : '';
     if (t && (t.stage || t.error)) console.warn(`[套图] row${row} stage=${t.stage || '-'} 磁盘=${okCount}/${SUITE_OUTPUTS.length}${t.error ? ' 错误=' + t.error : ''}`);
-    if (st) st.textContent = [stageCn, errCn, `磁盘已有 ${okCount}/${SUITE_OUTPUTS.length}`].filter(Boolean).join(' · ');
+    if (st) {
+        const parts = [stageCn, errCn, `磁盘已有 ${okCount}/${SUITE_OUTPUTS.length}`].filter(Boolean);
+        if (diskError) parts.push('⚠️ 磁盘读取失败：' + diskError);
+        st.textContent = parts.join(' · ');
+        st.style.color = diskError ? '#ff7a45' : '';
+    }
     // 「恢复已有结果」按钮已按用户要求移除：结果缺失时直接重新生成即可
 }
 
