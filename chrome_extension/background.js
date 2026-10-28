@@ -4178,6 +4178,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
+    // 页面关键日志落后台：页面被刷新/关闭后仍能查到这一行为什么失败
+    if (request.action === 'page3Log') {
+        const tabId = sender && sender.tab ? sender.tab.id : 0;
+        appendPublishLog({ level: 'page3', tabId, msg: String(request.msg || '').slice(0, 160), pageLevel: request.level || 'info' });
+        sendResponse({ ok: true });
+        return true;
+    }
+
     // 箱规 iframe 的日志回传到主页面面板（以前 only console，卡住时看不到停在哪一步）
     if (request.action === 'boxRuleLog') {
         const tabId = sender && sender.tab ? sender.tab.id : 0;

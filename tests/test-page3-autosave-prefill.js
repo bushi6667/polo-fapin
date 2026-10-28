@@ -253,7 +253,8 @@ const logHas = (env, kw, type) => env.logs.some(l => l.m.includes(kw) && (type =
         ok(env.removedKeys.length === 0, '没有清标记');
         ok(env.events.filter(e => e === 'fill').length === 0, '没有重新填入');
         ok(env.events.filter(e => e === 'saveDraft').length === 0, '没有自动保存');
-        ok(logHas(env, '该页已填入或不允许自动填写'), '走的是「已填入」提示分支');
+        // 提示语已按原因拆开（预填标记 / 后台不允许），断言改成命中拆开后的任一条
+        ok(logHas(env, '已有预填标记') || logHas(env, '后台不允许自动填入'), '走的是「已填入」提示分支');
     }
     // 无标记 + autoFillAllowed false（队列已推进/已保存）→ 不填
     {

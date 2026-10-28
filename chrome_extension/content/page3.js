@@ -1132,7 +1132,45 @@ async function fillGroupPage3(product) {
     
     await realClick(pg);
     await sleep3(1000);
-    
+
+    // 下拉/树是懒加载的：点一次不一定开，开了也不一定渲染完。
+    // 真机现象：分组有时候"选不上"，其实是选项还没出来就开始找 → 直接落到"未找到匹配选项"。
+    // 这里先等到有可见选项（最多 6s，中途补点一次），再展开折叠节点，找不到再等一轮重扫。
+    const visibleGroupOptions = () => {
+        const sels = ['.next-tree-node-label-selectable', '.next-tree-node-label', '.next-select-option', '.next-menu-item', '[role="treeitem"]', '[role="option"]'];
+        const out = [];
+        for (const sel of sels) {
+            for (const el of document.querySelectorAll(sel)) {
+                if (el.offsetHeight > 0) out.push(el);
+            }
+        }
+        return out;
+    };
+    let optionsReady = false;
+    for (let i = 0; i < 12 && !optionsReady; i++) {
+        if (visibleGroupOptions().length) { optionsReady = true; break; }
+        if (i === 4) { try { await realClick(pg); } catch (_) {} }   // 2s 还没开：补点一次
+        await sleep3(500);
+    }
+    if (!optionsReady) log('⚠️ 分组下拉 6s 内没有可见选项，仍继续尝试', 'warn');
+
+    // 分类树默认是折叠的：子节点不展开，按名字永远找不到
+    const expandGroupTree = async (limit = 12) => {
+        let opened = 0;
+        for (const sw of document.querySelectorAll('.next-tree-node-switcher, [class*="tree-node-switcher"]')) {
+            if (opened >= limit) break;
+            if (sw.offsetHeight === 0) continue;
+            const node = sw.closest('.next-tree-node') || sw.parentElement;
+            if (!node || node.getAttribute('aria-expanded') === 'true') continue;
+            nativeMouseClick(sw);
+            opened++;
+            await sleep3(200);
+        }
+        return opened;
+    };
+    const expanded = await expandGroupTree();
+    if (expanded) { log(`📂 展开了 ${expanded} 个分组节点`, 'info'); await sleep3(400); }
+
     const candidates = buildGroupCandidates(product.category);
     log(`📋 分组候选词: ${candidates.join(', ')}`, 'info');
     
@@ -1170,6 +1208,21 @@ async function fillGroupPage3(product) {
         if (foundOption) break;
     }
     
+    if (!foundOption) {
+        // 首轮没找到：可能是刚展开的子树还没渲染完，等一拍再扫一次
+        await sleep3(1200);
+        await expandGroupTree();
+        await sleep3(400);
+        for (const target of candidates) {
+            if (!target) continue;
+            for (const opt of visibleGroupOptions()) {
+                const t = (opt.textContent || '').trim();
+                if (t && matchGroupOption(t, target)) { foundOption = opt; foundName = t; break; }
+            }
+            if (foundOption) { log(`🔍 二次扫描匹配到分组选项: "${foundName}" (通过"${target}")`, 'info'); break; }
+        }
+    }
+
     if (foundOption) {
         foundOption.scrollIntoView({block: 'center'});
         await sleep3(300);
@@ -4377,7 +4430,10 @@ async function loadBatchProduct(rowNum) {
             if (savedEntry) log(`⚠️ 第${rowNum}行上次保存未确认，重新填入由平台复核（不当作已保存跳过）`, 'warn');
 
             if (alreadyPrefilled || resp.autoFillAllowed === false) {
-                log('该页已填入或不允许自动填写，刷新不重复填入；未保存内容待保存', 'info');
+                // 分开报：以前两种情况共用一句话，队列"直接下一个"时看不出是哪种
+                log(alreadyPrefilled
+                    ? `⚠️ 第${rowNum}行本页已有预填标记（刷新前填过），不再重复填入`
+                    : `⚠️ 第${rowNum}行后台不允许自动填入（队列已推进/已保存），本页不填`, 'warn');
                 // 队列已记过这一行完成时不能再补发（后台会当成下一行完成而跳行）；
                 // 只有队列确实没有记录（消息真丢了）才补发。
                 if (alreadyPrefilled && !resp.filled) {
