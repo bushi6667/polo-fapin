@@ -7761,5 +7761,44 @@ document.addEventListener('keydown', (e) => {
 <script src="ui-polish.js"></script>
 <script src="suite-batch.js"></script>
 <script src="unified-task-progress.js"></script>
+
+<!-- 目录授权检测：启动/回到页面时查一次，掉了就顶部提示，点一次全部重新授权 -->
+<script>
+(function(){
+  var LABELS={colorImgDir:'产品图片目录',imageDir:'产品原图目录',scriptDir:'JS脚本目录'};
+  var banner=null;
+  function ensureBanner(){
+    if(banner) return banner;
+    banner=document.createElement('div');
+    banner.id='dirPermBanner';
+    banner.style.cssText='position:fixed;left:50%;transform:translateX(-50%);top:10px;z-index:99999;display:none;align-items:center;gap:12px;padding:9px 14px;border-radius:10px;background:#3a2a12;color:#ffc069;border:1px solid #d48806;font-size:12px;box-shadow:0 6px 20px rgba(0,0,0,.45)';
+    banner.innerHTML='<span id="dirPermText"></span><button id="dirPermBtn" style="padding:4px 10px;border-radius:8px;border:none;background:#d48806;color:#1a1a1a;font-weight:600;cursor:pointer;white-space:nowrap">重新授权</button>';
+    document.body.appendChild(banner);
+    banner.querySelector('#dirPermBtn').onclick=function(){
+      // 申请必须在点击手势里同步发起：一次点击会把所有已配置目录一起授权
+      Promise.resolve(PageDirectories.permissions())
+        .then(function(){ return check(); })
+        .catch(function(e){ showToast('授权失败：'+((e&&e.message)||e)); });
+    };
+    return banner;
+  }
+  async function check(){
+    if(typeof PageDirectories==='undefined'||!PageDirectories.queryPermissions) return;
+    try{ await PageDirectories.ready; }catch(_){}
+    var perms=await PageDirectories.queryPermissions();
+    var keys=Object.keys(perms||{});
+    if(!keys.length){ var b0=ensureBanner(); b0.style.display='none'; return; }  // 还没配过目录：交给路径配置
+    var bad=keys.filter(function(k){ return perms[k]!=='granted'; });
+    var b=ensureBanner();
+    if(!bad.length){ b.style.display='none'; return; }
+    var names=bad.map(function(k){ return LABELS[k]||k; }).join('、');
+    b.querySelector('#dirPermText').textContent='目录授权已失效：'+names+'（不授权读不到磁盘图，也可能存不上）';
+    b.style.display='flex';
+  }
+  window.addEventListener('load',function(){ setTimeout(check,800); });
+  window.addEventListener('focus',function(){ setTimeout(check,300); });
+  window.__dirPermCheck=check;
+})();
+</script>
 </body>
 </html>

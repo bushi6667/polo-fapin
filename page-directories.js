@@ -35,6 +35,17 @@
         }
         return record;
     }
+    // 只查询、不申请（申请必须由用户手势触发）：用于启动时判断要不要提示"重新授权"
+    async function queryPermissions() {
+        await ready;
+        const out = {};
+        for (const [key, h] of Object.entries(handles)) {
+            try { out[key] = await h.queryPermission({ mode: key === 'scriptDir' ? 'read' : 'readwrite' }); }
+            catch (_) { out[key] = 'prompt'; }
+        }
+        return out;
+    }
+
     function permissions() {
         // 不先 queryPermission；所有申请都从当前点击同步发起。
         return Promise.all(Object.entries(handles).map(([key,h])=>h.requestPermission({mode:key==='scriptDir'?'read':'readwrite'})));
@@ -155,6 +166,6 @@
         default:throw Error('不支持的页面目录操作');
         }
     }
-    window.PageDirectories={ready,choose,permissions,dispatch,readImage,handles,records};
+    window.PageDirectories={ready,choose,permissions,queryPermissions,dispatch,readImage,handles,records};
     ready.then(()=>{if(handles.imageDir&&typeof psEditDirHandle!=='undefined')psEditDirHandle=handles.imageDir;}).catch(()=>{});
 })();
