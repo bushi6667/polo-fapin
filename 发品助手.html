@@ -6445,7 +6445,11 @@ function openTargetedRegenerationPanel() {
                 jobs=TargetedRegeneration.plan(TargetedRegeneration.parse(field.value),products,p=>suiteFrozenSteps(ExcelRow.build(excelRowSpec(p.row))));
                 for(const job of jobs.slice(0,20)){
                     const line=document.createElement('div');
-                    line.textContent=buildRowPreviewLines([job.product])[0]+'：'+[job.color?'颜色图':'',...job.labels].filter(Boolean).join('、');
+                    // 预览按实际派发批次写清楚：生成类合并成一条、原图后处理单独一条
+                    const groups=[];
+                    if(job.generatedKeys&&job.generatedKeys.length)groups.push('生成 '+job.generatedKeys.join('/')+'（1 条，等 '+job.generatedKeys.length+' 张）');
+                    if(job.productKeys&&job.productKeys.length)groups.push('原图后处理 '+job.productKeys.join('/'));
+                    line.textContent=buildRowPreviewLines([job.product])[0]+'：'+[job.color?'颜色图':'',...(groups.length?groups:job.labels)].filter(Boolean).join('、');
                     plan.append(line);
                 }
                 const note=document.createElement('p');note.textContent='共 '+jobs.length+' 行，按顺序执行；失败或暂停后停止后续任务。';plan.append(note);

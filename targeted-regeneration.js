@@ -37,17 +37,39 @@ function plan(requests,products,getSteps){
         const steps=getSteps(product);
         const numbers=request.selection===null?Array.from({length:steps.length+1},(_,i)=>i):request.selection;
         if(numbers.some(n=>n>steps.length))throw Error('第 '+request.row+' 行只有 '+steps.length+' 个步骤');
-        const keys=numbers.filter(n=>n>0).sort((a,b)=>a-b).map(n=>String(steps[n-1].key));
+        const picked=numbers.filter(n=>n>0).sort((a,b)=>a-b);
+        const keys=picked.map(n=>String(steps[n-1].key));
         if(keys.some(k=>!['111','222','333','444','666'].includes(k))||new Set(keys).size!==keys.length)throw Error('第 '+request.row+' 行的步骤输出编号无效');
-        return {product,row:request.row,color:numbers.includes(0),keys,labels:numbers.filter(n=>n>0).sort((a,b)=>a-b).map(n=>'步骤'+n+' '+steps[n-1].name)};
+        // 按图片来源分成两类：product = 直接用产品原图跑后处理脚本（不生成新图，111/444），
+        // generated = AI 生成新图。同一类要合并成一条任务，不能一步骤发一次。
+        const sourceOf=step=>{
+            if(step.imageSource==='product')return 'product';
+            if(step.imageSource==='generated')return 'generated';
+            return ['111','444'].includes(String(step.key))?'product':'generated';
+        };
+        const generatedKeys=[],productKeys=[];
+        for(const n of picked){
+            const step=steps[n-1];
+            (sourceOf(step)==='product'?productKeys:generatedKeys).push(String(step.key));
+        }
+        return {product,row:request.row,color:numbers.includes(0),keys,generatedKeys,productKeys,
+            labels:picked.map(n=>'步骤'+n+' '+steps[n-1].name)};
     });
 }
 async function run(jobs,api){
     for(const job of jobs){
         await api.check();await api.select(job.product);
         if(job.color){await api.color(job.product);await api.check();}
-        if(job.keys.length===5)await api.suite(job.keys,job.product);
-        else for(const key of job.keys){await api.check();await api.suite([key],job.product);}
+        // 合并派发：同类步骤一次性发出去，等这一批的图全部回来（不再一个步骤发一次、等一次）。
+        // 先生成类（222/333/666），再原图类（111/444 后处理）——后处理排在生成之后，
+        // 需要用到刚生成的结果时不会拿到旧图。
+        const generated=(job.generatedKeys||[]).slice();
+        const product=(job.productKeys||[]).slice();
+        const batches=[];
+        if(generated.length)batches.push(generated);
+        if(product.length)batches.push(product);
+        if(!batches.length&&job.keys.length)batches.push(job.keys);
+        for(const keys of batches){await api.check();await api.suite(keys,job.product);}
     }
 }
 const api={parse,plan,run};root.TargetedRegeneration=api;

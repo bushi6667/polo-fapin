@@ -14,6 +14,16 @@ assert.throws(()=>api.plan(api.parse('9'),products,()=>steps));
 const events=[];await api.run(jobs,{check(){},select:p=>events.push('row'+p.row),color:p=>events.push('color'+p.row),suite:(keys,p)=>events.push(p.row+':'+keys.join(','))});
 assert.deepEqual(events,['row4','color4','4:222','row7','7:444']);
 let generated=0;await assert.rejects(api.run(jobs,{check(){},select(){},color(){throw Error('paused');},suite(){generated++;}}),/paused/);assert.equal(generated,0);
+// 合并派发：4(1,3,4) → 111 走原图后处理，222/333 才是生成；一次发一条，不再一步骤一条
+{
+    const fiveSteps=[{key:'111',name:'卖点图'},{key:'444',name:'白底图'},{key:'222',name:'袖口图'},{key:'333',name:'面料图'},{key:'666',name:'领口图'}];
+    const merged=api.plan(api.parse('4(1,3,4)'),products,()=>fiveSteps);
+    assert.deepEqual(merged[0].generatedKeys,['222','333']);
+    assert.deepEqual(merged[0].productKeys,['111']);
+    const sent=[];
+    await api.run(merged,{check(){},select(){},color(){},suite:async(keys)=>{sent.push(keys.join(','));}});
+    assert.deepEqual(sent,['222,333','111'],'生成类合并成一条、原图类单独一条');
+}
 console.log('PASS targeted syntax, category step order, merge, strict validation, sequential dispatch and stop on failure');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 const fs=require('fs'),vm=require('vm');
