@@ -1131,95 +1131,43 @@ async function fillGroupPage3(product) {
     }
     
     await realClick(pg);
-    await sleep3(1000);
-
-    // 下拉/树是懒加载的：点一次不一定开，开了也不一定渲染完。
-    // 真机现象：分组有时候"选不上"，其实是选项还没出来就开始找 → 直接落到"未找到匹配选项"。
-    // 这里先等到有可见选项（最多 6s，中途补点一次），再展开折叠节点，找不到再等一轮重扫。
-    const visibleGroupOptions = () => {
-        const sels = ['.next-tree-node-label-selectable', '.next-tree-node-label', '.next-select-option', '.next-menu-item', '[role="treeitem"]', '[role="option"]'];
-        const out = [];
-        for (const sel of sels) {
-            for (const el of document.querySelectorAll(sel)) {
-                if (el.offsetHeight > 0) out.push(el);
-            }
-        }
-        return out;
-    };
-    let optionsReady = false;
-    for (let i = 0; i < 12 && !optionsReady; i++) {
-        if (visibleGroupOptions().length) { optionsReady = true; break; }
-        if (i === 4) { try { await realClick(pg); } catch (_) {} }   // 2s 还没开：补点一次
-        await sleep3(500);
-    }
-    if (!optionsReady) log('⚠️ 分组下拉 6s 内没有可见选项，仍继续尝试', 'warn');
-
-    // 分类树默认是折叠的：子节点不展开，按名字永远找不到
-    const expandGroupTree = async (limit = 12) => {
-        let opened = 0;
-        for (const sw of document.querySelectorAll('.next-tree-node-switcher, [class*="tree-node-switcher"]')) {
-            if (opened >= limit) break;
-            if (sw.offsetHeight === 0) continue;
-            const node = sw.closest('.next-tree-node') || sw.parentElement;
-            if (!node || node.getAttribute('aria-expanded') === 'true') continue;
-            nativeMouseClick(sw);
-            opened++;
-            await sleep3(200);
-        }
-        return opened;
-    };
-    const expanded = await expandGroupTree();
-    if (expanded) { log(`📂 展开了 ${expanded} 个分组节点`, 'info'); await sleep3(400); }
 
     const candidates = buildGroupCandidates(product.category);
     log(`📋 分组候选词: ${candidates.join(', ')}`, 'info');
-    
-    let foundOption = null;
-    let foundName = '';
 
-    for (const target of candidates) {
-        if (!target) continue;
-        
-        const optionSelectors = [
-            '.next-tree-node-label-selectable',
-            '.next-tree-node-label',
-            '.next-select-option',
-            '.next-menu-item',
-            '[role="treeitem"]',
-            '[role="option"]',
-        ];
-        
-        for (const sel of optionSelectors) {
-            const opts = document.querySelectorAll(sel);
-            for (const opt of opts) {
-                if (opt.offsetHeight === 0) continue;
-                const t = (opt.textContent || '').trim();
-                if (!t) continue;
-                // group-match-fix：用 matchGroupOption 防 "Shirts" 误命中 "T-Shirts"/"Polo Shirts"
-                if (matchGroupOption(t, target)) {
-                    foundOption = opt;
-                    foundName = t;
-                    log(`🔍 匹配到分组选项: "${t}" (通过"${target}")`, 'info');
-                    break;
-                }
-            }
-            if (foundOption) break;
-        }
-        if (foundOption) break;
-    }
-    
-    if (!foundOption) {
-        // 首轮没找到：可能是刚展开的子树还没渲染完，等一拍再扫一次
-        await sleep3(1200);
-        await expandGroupTree();
-        await sleep3(400);
+    const GROUP_OPTION_SELECTORS = [
+        '.next-tree-node-label-selectable',
+        '.next-tree-node-label',
+        '.next-select-option',
+        '.next-menu-item',
+        '[role="treeitem"]',
+        '[role="option"]',
+    ];
+    const findGroupOption = () => {
         for (const target of candidates) {
             if (!target) continue;
-            for (const opt of visibleGroupOptions()) {
-                const t = (opt.textContent || '').trim();
-                if (t && matchGroupOption(t, target)) { foundOption = opt; foundName = t; break; }
+            for (const sel of GROUP_OPTION_SELECTORS) {
+                for (const opt of document.querySelectorAll(sel)) {
+                    if (opt.offsetHeight === 0) continue;
+                    const t = (opt.textContent || '').trim();
+                    if (!t) continue;
+                    // group-match-fix：用 matchGroupOption 防 "Shirts" 误命中 "T-Shirts"/"Polo Shirts"
+                    if (matchGroupOption(t, target)) return opt;
+                }
             }
-            if (foundOption) { log(`🔍 二次扫描匹配到分组选项: "${foundName}" (通过"${target}")`, 'info'); break; }
+        }
+        return null;
+    };
+
+    // 点开后选项是懒加载的：每秒查一次，最多 6 次（就这一条，别的都不加）
+    let foundOption = null;
+    let foundName = '';
+    for (let attempt = 0; attempt < 6 && !foundOption; attempt++) {
+        await sleep3(1000);
+        foundOption = findGroupOption();
+        if (foundOption) {
+            foundName = (foundOption.textContent || '').trim();
+            log(`🔍 第 ${attempt + 1} 次查到分组选项: "${foundName}"`, 'info');
         }
     }
 
@@ -4424,7 +4372,7 @@ async function loadBatchProduct(rowNum) {
             // 未确认的保存（unverified）不算"已保存过"：草稿重复保存 ≠ 重复发布，重发时允许重填核对。
             if (savedEntry && savedEntry.unverified !== true) {
                 log(`⚠️ 第${rowNum}行已保存过，跳过自动填入并推进队列`, 'warn');
-                await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true });
+                await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true, note: 'skip-already-saved' });
                 return false;
             }
             if (savedEntry) log(`⚠️ 第${rowNum}行上次保存未确认，重新填入由平台复核（不当作已保存跳过）`, 'warn');
@@ -4437,7 +4385,7 @@ async function loadBatchProduct(rowNum) {
                 // 队列已记过这一行完成时不能再补发（后台会当成下一行完成而跳行）；
                 // 只有队列确实没有记录（消息真丢了）才补发。
                 if (alreadyPrefilled && !resp.filled) {
-                    await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl() });
+                    await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), note: 'skip-prefilled' });
                 }
                 return true;
             }
@@ -4503,7 +4451,9 @@ async function loadBatchProduct(rowNum) {
                     ? `🔄 批量模式：第${rowNum}行已自动保存`
                     : `🔄 批量模式：第${rowNum}行填写完成，待核对后手动保存`, autoSaved ? 'success' : 'warn');
                 try {
-                    await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl() });
+                    // note 会落进后台日志：事后能分清这一行是「填完就保存了」还是「填完没保存」
+                    await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(),
+                        note: autoSaved ? 'filled+autosaved' : 'filled-no-save' });
                 } finally {
                     stopHeartbeat();
                 }

@@ -3693,6 +3693,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'publishFilled') {
         const tabId = sender && sender.tab ? sender.tab.id : undefined;
         const frameId = sender ? sender.frameId : undefined;
+        // 记下上报来源与原因，事后能回答「这行为什么没保存」
+        if (request.note || request.skipped) {
+            appendPublishLog({ level: 'page3', tabId, row: request.row, msg: 'publishFilled ' + (request.note || (request.skipped ? 'skip' : '')) });
+        }
         onPublishFilled(tabId, frameId, request).then(sendResponse).catch(e => sendResponse({ ok: false, message: e.message }));
         return true;
     }
