@@ -1754,6 +1754,7 @@ body::after {
                     产品列表
                     <span class="product-count" id="productCount">0款</span>
                 </h2>
+                <div id="productBatch" style="display:none;margin:-6px 0 8px;padding-left:2px;font-size:12px;color:#8c8c8c;"></div>
                 <div class="batch-bar" id="batchBar" style="display: none;">
                     <div class="batch-bar-left">
                         <div class="batch-select-all" onclick="toggleSelectAll()">
@@ -2850,12 +2851,30 @@ function batchPublish() {
 }
 
 // 渲染左侧产品卡片列表（缩略图 + 标题 + 已上传状态）
+// 批次号取自文件名（第45批_100款_Polo衫…）：表格里没有单独的批次字段
+function parseBatchLabel(fileName) {
+    const m = String(fileName || '').match(/第\s*(\d+)\s*批/) || String(fileName || '').match(/(\d+)\s*批/);
+    return m ? '第' + m[1] + '批' : '';
+}
+
+// 产品总数下面显示批次；没有批次信息就整行隐藏，不占位置
+function renderProductBatch(fileName) {
+    const el = document.getElementById('productBatch');
+    if (!el) return;
+    const label = parseBatchLabel(fileName === undefined ? loadedFileName : fileName);
+    if (!label) { el.style.display = 'none'; el.textContent = ''; return; }
+    const name = String(fileName === undefined ? loadedFileName : fileName || '');
+    el.textContent = label + (name && name.indexOf(label) < 0 ? '（' + name + '）' : '');
+    el.style.display = 'block';
+}
+
 function renderProductList() {
     const productList = document.getElementById('productList');
     const productCards = document.getElementById('productCards');
     const productCount = document.getElementById('productCount');
     productList.style.display = 'flex';
     productCount.textContent = products.length + '款';
+    renderProductBatch();
     const renderFileKey = currentFileKey();
     const renderProducts = products;
 
