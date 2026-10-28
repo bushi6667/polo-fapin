@@ -3103,6 +3103,9 @@ function renderDetail() {
                             <button class="ai-edit-btn" onclick="compressSuiteImages()" id="suiteCompressBtn" style="justify-content: center;" title="把当前 Excel 下所有成品图压到 1MB 以内（JPG，直接覆盖）">
                                 🗜️ 压缩图片
                             </button>
+                            <button class="ai-edit-btn" onclick="clearSavedRowsPrompt()" style="justify-content: center;" title="把指定行从「已保存」里移除，下次填表会重新填这些行（草稿空了/缺项时用）">
+                                🧹 清除已保存标记
+                            </button>
                             <button class="ps-edit-btn" onclick="openPhotopea(${p.row})" style="justify-content: center;">
                                 🖌️ PS编辑
                             </button>
@@ -5605,6 +5608,21 @@ async function suiteCompressBlob(blob, target) {
         return null;
     } finally { bmp.close(); canvas.width = canvas.height = 0; }
 }
+// 清除指定行的"已保存"记录：草稿空了/缺项时用，清完后重跑这些行不会被"已保存过"跳过
+async function clearSavedRowsPrompt() {
+    const input = prompt('要清除「已保存」标记的行号（空格或逗号分隔）：\n例如 62 71 74 78');
+    if (!input) return;
+    const rows = input.trim();
+    if (!rows) return;
+    const resp = await new Promise(resolve => {
+        chrome.runtime.sendMessage(EXTENSION_ID, { action: 'clearPublishSavedRows', rows, fileKey: currentFileKey() }, resolve);
+    });
+    if (!resp || !resp.ok) return showToast('❌ ' + ((resp && resp.error) || '清除失败'));
+    const list = (resp.removed || []).join(', ');
+    showToast(list ? `✅ 已清除 ${resp.removed.length} 行：${list}` : '⚠️ 这些行本来就没有保存记录');
+    try { refreshPublishState(); } catch (_) {}
+}
+
 async function compressSuiteImages() {
     if (typeof PageDirectories === 'undefined' || !PageDirectories.handles || !PageDirectories.handles.colorImgDir) return showToast('请先在「路径配置」选择产品图片目录');
     if (!loadedFileName) return showToast('请先导入 Excel');

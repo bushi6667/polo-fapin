@@ -798,11 +798,15 @@ async function savePublishProduct(request, sender, clickButton = true) {
             await appendPublishLog({ level: 'saveRejected', row, fileKey, signals: verdict.signals });
             return { ok: false, error: '平台校验未通过，未标记已保存', row, fileKey, source: 'page3_save_click', verified: false, signals: verdict.signals };
         }
-        const unverified = !verdict.verified;
+        // 内容不完整（FAQ/介绍模板/箱规/属性缺项）的保存：照样落记录，但标记 unverified，
+        // 这样重跑时不会被"已保存过"跳过 —— 真机 62/71/74/78 就是这么被卡住、再也填不上的。
+        const incomplete = request.incomplete === true;
+        const unverified = !verdict.verified || incomplete;
         const stored = await new Promise(resolve => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, resolve));
         const all = stored[PUBLISH_VERIFIED_SAVED_KEY] || {};
         const record = { at: Date.now(), source: 'page3_save_click', taskId: request.taskId || null, verified: verdict.verified };
         if (unverified) record.unverified = true;
+        if (incomplete) record.incomplete = true;
         all[fileKey] = { ...(all[fileKey] || {}), [row]: record };
         await new Promise((resolve, reject) => chrome.storage.local.set({ [PUBLISH_VERIFIED_SAVED_KEY]: all }, () => {
             if (chrome.runtime.lastError) reject(new Error('已点击保存，但保存记录写入失败：' + chrome.runtime.lastError.message));
@@ -4179,6 +4183,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ ok: true, filename: CURRENT_FILENAME });
             });
         }).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+
+    // 清除指定行的"已保存"记录：这些行草稿是空的/缺项，需要重新填一遍。
+    // 没有这个入口时，被误记成已保存的行会永远被跳过（真机 62/71/74/78）。
+    if (request.action === 'clearPublishSavedRows') {
+        (async () => {
+            const rows = String(request.rows || '').split(/[\s,，、]+/).map(Number).filter(n => Number.isInteger(n) && n > 0);
+            if (!rows.length) return sendResponse({ ok: false, error: '请填写行号' });
+            const fileKey = request.fileKey || getFilePrefix();
+            const stored = await new Promise(r => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, r));
+            const all = stored[PUBLISH_VERIFIED_SAVED_KEY] || {};
+            const bucket = all[fileKey] || {};
+            const removed = [];
+            for (const row of rows) {
+                if (Object.prototype.hasOwnProperty.call(bucket, String(row))) { delete bucket[String(row)]; removed.push(row); }
+            }
+            all[fileKey] = bucket;
+            await new Promise(r => chrome.storage.local.set({ [PUBLISH_VERIFIED_SAVED_KEY]: all }, r));
+            await appendPublishLog({ level: 'clearSaved', rows: removed, fileKey });
+            await broadcastPublishState();
+            sendResponse({ ok: true, removed, fileKey });
+        })().catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
 

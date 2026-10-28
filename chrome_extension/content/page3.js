@@ -3488,7 +3488,7 @@ async function fillFaqsPage3(product, mode) {
     return results;
 }
 
-async function saveDraft(product) {
+async function saveDraft(product, opts = {}) {
     const results = [];
     log('🖱️ 查找保存按钮...', 'info');
     let saveBtn = null;
@@ -3508,6 +3508,9 @@ async function saveDraft(product) {
         const response = await sendMessageRetry({
             action: 'savePublishProduct', row: product.row,
             taskId: product._publishTaskId || getTaskFromUrl(), fileKey: product._publishFileKey,
+            // 有缺项（FAQ/介绍模板/箱规/属性没填全）时照样保存，但要记成"未确认"，
+            // 这样重跑时不会被当成"已保存过"跳过（真机：62/71/74/78 就是这么卡死的）。
+            incomplete: opts.incomplete === true,
             x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)
         });
         if (response && response.ok) {
@@ -4461,7 +4464,7 @@ async function loadBatchProduct(rowNum) {
                 } else {
                     // 全部填入成功：自动保存，保存成功后才上报完成
                     try {
-                        const saveResults = await saveDraft(currentProduct);
+                        const saveResults = await saveDraft(currentProduct, { incomplete: hasProblems });
                         const saveList = saveResults || [];
                         const hardFail = saveList.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
                         const saveFailed = saveList.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
