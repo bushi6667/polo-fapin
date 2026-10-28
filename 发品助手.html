@@ -495,9 +495,15 @@ body::after {
 }
 
 .color-generated-badge {
-    display: inline-block;
+    /* 文字垂直居中：inline-block 靠默认行高会偏下，改成 flex 居中并压掉行高 */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    height: 20px;
     font-size: 11px;
-    padding: 5px 12px;
+    padding: 0 12px;
+    vertical-align: middle;
     background: linear-gradient(
         135deg,
         rgba(102, 126, 234, 0.9) 0%,
@@ -719,8 +725,15 @@ body::after {
     margin-top: 8px;
 }
 .tag {
+    /* 和「颜色图」角标同高同基线，避免一排标签高低不齐 */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    height: 20px;
+    vertical-align: middle;
     font-size: 11px;
-    padding: 5px 12px;
+    padding: 0 12px;
     background: rgba(255, 255, 255, 0.12);
     color: rgba(255, 255, 255, 0.9);
     border-radius: 20px;
@@ -5811,12 +5824,6 @@ async function renderSuiteImages(product) {
 
     const keys = [...new Set([...SUITE_OUTPUTS.map(o => o[0]), ...recs.map(r => String(r.key))])];
 
-    if (!t && recs.length === 0) {
-        // 完全没结果 → 整个套图区隐藏（和颜色图区一致：没有就不占位置）
-        area.style.display = 'none';
-        return;
-    }
-
     // 图片以磁盘为准：先按 <文件名>/rowN/<编号>.png 现读，读不到才回退旧缓存（兼容历史数据）。
     const diskMap = {};
     let diskError = '';
@@ -5834,6 +5841,14 @@ async function renderSuiteImages(product) {
         diskError = String((e && e.message) || e);
     }
     if (stale()) return;
+    const diskCount = Object.keys(diskMap).length;
+
+    if (!t && recs.length === 0 && diskCount === 0) {
+        // 任务、记录、磁盘三处都没有 → 整个套图区隐藏（和颜色图区一致：没有就不占位置）
+        area.style.display = 'none';
+        return;
+    }
+
 
     // 一张图都没有（且任务不在进行中）→ 整区隐藏，不留空编号占位
     const TERM_EARLY = (typeof SuiteTaskStore !== 'undefined' && Array.isArray(SuiteTaskStore.TERMINAL))

@@ -46,7 +46,7 @@
         api.panel.style.display = title ? 'block' : 'none';
         api.panel.querySelector('[role=status]').textContent = title;
         api.panel.querySelector('.progress-fill').style.width = (total ? Math.min(100, done / total * 100) : 0) + '%';
-        const counters = api.panel.querySelector('.progress-text').children; counters[0].textContent = done + '/' + total; counters[1].textContent = current;
+        const counters = api.panel.querySelector('.progress-text').children; counters[0].textContent = (total ? done + '/' + total : done + '/-'); counters[1].textContent = current;
         const buttons = api.panel.querySelector('.unified-actions'); buttons.replaceChildren();
         for (const [label, click, disabled] of actions) { const button = document.createElement('button'); button.className = 'stop-btn'; button.textContent = label; button.disabled = !!disabled; button.onclick = click; buttons.append(button); }
     }
@@ -93,7 +93,7 @@
         } else if (kind === 'suiteBatch') {
             const batch = batchState(), running = batchRunning();
             title = '连续生成套图 · ' + (batch.paused || !running ? '已暂停' : '运行中');
-            done = batch.index; total = batch.rows.length; current = '行' + batch.rows[batch.index];
+            done = batch.index || 0; total = (batch.rows && batch.rows.length) || 0; current = '行' + batch.rows[batch.index];
             actions.push([batch.paused || !running ? '▶ 继续' : '⏸ 暂停', () => toggleSuiteBatch()]);
         } else if (kind === 'suite' && suite) {
             // 分母兜底：state.total 缺失时，指定重生成按 1 张算，整套才按 5 张（旧数据写死 5 会误导）
@@ -106,7 +106,7 @@
             const inBatch = !!(batch && !batch.completed && batch.rows && batch.rows[batch.index] === suite.rowNum);
             if (inBatch) {
                 title = '连续生成套图 · ' + (suite.paused ? '已暂停' : (labels[suite.phase] || '未完成'));
-                done = batch.index; total = batch.rows.length;
+                done = batch.index || 0; total = (batch.rows && batch.rows.length) || 0;
                 current = '行' + suite.rowNum + '（本套 ' + (suite.done || 0) + '/' + suiteGoal() + '）';
             } else {
                 title = (targeted ? '指定重生成' : '套图') + ' · ' + (suite.paused ? '已暂停' : (labels[suite.phase] || '未完成'));
