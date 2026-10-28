@@ -1500,6 +1500,12 @@ async function fillAttributesPage3(product) {
 
 async function finalAttributeAudit(requiredFields, optionalFields, product) {
     log('🔍 最终属性审查：检查所有属性是否填入...', 'info');
+    // 省份这类字段要等「原产地」填完才渲染，审查跑太快就会读到空值、
+    // 打出一条假的「❌ 省份 - 值为空」，再靠补填救回来。先等它出现（最多 4s）。
+    for (let w = 0; w < 10; w++) {
+        if (findFieldContainer('', '省份')) break;
+        await sleep3(400);
+    }
     await sleep3(300);
 
     const allFields = [...requiredFields, ...optionalFields];
@@ -1534,7 +1540,9 @@ async function finalAttributeAudit(requiredFields, optionalFields, product) {
 
     log(`⚠️ 最终审查发现 ${emptyFields.length} 个属性未填入/不匹配，开始补填...`, 'warn');
     for (const f of emptyFields) {
-        log(`   ❌ ${f.lbl} - ${f.reason} (期望: ${f.val}${f.actual ? ', 实际: ' + f.actual : ''})`, 'warn');
+        // 中间态：这里只是"待补填"，补填成功后一切正常。用 ⏳ 而不是 ❌，
+        // 否则日志看起来像整批失败（真机日志里每行都有一条假 ❌）。
+        log(`   ⏳ ${f.lbl} - ${f.reason} (期望: ${f.val}${f.actual ? ', 实际: ' + f.actual : ''})，待补填`, 'info');
     }
 
     let refilled = 0;
