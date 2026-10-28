@@ -27,9 +27,11 @@
         el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));
     }
 
-    // 带 [BoxRule] 前缀的日志
+    // 带 [BoxRule] 前缀的日志；同时回传 background → 主页面日志面板。
+    // 以前只写 iframe 自己的 console，箱规卡住时主页面完全看不到停在哪一步。
     function log(msg) {
         console.log('[BoxRule]', msg);
+        try { chrome.runtime.sendMessage({ action: 'boxRuleLog', msg: String(msg) }); } catch (_) {}
     }
 
     // 按文本在常见按钮/单选元素中查找可见元素（多选择器兜底）
@@ -66,7 +68,12 @@
             if (findTargetRow()) { result.s1 = result.s2 = result.s3 = true; }
             // 步骤1: 手动设置
             if (!result.s1) try {
-                var manual = findEl('手动设置');
+                // 弹窗刚出现时选项可能还没渲染：最多找 4 次（间隔 400ms），别一次没找到就整步失败
+                var manual = null;
+                for (var t1 = 0; t1 < 4 && !manual; t1++) {
+                    manual = findEl('手动设置');
+                    if (!manual) await sleep(400);
+                }
                 if (manual) {
                     log('找到手动设置');
                     nativeClick(manual);
@@ -88,7 +95,11 @@
             if (findTargetRow()) { result.s2 = result.s3 = true; }
             // 步骤2: 一箱多件
             if (!result.s2) try {
-                var multi = findEl('一箱多件');
+                var multi = null;
+                for (var t2 = 0; t2 < 4 && !multi; t2++) {
+                    multi = findEl('一箱多件');
+                    if (!multi) await sleep(400);
+                }
                 if (multi) {
                     log('找到一箱多件');
                     nativeClick(multi);

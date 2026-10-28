@@ -4178,6 +4178,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return true;
     }
 
+    // 箱规 iframe 的日志回传到主页面面板（以前 only console，卡住时看不到停在哪一步）
+    if (request.action === 'boxRuleLog') {
+        const tabId = sender && sender.tab ? sender.tab.id : 0;
+        if (tabId && request.msg) {
+            chrome.tabs.sendMessage(tabId, { action: 'log', msg: '📦 [箱规] ' + String(request.msg) }).catch(() => {});
+        }
+        sendResponse({ ok: true });
+        return true;
+    }
+
     if (request.action === 'fillBoxRule') {
         const tabId = sender.tab?.id;
         if (!tabId) {

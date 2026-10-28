@@ -2618,7 +2618,9 @@ function getAssociatedBoxRule() {
     for (const rule of rules) {
         if (!rule.getBoundingClientRect().width || !rule.getBoundingClientRect().height) continue;
         const text = (rule.innerText || rule.textContent || '').replace(/\s+/g, ' ').trim();
-        if (/50\s*[*x×]\s*40\s*[*x×]\s*30/i.test(text) && /25\s*件\s*\/\s*批/.test(text)) return text;
+        // 件数只认「25 件」：不同类目/模板的分页文案有 25件/批、25 件 / 批、25件/箱 几种，
+        // 以前写死「25 件 / 批」，文案一变就永远判不成关联，白等 60 秒
+        if (/50\s*[*x×]\s*40\s*[*x×]\s*30/i.test(text) && /25\s*件/.test(text)) return text;
     }
     return null;
 }
@@ -2645,15 +2647,15 @@ async function fillBoxRule(product) {
         addBtn.scrollIntoView({ block: 'center' });
         await sleep3(200);
         addBtn.click();
-        for (let i = 0; i < 15 && !findIframe(); i++) await sleep3(200);
+        for (let i = 0; i < 75 && !findIframe(); i++) await sleep3(200);   // 3s → 15s，慢网下弹窗起得晚
         if (!findIframe()) {
             const rect = addBtn.getBoundingClientRect();
             await chrome.runtime.sendMessage({ action: 'realMouseClick',
                 x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) });
         }
     }
-    for (let i = 0; i < 40 && !findIframe(); i++) await sleep3(200);
-    if (!findIframe()) return ['⚠️ 箱规: iframe未加载'];
+    for (let i = 0; i < 150 && !findIframe(); i++) await sleep3(200);   // 8s → 30s
+    if (!findIframe()) return ['❌ 箱规: iframe 30s 内未加载'];
     await sleep3(800);
 
     // 弹窗完成后可能销毁消息通道；以主页面实际关联参数为准。
@@ -2681,7 +2683,7 @@ async function fillBoxRule(product) {
                 if (check()) return;
                 await sleep3(250);
             }
-            if (!settled) finish('⚠️ 箱规未关联: ' + (result?.error || '页面未显示完整箱规参数'));
+            if (!settled) finish('❌ 箱规未关联: ' + (result?.error || '页面未显示完整箱规参数'));
         };
         const handler = msg => {
             if (msg.action === 'fillBoxRuleResult') handleResult(msg.result);
@@ -2689,7 +2691,7 @@ async function fillBoxRule(product) {
         chrome.runtime.onMessage.addListener(handler);
         pollId = setInterval(check, 250);
         timeoutId = setTimeout(() => {
-            if (!check()) finish('⚠️ 箱规关联超时，页面未显示完整箱规参数');
+            if (!check()) finish('❌ 箱规关联超时（60s），页面未显示完整箱规参数');
         }, 60000);
         try {
             chrome.runtime.sendMessage({ action: 'fillBoxRule' }, response => {

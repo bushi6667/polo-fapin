@@ -5,10 +5,10 @@ const source = fs.readFileSync(__dirname + '/../chrome_extension/content/page3.j
 const start = source.indexOf('function getAssociatedBoxRule()');
 const end = source.indexOf('// ============================================================', source.indexOf('async function fillBoxRule('));
 
-async function run(displayed, hidden, reportedOk, timeout = false) {
+async function run(displayed, hidden, reportedOk, timeout = false, ruleText) {
     let visible = false, listener, deadline, cleared = 0;
     const rule = {
-        innerText: '50*40*30: 长*宽*高 | 箱规可装最大商品数量（件/批） 25件/批',
+        innerText: ruleText || '50*40*30: 长*宽*高 | 箱规可装最大商品数量（件/批） 25件/批',
         getBoundingClientRect: () => ({ width: hidden ? 0 : 100, height: hidden ? 0 : 20 })
     };
     const frame = {
@@ -103,6 +103,8 @@ async function runDialog(first, second, disabled = false, directList = false, re
 (async () => {
     await run(true, false, false);
     await run(true, false, true);
+    // 件数文案因类目/模板而异：25 件 / 批、25件/箱、25 件 都应算关联成功
+    await run(true, false, true, false, '50*40*30: 长*宽*高 | 箱规可装最大商品数量 25 件 / 箱');
     await run(true, true, true);
     await run(false, false, true);
     await run(false, false, false, true);
