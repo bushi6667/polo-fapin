@@ -223,7 +223,10 @@ const logHas = (env, kw, type) => env.logs.some(l => l.m.includes(kw) && (type =
             productResp: { ok: true, autoFillAllowed: false, filled: false, data: { row: 412, _publishTaskId: 'pt_test', _publishFileKey: '' } }
         });
         ok(env.events.filter(e => e === 'fill').length === 0, '已填过：不重新填入');
-        ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, '队列确实没记（消息丢了）→ 补发 1 次');
+        // 口径变更：有预填标记但没有保存记录时，不能单方面补发 publishFilled 把队列推进
+        // （真机就是这么丢的行：页3 一片空白却进了下一行）。
+        ok(env.messages.filter(m => m.action === 'publishFilled').length === 0,
+            '标记在但无保存记录 → 不再补发 publishFilled（不推进空行）');
     }
 
     // ------------------------------------------------------------

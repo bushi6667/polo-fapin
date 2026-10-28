@@ -4059,11 +4059,12 @@ function createPage3Panel() {
             await ensureTabActive();
             log('开始自动填写页3...');
             const results = await fillAllPage3(currentProduct);
-                // 本页完成一轮就进入待保存，完成消息丢失也不能在刷新后反复填写。
+                // 只有真的填完（无 ⚠️/❌）才写预填标记；填失败就写会导致刷新后整页跳过
                 try {
+                    const clean = !results.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
                     const completedRow = currentProduct.row ?? getRowFromUrl();
                     const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
-                    if (completedRow !== null && completedRow !== undefined)
+                    if (clean && completedRow !== null && completedRow !== undefined)
                         sessionStorage.setItem('polo_page3_prefilled::' + completedTask + '::' + completedRow, '1');
                 } catch (_) {}
 
@@ -4377,6 +4378,14 @@ async function loadBatchProduct(rowNum) {
             }
             if (savedEntry) log(`⚠️ 第${rowNum}行上次保存未确认，重新填入由平台复核（不当作已保存跳过）`, 'warn');
 
+            // 有预填标记、但这一行没有任何保存记录 → 说明上次是"填了没存"或"填失败"，
+            // 不能当成已完成：清掉标记重新填（否则草稿里就是一片空白）。
+            if (alreadyPrefilled && !savedEntry && resp.autoFillAllowed !== false) {
+                try { sessionStorage.removeItem('polo_page3_prefilled::' + completedTask + '::' + rowNum); } catch (_) {}
+                log(`⚠️ 第${rowNum}行有预填标记但没有保存记录，清除标记后重新填入`, 'warn');
+                alreadyPrefilled = false;
+            }
+
             if (alreadyPrefilled || resp.autoFillAllowed === false) {
                 // 分开报：以前两种情况共用一句话，队列"直接下一个"时看不出是哪种
                 log(alreadyPrefilled
@@ -4384,7 +4393,9 @@ async function loadBatchProduct(rowNum) {
                     : `⚠️ 第${rowNum}行后台不允许自动填入（队列已推进/已保存），本页不填`, 'warn');
                 // 队列已记过这一行完成时不能再补发（后台会当成下一行完成而跳行）；
                 // 只有队列确实没有记录（消息真丢了）才补发。
-                if (alreadyPrefilled && !resp.filled) {
+                // 走到这里说明该行确实已填过且有保存记录（前面已判），只是完成消息丢了 → 补发通知。
+                // 不再用"预填标记"单方面推进队列：那会把没保存的行直接送进下一行。
+                if (alreadyPrefilled && !resp.filled && savedEntry) {
                     await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), note: 'skip-prefilled' });
                 }
                 return true;
@@ -4401,17 +4412,21 @@ async function loadBatchProduct(rowNum) {
                 await ensureTabActive();
                 log('🔄 批量模式：自动开始填写页3...', 'success');
                 const results = await fillAllPage3(currentProduct);
-                // 本页完成一轮就进入待保存，完成消息丢失也不能在刷新后反复填写。
-                try {
-                    const completedRow = currentProduct.row ?? getRowFromUrl();
-                    const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
-                    if (completedRow !== null && completedRow !== undefined)
-                        sessionStorage.setItem('polo_page3_prefilled::' + completedTask + '::' + completedRow, '1');
-                } catch (_) {}
 
                 for (const r of results) log(r, r.startsWith('✅') ? 'success' : r.startsWith('⚠️') ? 'warn' : 'info');
 
                 const hasProblems = results.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+                // 预填标记只在「真的填完、且没有硬失败」时才写。
+                // 以前填失败也写：页面一刷新就命中标记 → 页3 什么都不填直接报完成，
+                // 队列跳到下一行，草稿里是一片空白（真机就是这么丢的行）。
+                if (!hasProblems) {
+                    try {
+                        const completedRow = currentProduct.row ?? getRowFromUrl();
+                        const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
+                        if (completedRow !== null && completedRow !== undefined)
+                            sessionStorage.setItem('polo_page3_prefilled::' + completedTask + '::' + completedRow, '1');
+                    } catch (_) {}
+                }
                 // 只有「硬失败」才阻断自动保存。⚠️ 多半是"某项没找到/未确认"这类可容忍项，
                 // 若也阻断，一行一个警告就会让整批停在等人工保存（实测：省份误判导致每行都不保存）。
                 const hasErrors = results.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
