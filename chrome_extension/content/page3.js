@@ -4543,7 +4543,14 @@ async function loadBatchProduct(rowNum) {
                 } else {
                     // 全部填入成功：自动保存，保存成功后才上报完成
                     try {
-                        const saveResults = await saveDraft(currentProduct, { incomplete: hasProblems });
+                        // "内容不完整"只认两类：硬失败 ❌，或关键项（箱规/分组/主图/细节图）没成功。
+                        // 以前把任意 ⚠️ 都算不完整，结果几乎每行都被标"未确认"（真机 50 行里 44 行），
+                        // 明明保存成功却看着像没保存。
+                        const keyMissing = ['箱规', '商品分组', '主图', '细节图'].filter(name =>
+                            !results.some(r => String(r == null ? '' : r).trim().startsWith('✅') && String(r).includes(name)));
+                        const incomplete = hasErrors || keyMissing.length > 0;
+                        if (keyMissing.length) log(`⚠️ 关键项未完成：${keyMissing.join(' / ')}，本行记为未确认（重跑会重填）`, 'warn');
+                        const saveResults = await saveDraft(currentProduct, { incomplete });
                         const saveList = saveResults || [];
                         const hardFail = saveList.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
                         const saveFailed = saveList.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
