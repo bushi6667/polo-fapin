@@ -294,6 +294,29 @@ async function setAutoComplete(containerId, val, labelHint) {
     return !!shown;
 }
 
+// 单选型「自动完成」字段填多值：按顺序逐个试，选中第一个页面上真实存在的选项。
+// 真机背景（Polo 产品特性）：Excel 给 "Soft, Breathable, Skin-Friendly"，
+// 但类目下只有 Other/Anti-Wrinkle/Quick Dry/Compressed/Anti-Pilling/Breathable/
+// Eco-Friendly/Anti-shrink/EL Flashing —— Soft 与 Skin-Friendly 都不存在，
+// 只取第一个值必然落空，于是字段一直空着。
+async function setAutoCompleteFirstMatch(c, values, labelHint) {
+    const list = (Array.isArray(values) ? values : String(values || '').split(/[,，]/))
+        .map(v => String(v).trim()).filter(Boolean);
+    const skipped = [];
+    for (const value of list) {
+        const ok = await setAutoComplete('', value, labelHint);
+        if (ok) {
+            if (skipped.length) log(`ℹ️ ${labelHint}：跳过页面没有的 ${skipped.join(' / ')}，填入 ${value}`, 'info');
+            return { ok: true, usedVal: value, skipped };
+        }
+        skipped.push(value);
+        await closeOverlays();
+        await new Promise(r => setTimeout(r, 200));
+    }
+    log(`⚠️ ${labelHint}：${list.join(' / ')} 在页面选项里都不存在`, 'warn');
+    return { ok: false, usedVal: '', skipped };
+}
+
 // 关闭页面残留的浮层/下拉（Esc 键 + 隐藏可见 overlay），避免遮挡后续操作
 async function closeOverlays() {
     document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', keyCode: 27, bubbles: true}));

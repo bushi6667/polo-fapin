@@ -411,6 +411,53 @@ function verifyFieldValue(container, expectedVal, mode) {
     return false;
 }
 
+// ============================================================
+// 类目独立的字段填法
+// 每个类目一份映射：只影响本类目，改 polo 不会碰到卫衣/衬衫。
+// 键 = 字段标签，值 = (container, field) => {ok, lbl, usedVal}
+// ============================================================
+async function fillFreeTextAttribute(c, field) {
+    // "可输入可搜索"的自由框：值就是 input.value。
+    // 真机（Polo 产品特性）：手输 "a,b,c" 直接生效，不需要回车/选候选；
+    // 以前只读 .next-select-values（自由文本那里永远空）→ 判失败 → 反复清空重填 → 最后留空。
+    const english = pickEnglishPart(field.val || '').trim();
+    const inp = c.querySelector('input:not([readonly]):not([type="hidden"])');
+    if (!inp) return { ok: false, lbl: field.lbl, usedVal: '' };
+    c.scrollIntoView({ block: 'center' });
+    await sleep3(80);
+    await realClick(inp);
+    await sleep3(120);
+    await typeInto(inp, english);
+    await sleep3(150);
+    inp.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    await sleep3(120);
+    const got = String(inp.value || '').trim();
+    log(got ? `✅ ${field.lbl} 已输入（自由文本）：${got}` : `⚠️ ${field.lbl} 输入后仍为空`, got ? 'success' : 'warn');
+    return { ok: !!got, lbl: field.lbl, usedVal: got };
+}
+
+// 每个类目自己的填法表。目前只有 Polo 的产品特性需要特殊处理；
+// 其它类目保持空表（走通用逻辑），但各自一行，互不牵连。
+const ATTRIBUTE_FIELD_FILLERS = {
+    polo:       { '产品特性': fillFreeTextAttribute },
+    tshirt:     {},
+    shirt:      {},
+    hoodie:     {},
+    sweatshirt: {},
+};
+
+function categoryFiller(category, label) {
+    const raw = String(category || '').toLowerCase();
+    const key = raw.includes('polo') ? 'polo'
+        : raw.includes('t-shirt') || raw.includes('tshirt') ? 'tshirt'
+        : raw.includes('shirt') ? 'shirt'
+        : raw.includes('sweatshirt') ? 'sweatshirt'
+        : raw.includes('hoodie') || raw.includes('hooded') ? 'hoodie'
+        : '';
+    const table = ATTRIBUTE_FIELD_FILLERS[key] || {};
+    return table[label] || null;
+}
+
 async function fillAttributeField(field, product) {
     if (!field.val) return null;
     log(`🔍 查找字段: ${field.lbl}`, 'info');
@@ -434,18 +481,37 @@ async function fillAttributeField(field, product) {
     const foundLabel = c.querySelector('.label, .oly-label-container, label, .next-form-item-label, [class*="label"]');
     log(`✅ 找到字段 ${field.lbl} -> 实际标签: ${foundLabel?.textContent || c.textContent}`, 'info');
 
+    // 类目自己的填法优先（每类目独立，互不影响）
+    const categoryFillerFn = product ? categoryFiller(product.category, field.lbl) : null;
+    if (categoryFillerFn) {
+        const out = await categoryFillerFn(c, field);
+        if (out && out.ok) return out;
+        log(`⚠️ ${field.lbl} 类目专用填法未成功，回退通用逻辑`, 'warn');
+    }
+
     let actualMode = detectFieldMode(c);
     if (field.forceMode) actualMode = field.forceMode;
     // 配置写死 tag，但页面实际是「单选自动完成」（Polo 的产品特性就是
     // next-select-auto-complete，没有 next-select-tag 类）：
     // 硬按 tag 走会"填一个清一个"，最后只剩最后一个值。这里降级为单选，只填第一项。
     if (actualMode === 'tag' && !c.querySelector('.next-select-tag, .next-select-tag-list')) {
-        const first = pickEnglishPart(field.val || '').split(/[,，]/).map(t => t.trim()).filter(Boolean)[0] || field.val;
-        if (first && first !== field.val) {
-            log(`ℹ️ ${field.lbl} 页面为单选，只填第一项：${first}`, 'info');
-            field = Object.assign({}, field, { val: first, forceMode: 'auto' });
-            actualMode = 'auto';
-        }
+        // 这个字段是"可输入可搜索"的自由文本框：值就是 input.value，
+        // 不需要回车、不需要选候选（用户实测：手输 "a,b,c" 直接生效）。
+        // 以前只认 .next-select-values（自由文本那里永远空）→ 判失败 → 反复清空重填 → 最后留空。
+        const english = pickEnglishPart(field.val || '').trim();
+        const inp = c.querySelector('input:not([readonly]):not([type="hidden"])');
+        if (!inp) return { ok: false, lbl: field.lbl, usedVal: '' };
+        c.scrollIntoView({ block: 'center' });
+        await sleep3(80);
+        await realClick(inp);
+        await sleep3(120);
+        await typeInto(inp, english);
+        await sleep3(150);
+        inp.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+        await sleep3(120);
+        const got = String(inp.value || '').trim();
+        log(got ? `✅ ${field.lbl} 已输入（自由文本）：${got}` : `⚠️ ${field.lbl} 输入后仍为空`, got ? 'success' : 'warn');
+        return { ok: !!got, lbl: field.lbl, usedVal: got };
     }
     let ok = false;
     let usedVal = field.val;
@@ -1522,7 +1588,10 @@ async function finalAttributeAudit(requiredFields, optionalFields, product) {
             emptyFields.push({ ...field, reason: '字段未找到' });
             continue;
         }
-        const mode = field.forceMode || detectFieldMode(c);
+        // 配置写 tag 但页面是自由输入框时，值在 input.value，不在 .next-tag 里；
+        // 用 tag 读会永远为空 → 误判未填 → 反复补填（真机就是这么卡的）
+        let mode = field.forceMode || detectFieldMode(c);
+        if (mode === 'tag' && !c.querySelector('.next-select-tag, .next-select-tag-list')) mode = 'auto';
         const currentVal = getFieldCurrentValue(c, mode);
         if (!currentVal || currentVal.trim() === '') {
             emptyFields.push({ ...field, reason: '值为空' });
@@ -1530,8 +1599,9 @@ async function finalAttributeAudit(requiredFields, optionalFields, product) {
             // 双语值只比英文段：页面上是多选标签（英文），拿整串 "Soft / 柔软, 透气" 去比必然不匹配。
             // 单选字段（无 next-select-tag）只比第一项，否则永远判不匹配 → 反复补填。
             const english = pickEnglishPart(field.val);
+            // 真多选（tag）比整串；自由输入框比整串；其余单选比第一项
             const multi = !!(c.querySelector('.next-select-tag, .next-select-tag-list'));
-            const expectVal = multi ? english : (english.split(/[,，]/).map(t => t.trim()).filter(Boolean)[0] || field.val);
+            const expectVal = (multi || mode === 'auto') ? english : (english.split(/[,，]/).map(t => t.trim()).filter(Boolean)[0] || field.val);
             const match = normalizeCompare(currentVal, expectVal);
             if (match) {
                 filledFields.push(field.lbl);
