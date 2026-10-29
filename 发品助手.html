@@ -737,9 +737,33 @@ body::after {
 }
 .product-tags {
     display: flex;
-    flex-wrap: wrap;
-    gap: 4px;          /* 三个胶囊（类目/颜色图/套图）要挤在一行，间距收小 */
+    flex-direction: column;
+    gap: 4px;
     margin-top: 8px;
+}
+/* 行1：类目 + 已保存（推到右侧）；行2：套图 + 颜色图 */
+.tags-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.tags-row .uploaded-badge { margin-left: auto; }
+.tags-row-media { min-height: 18px; }
+/* 所有胶囊统一尺寸，避免大小不一 */
+.product-tags .tag,
+.product-tags .color-generated-badge,
+.product-tags .suite-generated-badge,
+.product-tags .uploaded-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 18px;
+    padding: 0 8px;
+    font-size: 10px;
+    font-weight: 500;
+    line-height: 1;
+    border-radius: 20px;
+    box-sizing: border-box;
 }
 .tag {
     /* 和「颜色图」角标同高同基线，避免一排标签高低不齐 */
@@ -2933,8 +2957,11 @@ function renderProductList() {
                         <div class="product-name">${p.title_cn || p.title_en}</div>
                         ${currentColMap.material !== undefined ? `<div class="product-material">${p.material_cn || p.material_en}</div>` : ''}
                         <div class="product-tags">
-                            <span class="tag">${p.category.split("'s ")[1] || p.category}</span>
-                            ${isUploaded ? '<span class="uploaded-badge">已保存</span>' : (isLegacy ? '<span class="uploaded-badge" style="opacity:0.55;" title="旧标记，未核实保存，不作为跳过依据">历史待核</span>' : '')}
+                            <div class="tags-row">
+                                <span class="tag">${p.category.split("'s ")[1] || p.category}</span>
+                                ${isUploaded ? '<span class="uploaded-badge">已保存</span>' : (isLegacy ? '<span class="uploaded-badge" style="opacity:0.55;" title="旧标记，未核实保存，不作为跳过依据">历史待核</span>' : '')}
+                            </div>
+                            <div class="tags-row tags-row-media"></div>
                         </div>
                     </div>
                 </div>`;
@@ -2961,16 +2988,19 @@ function renderProductList() {
     } else { doRender(); }
 }
 
+// 素材角标（套图/颜色图）统一放在卡片第二行
+function mediaTagsRow(card) {
+    return (card && (card.querySelector('.tags-row-media') || card.querySelector('.product-tags'))) || null;
+}
+
 function addColorBadge(idx) {
     const card = document.querySelector(`.product-card[data-idx="${idx}"]`);
     if (!card || card.querySelector('.color-generated-badge')) return;
     const badge = document.createElement('span');
     badge.className = 'color-generated-badge';
     badge.textContent = '颜色图';
-    const tags = card.querySelector('.product-tags');
-    const firstTag = tags && tags.querySelector('.tag');
-    if (tags && firstTag) firstTag.after(badge);
-    else if (tags) tags.appendChild(badge);
+    const row = mediaTagsRow(card);
+    if (row) row.appendChild(badge);
 }
 
 async function checkColorGeneratedStatus() {
@@ -3061,10 +3091,8 @@ async function checkSuiteGeneratedStatus() {
         const badge = document.createElement('span');
         badge.className = 'suite-generated-badge';
         badge.textContent = '套图';
-        const tags = card.querySelector('.product-tags');
-        const colorBadge = tags && tags.querySelector('.color-generated-badge');
-        if (colorBadge) colorBadge.after(badge);
-        else if (tags) tags.appendChild(badge);
+        const row = mediaTagsRow(card);
+        if (row) row.insertBefore(badge, row.firstChild);   // 行2：套图 在前，颜色图 在后
     }
 }
 
