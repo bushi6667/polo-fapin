@@ -735,36 +735,43 @@ body::after {
     color: rgba(255, 255, 255, 0.9);
     font-weight: 500;
 }
-.product-tags {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-top: 8px;
-}
-/* 行1：类目 + 已保存（推到右侧）；行2：套图 + 颜色图 */
-.tags-row {
+/* 类目单独一行 */
+.product-cat { margin-top: 8px; }
+/* 底部：左素材角标（套图/颜色图），右保存状态 */
+.product-footer {
     display: flex;
     align-items: center;
     gap: 6px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    min-height: 26px;
 }
-.tags-row .uploaded-badge { margin-left: auto; }
-.tags-row-media { min-height: 18px; }
-/* 所有胶囊统一尺寸，避免大小不一 */
-.product-tags .tag,
-.product-tags .color-generated-badge,
-.product-tags .suite-generated-badge,
-.product-tags .uploaded-badge {
+.tags-row-media { display: flex; align-items: center; gap: 6px; }
+.footer-status { margin-left: auto; font-size: 12px; color: #52c41a; white-space: nowrap; }
+.footer-status.is-legacy { color: rgba(255,255,255,.45); }
+/* 类目胶囊 */
+.product-cat .tag {
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 20px; padding: 0 9px; font-size: 11px; line-height: 1;
+    border-radius: 20px; box-sizing: border-box;
+}
+/* 素材角标：带图标，尺寸一致 */
+.tags-row-media .color-generated-badge,
+.tags-row-media .suite-generated-badge {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    height: 18px;
-    padding: 0 8px;
-    font-size: 10px;
+    gap: 4px;
+    height: 24px;
+    padding: 0 10px;
+    font-size: 11px;
     font-weight: 500;
     line-height: 1;
-    border-radius: 20px;
+    border-radius: 14px;
     box-sizing: border-box;
+    border: 1px solid rgba(255, 255, 255, 0.16);
 }
+.tags-row-media svg { width: 12px; height: 12px; flex: none; }
 .tag {
     /* 和「颜色图」角标同高同基线，避免一排标签高低不齐 */
     display: inline-flex;
@@ -2956,12 +2963,10 @@ function renderProductList() {
                         <div class="product-row">行${p.row} · ${p.index}</div>
                         <div class="product-name">${p.title_cn || p.title_en}</div>
                         ${currentColMap.material !== undefined ? `<div class="product-material">${p.material_cn || p.material_en}</div>` : ''}
-                        <div class="product-tags">
-                            <div class="tags-row">
-                                <span class="tag">${p.category.split("'s ")[1] || p.category}</span>
-                                ${isUploaded ? '<span class="uploaded-badge">已保存</span>' : (isLegacy ? '<span class="uploaded-badge" style="opacity:0.55;" title="旧标记，未核实保存，不作为跳过依据">历史待核</span>' : '')}
-                            </div>
-                            <div class="tags-row tags-row-media"></div>
+                        <div class="product-cat"><span class="tag">${p.category.split("'s ")[1] || p.category}</span></div>
+                        <div class="product-footer">
+                            <div class="tags-row-media"></div>
+                            ${isUploaded ? '<span class="footer-status">✓ 已保存</span>' : (isLegacy ? '<span class="footer-status is-legacy" title="旧标记，未核实保存，不作为跳过依据">历史待核</span>' : '')}
                         </div>
                     </div>
                 </div>`;
@@ -2998,7 +3003,7 @@ function addColorBadge(idx) {
     if (!card || card.querySelector('.color-generated-badge')) return;
     const badge = document.createElement('span');
     badge.className = 'color-generated-badge';
-    badge.textContent = '颜色图';
+    badge.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="8.5" cy="10" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="10" r="1.2" fill="currentColor" stroke="none"/></svg><span>颜色图</span>';
     const row = mediaTagsRow(card);
     if (row) row.appendChild(badge);
 }
@@ -3023,16 +3028,8 @@ async function checkColorGeneratedStatus() {
         }
     } catch (_) {}
 
-    // 磁盘读不到（未授权等）才退回扩展存储
-    products.forEach((p, idx) => {
-        try {
-            chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImagesInfo', rowNum: p.row, fileKey: queriedFile }, (resp) => {
-                if (queriedFile !== currentFileKey() || products !== queriedProducts) return;
-                if (resp?.fileKey !== undefined && resp.fileKey !== queriedFile) return;
-                if (resp && resp.ok && resp.images && resp.images.length >= 4) addColorBadge(idx);
-            });
-        } catch (_) {}
-    });
+    // 只认磁盘：扫不到就不显示
+    document.querySelectorAll('.color-generated-badge').forEach(b => b.remove());
 }
 
 function addSuiteGeneratedBadge(rowNum) {
@@ -3063,22 +3060,17 @@ async function checkSuiteGeneratedStatus() {
         }
     } catch (_) { diskRows = null; }
 
-    // 磁盘读不到（未授权等）才退回记录判定
-    let store = null;
-    if (!diskRows && typeof SuiteCore !== 'undefined') {
-        try { store = SuiteCore.ResultStore(); } catch (_) {}
+    // 只认磁盘：扫不到（目录未授权等）就不显示角标，不再用旧记录顶着
+    if (!diskRows) {
+        document.querySelectorAll('.suite-generated-badge').forEach(b => b.remove());
+        return;
     }
 
     for (const product of products) {
         if (fileKey !== currentFileKey()) return;
         let complete = false;
-        if (diskRows) {
+        {
             const have = new Set(diskRows[String(product.row)] || []);
-            complete = wanted.every(k => have.has(k));
-        } else if (store) {
-            let recs = [];
-            try { recs = await store.list(fileKey, product.row); } catch (_) { recs = []; }
-            const have = new Set((recs || []).map(r => String(r.key)));
             complete = wanted.every(k => have.has(k));
         }
         const idx = products.findIndex(p => p.row === product.row);
@@ -3090,7 +3082,7 @@ async function checkSuiteGeneratedStatus() {
         if (!complete) continue;
         const badge = document.createElement('span');
         badge.className = 'suite-generated-badge';
-        badge.textContent = '套图';
+        badge.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5" fill="currentColor" stroke="none"/><path d="M21 16l-5-5-4 4-3-3-6 6"/></svg><span>套图</span>';
         const row = mediaTagsRow(card);
         if (row) row.insertBefore(badge, row.firstChild);   // 行2：套图 在前，颜色图 在后
     }

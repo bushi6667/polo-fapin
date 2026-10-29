@@ -27,7 +27,7 @@
                 if(resp&&Array.isArray(resp.files))diskFiles=resp.files;
             }catch(_){diskFiles=null;}
         }
-        const store=(diskFiles&&diskFiles.every(f=>f.dataUrl))?null:SuiteCore.ResultStore(),files=[];
+        const files=[];
         for(const key of keys){
             const hit=diskFiles&&diskFiles.find(f=>String(f.key)===key);
             if(hit&&hit.dataUrl){
@@ -35,11 +35,9 @@
                 files.push({key,dataUrl:await uploadCopy(blob),fromDisk:true});
                 continue;
             }
+            // 只用磁盘：读不到就报错，不再拿 IndexedDB 旧缓存顶上（用户要求"只用磁盘"）
             const reason=(hit&&hit.error)?hit.error:('磁盘上没有 '+folder+'/row'+rowNum+'/'+key+'.png / '+key+'.jpg');
-            if(!store)throw Error('第 '+rowNum+' 行 '+key+'：'+reason);
-            const record=await store.get(fileKey,rowNum,key);
-            if(!record?.blob||!record.meta?.verified)throw Error('第 '+rowNum+' 行 '+key+'：'+reason+'（也没有可用的旧缓存）');
-            files.push({key,dataUrl:await uploadCopy(record.blob)});
+            throw Error('第 '+rowNum+' 行 '+key+'：'+reason);
         }
         return files;
     }
