@@ -16,15 +16,31 @@
         return new Promise(function(resolve) { setTimeout(resolve, ms); });
     }
 
-    // 模拟真实鼠标点击（坐标 + mousedown/mouseup/click 事件序列）
+    // 模拟真实鼠标点击（坐标 + 完整指针事件序列）
+    // 阿里这套 next-* 组件大多把逻辑挂在 pointerdown / mousedown 上，
+    // 只发 mousedown/mouseup/click 会出现"点了没反应"（箱规步骤1/2 就这样卡住）。
+    // 这里按浏览器的真实顺序补齐 pointerdown → mousedown → pointerup → mouseup → click。
     function nativeClick(el) {
         if (!el) return;
         var rect = el.getBoundingClientRect();
         var x = rect.left + rect.width / 2;
         var y = rect.top + rect.height / 2;
-        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
-        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
-        el.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: y }));
+        var base = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window, button: 0, detail: 1 };
+        var pointer = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+        try { el.dispatchEvent(new PointerEvent('pointerdown', pointer)); } catch (_) {}
+        el.dispatchEvent(new MouseEvent('mousedown', base));
+        try { el.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, pointer, { buttons: 0 }))); } catch (_) {}
+        el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
+        el.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { buttons: 0 })));
+    }
+
+    // 单选/复选：优先点里面的 input，再补一次原生 click。
+    // 只点外层 label/包装元素时，next-radio 有时不切换选中态。
+    function clickRadio(el) {
+        if (!el) return;
+        var input = el.querySelector && el.querySelector('input[type="radio"], input[type="checkbox"]');
+        nativeClick(input || el);
+        try { if (input && !input.checked) input.click(); } catch (_) {}
     }
 
     // 带 [BoxRule] 前缀的日志；同时回传 background → 主页面日志面板。
@@ -76,8 +92,13 @@
                 }
                 if (manual) {
                     log('找到手动设置');
-                    nativeClick(manual);
+                    clickRadio(manual);
                     await sleep(500);
+                    if (!findEl('确认') && !findEl('下一步') && !findTargetRow()) {
+                        log('手动设置未生效，补点一次');
+                        clickRadio(manual);
+                        await sleep(600);
+                    }
                 }
                 if (!manual) throw new Error('未找到手动设置选项');
                 var next1 = findEl('确认') || findEl('下一步');
@@ -102,8 +123,13 @@
                 }
                 if (multi) {
                     log('找到一箱多件');
-                    nativeClick(multi);
+                    clickRadio(multi);
                     await sleep(500);
+                    if (!findEl('下一步') && !findEl('确认') && !findTargetRow()) {
+                        log('一箱多件未生效，补点一次');
+                        clickRadio(multi);
+                        await sleep(600);
+                    }
                 }
                 if (!multi) throw new Error('未找到一箱多件选项');
                 var confirm1 = findEl('下一步') || findEl('确认');

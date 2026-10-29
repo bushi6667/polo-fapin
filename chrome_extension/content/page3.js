@@ -2662,6 +2662,17 @@ async function fillBoxRule(product) {
         if (!addBtn) return ['⚠️ 箱规: 未找到添加或关联箱规按钮'];
         addBtn.scrollIntoView({ block: 'center' });
         await sleep3(200);
+        // 先补齐指针事件再点：只发 click 时阿里按钮可能不弹窗（不触发 mousedown 逻辑）
+        try {
+            const r = addBtn.getBoundingClientRect();
+            const px = Math.round(r.left + r.width / 2), py = Math.round(r.top + r.height / 2);
+            const base = { bubbles: true, cancelable: true, clientX: px, clientY: py, view: window, button: 0, detail: 1 };
+            const pointer = { bubbles: true, cancelable: true, clientX: px, clientY: py, button: 0, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+            addBtn.dispatchEvent(new PointerEvent('pointerdown', pointer));
+            addBtn.dispatchEvent(new MouseEvent('mousedown', base));
+            addBtn.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, pointer, { buttons: 0 })));
+            addBtn.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
+        } catch (_) {}
         addBtn.click();
         for (let i = 0; i < 75 && !findIframe(); i++) await sleep3(200);   // 3s → 15s，慢网下弹窗起得晚
         if (!findIframe()) {
