@@ -99,6 +99,37 @@ function setInputValue(el, val) {
     return true;
 }
 
+// 某一步没成功（返回里有 ⚠️/❌）→ 等 5 秒重试一次。
+// 用户在另一个屏幕截图、切窗口时页面会失焦，很多失败是瞬时的，重试一次基本能过。
+async function retryStepOnce(label, fn, delayMs = 5000) {
+    const first = await fn();
+    const list = Array.isArray(first) ? first : [];
+    const bad = list.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
+    if (!bad) return first;
+    log(`⏳ ${label} 未成功，等待 ${Math.round(delayMs / 1000)} 秒后重试一次`, 'warn');
+    await new Promise(r => setTimeout(r, delayMs));
+    const again = await fn();
+    return Array.isArray(again) ? again : first;
+}
+
+// 写整段文本到输入框：优先原生 setter（与页面焦点无关），
+// 只有组件不认 setter、且页面确实有焦点时才退回逐字 execCommand。
+// 背景：用户在另一个屏幕截图时页面会失焦，execCommand 的输入会静默丢失，字段变空。
+async function typeInto(el, text, gap = 10) {
+    if (!el) return false;
+    try { el.focus({ preventScroll: true }); } catch (_) {}
+    setInputValue(el, String(text));
+    await new Promise(r => setTimeout(r, 60));
+    if (String(el.value || '').trim()) return true;
+    if (!document.hasFocus()) return false;
+    for (const ch of String(text)) {
+        document.execCommand('insertText', false, ch);
+        await new Promise(r => setTimeout(r, gap));
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    return !!String(el.value || '').trim();
+}
+
 // 在输入框上派发点击事件，确认输入（配合受控组件）
 function confirmInput(el) {
     if (!el) return;
@@ -215,18 +246,24 @@ async function setAutoComplete(containerId, val, labelHint) {
     if (!inp) return false;
     await realClick(inp);
     await new Promise(r => setTimeout(r, 200));
-    inp.focus();
-    document.execCommand('selectAll', false, null);
+    try { inp.focus({ preventScroll: true }); } catch (_) {}
+    // 关键：写值走原生 setter，不用 execCommand。
+    // execCommand('insertText') 依赖页面有焦点 —— 用户在另一个屏幕截图/点别的窗口时，
+    // 输入会静默丢失，字段最后是空的（真机日志：期望 "Soft, Durable"，实际 ""）。
+    setInputValue(inp, '');
     await new Promise(r => setTimeout(r, 50));
-    document.execCommand('insertText', false, '');
-    await new Promise(r => setTimeout(r, 50));
-    for (const ch of String(val)) {
-        document.execCommand('insertText', false, ch);
-        await new Promise(r => setTimeout(r, 15));
-    }
-    inp.dispatchEvent(new Event('input', {bubbles: true}));
-    inp.dispatchEvent(new Event('change', {bubbles: true}));
+    setInputValue(inp, String(val));
     await new Promise(r => setTimeout(r, 400));
+
+    // 兜底：个别组件只认真实键盘输入，页面有焦点时才补打一遍
+    if (document.hasFocus() && !String(inp.value || '').trim()) {
+        for (const ch of String(val)) {
+            document.execCommand('insertText', false, ch);
+            await new Promise(r => setTimeout(r, 15));
+        }
+        inp.dispatchEvent(new Event('input', {bubbles: true}));
+        await new Promise(r => setTimeout(r, 300));
+    }
 
     const wLower = String(val).toLowerCase();
     for (let i = 0; i < 20; i++) {
@@ -249,9 +286,12 @@ async function setAutoComplete(containerId, val, labelHint) {
     }
 
     await new Promise(r => setTimeout(r, 200));
-    inp.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
+    try { inp.dispatchEvent(new FocusEvent('blur', {bubbles: true})); } catch (_) {}
     await new Promise(r => setTimeout(r, 300));
-    return true;
+    // 不能无条件 true：以前没选中也返回成功，于是"验证失败→补填→还失败"来回空转
+    const em = c.querySelector('.next-select-values em');
+    const shown = String((em && em.textContent) || inp.value || '').trim();
+    return !!shown;
 }
 
 // 关闭页面残留的浮层/下拉（Esc 键 + 隐藏可见 overlay），避免遮挡后续操作

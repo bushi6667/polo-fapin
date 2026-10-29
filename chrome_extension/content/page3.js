@@ -525,19 +525,21 @@ async function fillAttributeField(field, product) {
                     if (inp2 && field.val) {
                         await realClick(inp2);
                         await sleep3(100);
-                        inp2.focus();
-                        document.execCommand('selectAll', false, null);
+                        try { inp2.focus({ preventScroll: true }); } catch (_) {}
+                        // 不用 execCommand：页面失焦（另一个屏幕截图/切窗口）时输入会静默丢失，
+                        // 字段最后是空的。走原生 setter，跟焦点无关。
+                        setInputValue(inp2, '');
                         await sleep3(30);
-                        document.execCommand('delete', false, null);
-                        await sleep3(30);
-                        const valStr = String(field.val);
-                        for (const ch of valStr) {
-                            document.execCommand('insertText', false, ch);
-                            await sleep3(10);
-                        }
-                        inp2.dispatchEvent(new Event('input', {bubbles: true}));
-                        inp2.dispatchEvent(new Event('change', {bubbles: true}));
+                        setInputValue(inp2, String(field.val));
                         await sleep3(100);
+                        if (document.hasFocus() && !String(inp2.value || '').trim()) {
+                            for (const ch of String(field.val)) {
+                                document.execCommand('insertText', false, ch);
+                                await sleep3(10);
+                            }
+                            inp2.dispatchEvent(new Event('input', {bubbles: true}));
+                            await sleep3(80);
+                        }
                         confirmInput(inp2);
                         pressEnter(inp2);
                         await sleep3(100);
@@ -604,11 +606,7 @@ async function fillAttributeField(field, product) {
 
                     const before = countTags();
                     const valStr = String(val).trim();
-                    for (const ch of valStr) {
-                        document.execCommand('insertText', false, ch);
-                        await sleep3(10);
-                    }
-                    inp.dispatchEvent(new Event('input', {bubbles: true}));
+                    await typeInto(inp, valStr);   // 与页面焦点无关，截图/切窗口也不会丢输入
                     await sleep3(180);
                     
                     const allOpts = document.querySelectorAll(
@@ -1119,15 +1117,7 @@ async function fillTitlePage3(product) {
         if (ti) {
             await realClick(ti);
             await sleep3(200);
-            ti.focus();
-            document.execCommand('selectAll', false, null);
-            await sleep3(50);
-            for (const ch of String(titleVal)) {
-                document.execCommand('insertText', false, ch);
-                await sleep3(8);
-            }
-            ti.dispatchEvent(new Event('input', {bubbles: true}));
-            ti.dispatchEvent(new Event('change', {bubbles: true}));
+            await typeInto(ti, String(titleVal));   // 标题也走 setter，页3 失焦不影响
             await sleep3(100);
             pressEnter(ti);
             await sleep3(200);
@@ -1423,17 +1413,7 @@ async function fillAttributesPage3(product) {
             if (collarInp) {
                 collarC.scrollIntoView({block: 'center'});
                 await sleep3(100);
-                collarInp.focus();
-                await sleep3(30);
-                document.execCommand('selectAll', false, null);
-                document.execCommand('delete', false, null);
-                await sleep3(20);
-                for (const ch of String(collarField.val)) {
-                    document.execCommand('insertText', false, ch);
-                    await sleep3(5);
-                }
-                collarInp.dispatchEvent(new Event('input', {bubbles: true}));
-                collarInp.dispatchEvent(new Event('change', {bubbles: true}));
+                await typeInto(collarInp, String(collarField.val), 5);
                 confirmInput(collarInp);
                 await sleep3(200);
                 pressEnter(collarInp);
@@ -1482,17 +1462,7 @@ async function fillAttributesPage3(product) {
             if (sleeveInp) {
                 sleeveC.scrollIntoView({block: 'center'});
                 await sleep3(150);
-                sleeveInp.focus();
-                await sleep3(50);
-                document.execCommand('selectAll', false, null);
-                document.execCommand('delete', false, null);
-                await sleep3(30);
-                for (const ch of String(sleeveVal)) {
-                    document.execCommand('insertText', false, ch);
-                    await sleep3(8);
-                }
-                sleeveInp.dispatchEvent(new Event('input', {bubbles: true}));
-                sleeveInp.dispatchEvent(new Event('change', {bubbles: true}));
+                await typeInto(sleeveInp, String(sleeveVal), 8);
                 confirmInput(sleeveInp);
                 await sleep3(200);
                 pressEnter(sleeveInp);
@@ -2264,17 +2234,7 @@ async function fillPriceUnitPage3(product) {
             if (searchInp) {
                 await realClick(searchInp);
                 await sleep3(200);
-                searchInp.focus();
-                document.execCommand('selectAll', false, null);
-                await sleep3(50);
-                document.execCommand('insertText', false, '');
-                await sleep3(60);
-                for (const ch of 'Piece') {
-                    document.execCommand('insertText', false, ch);
-                    await sleep3(15);
-                }
-                searchInp.dispatchEvent(new Event('input', {bubbles: true}));
-                searchInp.dispatchEvent(new Event('change', {bubbles: true}));
+                await typeInto(searchInp, 'Piece', 15);
                 await sleep3(450);
             }
             const its = ov.querySelectorAll('.options-item, li, .next-menu-item');
@@ -3819,8 +3779,8 @@ async function fillAllPage3(product, step) {
     }
 
     if (run('fill_title')) results.push(...await fillTitlePage3(product));
-    if (run('fill_group')) results.push(...await fillGroupPage3(product));
-    if (run('fill_attributes')) results.push(...await fillAttributesPage3(product));
+    if (run('fill_group')) results.push(...await retryStepOnce('商品分组', () => fillGroupPage3(product)));
+    if (run('fill_attributes')) results.push(...await retryStepOnce('商品属性', () => fillAttributesPage3(product)));
     if (run('fill_colors')) results.push(...await fillColorsPage3(product));
     if (run('fill_sizes')) results.push(...await fillSizesPage3(product));
     if (run('fill_size_template')) results.push(...await fillSizeTemplate(product));
@@ -3828,8 +3788,8 @@ async function fillAllPage3(product, step) {
     if (run('fill_ladder_price')) results.push(...await fillLadderPricePage3(product));
     if (run('fill_batch_qty')) results.push(...await fillBatchQtyPage3(product));
     if (run('fill_logistics_template')) results.push(...await fillLogisticsTemplate(product));
-    if (run('fill_logistics')) results.push(...await fillLogisticsPage3(product));
-    if (run('fill_box_rule')) results.push(...await fillBoxRule(product));
+    if (run('fill_logistics')) results.push(...await retryStepOnce('物流信息', () => fillLogisticsPage3(product)));
+    if (run('fill_box_rule')) results.push(...await retryStepOnce('箱规关联', () => fillBoxRule(product)));
     if (run('fill_detail_template')) {
         const template=await fillDetailTemplate(product);results.push(...template);
         if(!template.some(r=>r.startsWith('✅ 商品详情模板:')))return results;
