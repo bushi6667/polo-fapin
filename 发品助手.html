@@ -740,15 +740,23 @@ body::after {
 /* 底部：左素材角标（套图/颜色图），右保存状态 */
 .product-footer {
     display: flex;
-    align-items: center;
+    flex-direction: column;   /* 上下排：角标一行、保存状态一行，避免挤在一行把文字压成竖排 */
+    align-items: stretch;
     gap: 6px;
     margin-top: 10px;
-    padding-top: 8px;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-    min-height: 26px;
 }
-.tags-row-media { display: flex; align-items: center; gap: 6px; }
-.footer-status { margin-left: auto; font-size: 12px; color: #52c41a; white-space: nowrap; }
+.tags-row-media { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+/* 已保存单独一行，与角标行之间一条分隔线（1 / ——— / 2） */
+.footer-status {
+    width: 100%;
+    margin-top: 2px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    text-align: right;
+    font-size: 12px;
+    color: #52c41a;
+    white-space: nowrap;
+}
 .footer-status.is-legacy { color: rgba(255,255,255,.45); }
 /* 类目胶囊 */
 .product-cat .tag {
@@ -762,6 +770,7 @@ body::after {
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    white-space: nowrap;   /* "套图" 不许被挤成两行 */
     height: 24px;
     padding: 0 10px;
     font-size: 11px;
