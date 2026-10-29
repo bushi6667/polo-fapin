@@ -2961,36 +2961,50 @@ function renderProductList() {
     } else { doRender(); }
 }
 
-function checkColorGeneratedStatus() {
+function addColorBadge(idx) {
+    const card = document.querySelector(`.product-card[data-idx="${idx}"]`);
+    if (!card || card.querySelector('.color-generated-badge')) return;
+    const badge = document.createElement('span');
+    badge.className = 'color-generated-badge';
+    badge.textContent = '颜色图';
+    const tags = card.querySelector('.product-tags');
+    const firstTag = tags && tags.querySelector('.tag');
+    if (tags && firstTag) firstTag.after(badge);
+    else if (tags) tags.appendChild(badge);
+}
+
+async function checkColorGeneratedStatus() {
     if (!extensionInstalled || products.length === 0) return;
     const queriedFile = currentFileKey();
     const queriedProducts = products;
+
+    // 以磁盘为准：颜色图和套图都扫一次目录，避免"存储里没有但磁盘有图"时角标丢失
+    try {
+        if (typeof PageDirectories !== 'undefined' && PageDirectories.dispatch) {
+            if (PageDirectories.ready && typeof PageDirectories.ready.then === 'function') await PageDirectories.ready.catch(() => {});
+            const got = await PageDirectories.dispatch({ action: 'pageScanSuiteRows', fileFolder: loadedFileName || '' });
+            if (got && got.ok && got.colors) {
+                const colors = got.colors;
+                products.forEach((p, idx) => {
+                    if ((colors[String(p.row)] || []).length >= 4) addColorBadge(idx);
+                });
+                return;
+            }
+        }
+    } catch (_) {}
+
+    // 磁盘读不到（未授权等）才退回扩展存储
     products.forEach((p, idx) => {
         try {
             chrome.runtime.sendMessage(EXTENSION_ID, { action: 'getColorImagesInfo', rowNum: p.row, fileKey: queriedFile }, (resp) => {
                 if (queriedFile !== currentFileKey() || products !== queriedProducts) return;
                 if (resp?.fileKey !== undefined && resp.fileKey !== queriedFile) return;
-                if (resp && resp.ok && resp.images && resp.images.length >= 4) {
-                    const card = document.querySelector(`.product-card[data-idx="${idx}"]`);
-                    if (card && !card.querySelector('.color-generated-badge')) {
-                        const badge = document.createElement('span');
-                        badge.className = 'color-generated-badge';
-                        badge.textContent = '颜色图';
-                        const tags = card.querySelector('.product-tags');
-                        const firstTag = tags?.querySelector('.tag');
-                        if (tags && firstTag) {
-                            firstTag.after(badge);
-                        } else if (tags) {
-                            tags.appendChild(badge);
-                        }
-                    }
-                }
+                if (resp && resp.ok && resp.images && resp.images.length >= 4) addColorBadge(idx);
             });
-        } catch (e) {}
+        } catch (_) {}
     });
 }
 
-// 用户明确不要「套图」完成角标：这里只负责清掉历史遗留的标记，不再添加。
 function addSuiteGeneratedBadge(rowNum) {
     // 生成/重生成结束后重新判定（5 张齐才显示角标）。
     // 旧实现在这里是"把角标删掉"，正是它让角标永远不出现。
@@ -3005,38 +3019,53 @@ function addSuiteGeneratedBadge(rowNum) {
 // 时显示——缺任意一张就不标，避免"看着整套齐了"其实少图。
 async function checkSuiteGeneratedStatus() {
     if (products.length === 0) return;
-    if (typeof SuiteCore === 'undefined') return;
     const fileKey = currentFileKey();
     const wanted = ['111', '222', '333', '444', '666'];
-    let store;
-    try { store = SuiteCore.ResultStore(); } catch (_) { return; }
-    const queue = products.slice();
-    let cursor = 0;
-    const worker = async () => {
-        while (cursor < queue.length) {
-            if (fileKey !== currentFileKey()) return;
-            const product = queue[cursor++];
+    let diskRows = null;
+
+    // 以磁盘为准：一次扫目录拿到每行有哪些成品图。
+    // 以前按 IndexedDB 记录判定，套图是拷进来的/记录被清过时磁盘有图也不显示角标。
+    try {
+        if (typeof PageDirectories !== 'undefined' && PageDirectories.dispatch) {
+            if (PageDirectories.ready && typeof PageDirectories.ready.then === 'function') await PageDirectories.ready.catch(() => {});
+            const got = await PageDirectories.dispatch({ action: 'pageScanSuiteRows', fileFolder: loadedFileName || '' });
+            if (got && got.ok) diskRows = got.rows || {};
+        }
+    } catch (_) { diskRows = null; }
+
+    // 磁盘读不到（未授权等）才退回记录判定
+    let store = null;
+    if (!diskRows && typeof SuiteCore !== 'undefined') {
+        try { store = SuiteCore.ResultStore(); } catch (_) {}
+    }
+
+    for (const product of products) {
+        if (fileKey !== currentFileKey()) return;
+        let complete = false;
+        if (diskRows) {
+            const have = new Set(diskRows[String(product.row)] || []);
+            complete = wanted.every(k => have.has(k));
+        } else if (store) {
             let recs = [];
             try { recs = await store.list(fileKey, product.row); } catch (_) { recs = []; }
             const have = new Set((recs || []).map(r => String(r.key)));
-            const complete = wanted.every(k => have.has(k));
-            const idx = products.findIndex(p => p.row === product.row);
-            if (idx < 0) continue;
-            const card = document.querySelector(`.product-card[data-idx="${idx}"]`);
-            if (!card) continue;
-            const existing = card.querySelector('.suite-generated-badge');
-            if (existing) existing.remove();
-            if (!complete) continue;
-            const badge = document.createElement('span');
-            badge.className = 'suite-generated-badge';
-            badge.textContent = '套图';
-            const tags = card.querySelector('.product-tags');
-            const colorBadge = tags && tags.querySelector('.color-generated-badge');
-            if (colorBadge) colorBadge.after(badge);
-            else if (tags) tags.appendChild(badge);
+            complete = wanted.every(k => have.has(k));
         }
-    };
-    await Promise.all([worker(), worker(), worker(), worker()]);
+        const idx = products.findIndex(p => p.row === product.row);
+        if (idx < 0) continue;
+        const card = document.querySelector(`.product-card[data-idx="${idx}"]`);
+        if (!card) continue;
+        const existing = card.querySelector('.suite-generated-badge');
+        if (existing) existing.remove();
+        if (!complete) continue;
+        const badge = document.createElement('span');
+        badge.className = 'suite-generated-badge';
+        badge.textContent = '套图';
+        const tags = card.querySelector('.product-tags');
+        const colorBadge = tags && tags.querySelector('.color-generated-badge');
+        if (colorBadge) colorBadge.after(badge);
+        else if (tags) tags.appendChild(badge);
+    }
 }
 
 function syncProductToExtension(product) {

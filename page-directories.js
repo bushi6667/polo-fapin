@@ -126,6 +126,33 @@
         case 'writePsImage':return {ok:true,...await writeImage('imageDir',r.fileName,new Blob([new Uint8Array(r.data)],{type:r.format==='png'?'image/png':'image/jpeg'}))};
         case 'pageReadColor':return readFirst('colorImgDir',r.fileFolder+'/row'+r.rowNum+'/row'+r.rowNum+'_'+r.color);
         // 套图成品按磁盘现读：<文件名>/rowN/<编号>.png（一次拿多张，缺哪张就少哪张，不抛错中断）
+        // 一次扫完整个产品目录，返回每行有哪些成品图（只看文件名，不读内容 → 快）。
+        // 角标要按磁盘判定，逐行读 5 张会有 500 次文件读取，太慢。
+        case 'pageScanSuiteRows':{
+            const out={},colorOut={};
+            const rootDir=await root('colorImgDir');
+            const baseDir=r.fileFolder?await rootDir.getDirectoryHandle(r.fileFolder,{create:false}):rootDir;
+            for await (const entry of baseDir.values()){
+                if(entry.kind!=='directory')continue;
+                const m=/^row(\d+)$/.exec(entry.name);
+                if(!m)continue;
+                const keys=[], colors=[];
+                const rowNum=m[1];
+                try{
+                    for await (const f of entry.values()){
+                        if(f.kind!=='file')continue;
+                        const km=/^(111|222|333|444|666)\.(png|jpg|jpeg|webp)$/i.exec(f.name);
+                        if(km){keys.push(km[1]);continue;}
+                        // 颜色图命名：rowN_<颜色>.png
+                        const cm=new RegExp('^row'+rowNum+'_(.+)\.(png|jpg|jpeg|webp)$','i').exec(f.name);
+                        if(cm)colors.push(cm[1]);
+                    }
+                }catch(_){}
+                if(keys.length)out[rowNum]=[...new Set(keys)];
+                if(colors.length)colorOut[rowNum]=[...new Set(colors)];
+            }
+            return {ok:true,rows:out,colors:colorOut};
+        }
         case 'pageReadSuite':{
             const base=(r.fileFolder?r.fileFolder+'/':'')+'row'+r.rowNum+'/';
             const files=[];
