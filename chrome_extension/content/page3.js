@@ -314,6 +314,16 @@ function detectFieldMode(container) {
     return 'search';
 }
 
+// 双语字段只取英文段：Excel 里「产品特性」这类列是 "Soft, Breathable / 柔软, 透气"，
+// 直接按逗号切会把 "Skin-Friendly / 柔软" 当一项、还会把中文当英文选项去匹配。
+function pickEnglishPart(value) {
+    const raw = String(value == null ? '' : value);
+    if (!/[一-龥]/.test(raw)) return raw;
+    const parts = raw.split('/');
+    const english = parts.filter(p => !/[一-龥]/.test(p));
+    return english.length ? english.join('/') : raw;
+}
+
 function normalizeCompare(a, b) {
     const norm = (s) => String(s || '').toLowerCase().replace(/[\s\-_/\\,，.。;；:：\(\)（）]/g, '').trim();
     const na = norm(a);
@@ -426,6 +436,17 @@ async function fillAttributeField(field, product) {
 
     let actualMode = detectFieldMode(c);
     if (field.forceMode) actualMode = field.forceMode;
+    // 配置写死 tag，但页面实际是「单选自动完成」（Polo 的产品特性就是
+    // next-select-auto-complete，没有 next-select-tag 类）：
+    // 硬按 tag 走会"填一个清一个"，最后只剩最后一个值。这里降级为单选，只填第一项。
+    if (actualMode === 'tag' && !c.querySelector('.next-select-tag, .next-select-tag-list')) {
+        const first = pickEnglishPart(field.val || '').split(/[,，]/).map(t => t.trim()).filter(Boolean)[0] || field.val;
+        if (first && first !== field.val) {
+            log(`ℹ️ ${field.lbl} 页面为单选，只填第一项：${first}`, 'info');
+            field = Object.assign({}, field, { val: first, forceMode: 'auto' });
+            actualMode = 'auto';
+        }
+    }
     let ok = false;
     let usedVal = field.val;
 
@@ -560,18 +581,28 @@ async function fillAttributeField(field, product) {
                 await sleep3(100);
                 inp.focus();
                 
-                const values = Array.isArray(field.val) 
-                    ? field.val 
-                    : String(field.val).split(/[,，]/).map(s => s.trim()).filter(Boolean);
+                const values = Array.isArray(field.val)
+                    ? field.val
+                    : pickEnglishPart(field.val).split(/[,，]/).map(s => s.trim()).filter(Boolean);
                 const addedVals = [];
-                
+                const countTags = () => c.querySelectorAll('.next-tag, [class*="tag-list"] .next-tag').length;
+                const setInputValue = (text) => {
+                    // 只动这个输入框的 value，不发 input 事件 —— 发 input 会让组件认为
+                    // 搜索词变了、把已选标签清掉（真机就是这么"填 a 清 a 填 b 清 b"的）。
+                    try {
+                        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                        setter.call(inp, text);
+                    } catch (_) { inp.value = text; }
+                };
+
                 for (const val of values) {
                     inp.focus();
-                    document.execCommand('selectAll', false, null);
-                    await sleep3(20);
-                    document.execCommand('insertText', false, '');
-                    await sleep3(20);
-                    
+                    // 选完一项后组件通常会自己清空搜索框；只有还残留内容时才清，
+                    // 不要每次都 selectAll+delete（会连带清掉已选标签）。
+                    if (inp.value && inp.value.trim()) setInputValue('');
+                    await sleep3(30);
+
+                    const before = countTags();
                     const valStr = String(val).trim();
                     for (const ch of valStr) {
                         document.execCommand('insertText', false, ch);
@@ -597,7 +628,9 @@ async function fillAttributeField(field, product) {
                     if (matchedOpt) {
                         nativeMouseClick(matchedOpt);
                         addedVals.push(matchedOpt.innerText?.trim() || valStr);
-                        await sleep3(120);
+                        await sleep3(150);
+                        const after = countTags();
+                        if (after < before) log(`⚠️ 产品特性：选中「${valStr}」后标签数 ${before}→${after}，前面的被清掉了`, 'warn');
                     } else {
                         pressEnter(inp);
                         addedVals.push(valStr);
@@ -1524,7 +1557,12 @@ async function finalAttributeAudit(requiredFields, optionalFields, product) {
         if (!currentVal || currentVal.trim() === '') {
             emptyFields.push({ ...field, reason: '值为空' });
         } else {
-            const match = normalizeCompare(currentVal, field.val);
+            // 双语值只比英文段：页面上是多选标签（英文），拿整串 "Soft / 柔软, 透气" 去比必然不匹配。
+            // 单选字段（无 next-select-tag）只比第一项，否则永远判不匹配 → 反复补填。
+            const english = pickEnglishPart(field.val);
+            const multi = !!(c.querySelector('.next-select-tag, .next-select-tag-list'));
+            const expectVal = multi ? english : (english.split(/[,，]/).map(t => t.trim()).filter(Boolean)[0] || field.val);
+            const match = normalizeCompare(currentVal, expectVal);
             if (match) {
                 filledFields.push(field.lbl);
             } else {
