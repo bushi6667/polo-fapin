@@ -3903,7 +3903,7 @@ function createPage3Panel() {
 
     panel.innerHTML = `
         <div id="polo-panel-header" style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">
-            <h3 style="margin:0;font-size:15px;font-weight:600;">📦 Polo发品助手 (页3)</h3>
+            <h3 style="margin:0;font-size:15px;font-weight:600;">📦 Polo发品助手 (页3)<span id="polo-ver" style="opacity:.75;font-size:10px;font-weight:400;margin-left:6px;vertical-align:middle;"></span></h3>
             <div style="display:flex;align-items:center;gap:8px;">
                 <span id="polo-collapse" style="cursor:pointer;opacity:0.8;font-size:16px;padding:0 4px;line-height:1;">−</span>
                 <span id="polo-close" style="cursor:pointer;opacity:0.8;font-size:18px;padding:0 4px;">×</span>
@@ -3960,6 +3960,12 @@ function createPage3Panel() {
     `;
 
     document.body.appendChild(panel);
+
+    const verEl = document.getElementById('polo-ver');
+    if (verEl) {
+        const mb = document.querySelector('meta[name="polo-build"]');
+        verEl.textContent = mb ? ' ' + String(mb.getAttribute('content') || '').replace('T', ' ').slice(5, 16) : '';
+    }
 
     const header = document.getElementById('polo-panel-header');
     const content = document.getElementById('polo-panel-content');
