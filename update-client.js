@@ -54,6 +54,53 @@
         return { ...cur, granted: perm === 'granted' };
     }
 
+
+    // ---- 网络：页面直连优先，失败改走扩展后台（绕过 CORS，可重试）----
+    function extId() {
+        try { return localStorage.getItem('polo_extension_id') || ''; } catch (_) { return ''; }
+    }
+
+    function viaExtension(payload) {
+        return new Promise((resolve, reject) => {
+            const id = extId();
+            if (!id) return reject(Error('未配置扩展 ID'));
+            try {
+                chrome.runtime.sendMessage(id, payload, resp => {
+                    const err = chrome.runtime.lastError;
+                    if (err) return reject(Error(err.message));
+                    if (!resp) return reject(Error('扩展未回复'));
+                    if (!resp.ok) return reject(Error(resp.error || '取回失败'));
+                    resolve(resp);
+                });
+            } catch (e) { reject(e); }
+        });
+    }
+
+    async function getJson(url) {
+        try {
+            const r = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+            if (!r.ok) throw Error('HTTP ' + r.status);
+            return await r.json();
+        } catch (_) {
+            const r = await viaExtension({ action: 'updaterFetch', url, json: true });
+            return JSON.parse(r.text);
+        }
+    }
+
+    async function getBytes(url) {
+        try {
+            const r = await fetch(url, { cache: 'no-store' });
+            if (!r.ok) throw Error('HTTP ' + r.status);
+            return new Uint8Array(await r.arrayBuffer());
+        } catch (_) {
+            const r = await viaExtension({ action: 'updaterFetch', url, json: false });
+            const bin = atob(r.base64 || '');
+            const out = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            return out;
+        }
+    }
+
     function localBuild() {
         const meta = document.querySelector('meta[name="polo-build"]');
         return meta ? meta.getAttribute('content') : '';
