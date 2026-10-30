@@ -1796,6 +1796,13 @@ body::after {
 </head>
 <body>
 
+
+<div id="updaterBar" style="display:none;position:sticky;top:0;z-index:9998;margin:0 0 10px;padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);font-size:12px;color:#d9d9d9;align-items:center;gap:10px;flex-wrap:wrap;">
+    <span id="updBranch" style="color:#8c8c8c;"></span>
+    <span id="updHead" style="font-family:monospace;color:#91caff;"></span>
+    <span id="updMsg"></span>
+    <button id="updBtn" style="margin-left:auto;padding:4px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:rgba(22,119,255,.25);color:#e6f4ff;cursor:pointer;display:none;">立即更新</button>
+</div>
 <div class="page-header">
     <h1>产品发品助手</h1>
     <p class="sub-title">上传Excel · 选择产品 · 一键发品</p>
@@ -7960,7 +7967,70 @@ document.addEventListener('keydown', (e) => {
   }
   window.addEventListener('load',function(){ setTimeout(check,800); });
   window.addEventListener('focus',function(){ setTimeout(check,300); });
-  window.__dirPermCheck=check;
+  
+(function () {
+    // 版本检查 / 下载新版（零依赖：只读公开仓库的 version.json，不需要任何本地程序）
+    const REPO = 'bushi6667/polo-fapin';
+    const bar = document.getElementById('updaterBar');
+    const elBranch = document.getElementById('updBranch');
+    const elHead = document.getElementById('updHead');
+    const elMsg = document.getElementById('updMsg');
+    const btn = document.getElementById('updBtn');
+    if (!bar || !btn) return;
+
+    let local = null, remote = null;
+
+    function show(msg, color) {
+        bar.style.display = 'flex';
+        elMsg.textContent = msg;
+        elMsg.style.color = color || '#8c8c8c';
+    }
+
+    async function readJson(url) {
+        const r = await fetch(url, { cache: 'no-store' });
+        if (!r.ok) return null;
+        return await r.json();
+    }
+
+    async function refresh() {
+        try {
+            local = await readJson('version.json?t=' + Date.now());
+        } catch (_) { local = null; }
+        if (!local || !local.sha) { bar.style.display = 'none'; return; }
+
+        elBranch.textContent = local.branch || '';
+        elHead.textContent = local.sha;
+        bar.style.display = 'flex';
+        btn.style.display = 'none';
+
+        const branch = local.branch || 'master';
+        try {
+            remote = await readJson('https://raw.githubusercontent.com/' + REPO + '/' + encodeURIComponent(branch) + '/version.json?t=' + Date.now());
+        } catch (_) { remote = null; }
+
+        if (!remote || !remote.sha) {
+            show('检查失败（仓库未公开或无网络）', '#ff9c6e');
+            return;
+        }
+        if (remote.sha === local.sha) {
+            show('已是最新', '#8c8c8c');
+            return;
+        }
+        show('有新版本 ' + remote.sha + '（本地 ' + local.sha + '）', '#69b1ff');
+        btn.style.display = 'inline-block';
+        btn.textContent = '下载新版';
+    }
+
+    btn.addEventListener('click', () => {
+        if (!remote || !remote.sha) return;
+        window.open('https://github.com/' + REPO + '/archive/' + remote.sha + '.zip', '_blank');
+        show('已开始下载 ' + remote.sha + '，解压后覆盖目录并刷新扩展', '#52c41a');
+    });
+
+    refresh();
+    setInterval(refresh, 600000);
+})();
+window.__dirPermCheck=check;
 })();
 </script>
 </body>

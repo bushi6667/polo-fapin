@@ -104,7 +104,9 @@
         "runtime/u2net.onnx",
         "js代码/brand_blacklist.json"
       ],
-      "matches": ["<all_urls>"]
+      "matches": [
+        "<all_urls>"
+      ]
     },
     {
       "resources": [
