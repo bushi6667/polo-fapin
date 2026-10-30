@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="polo-build" content="2026-10-31T00:04:27+08:00">
+<meta name="polo-build" content="2026-10-31T00:13:22+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -8036,7 +8036,8 @@ document.addEventListener('keydown', (e) => {
             }
             show('正在下载…', '#69b1ff');
             const r = await PoloUpdater.apply(p => {
-                if (p.phase === 'download' && p.total) show('下载 ' + p.done + '/' + p.total, '#69b1ff');
+                if (p.phase === 'zip') show('正在下载整包… ' + (p.elapsed || 0) + 's', '#69b1ff');
+                else if (p.phase === 'download' && p.total) show('下载 ' + p.done + '/' + p.total, '#69b1ff');
             });
             if (!r.updated) { show('已是最新'); busy = false; return; }
             if (r.failed && r.failed.length) {

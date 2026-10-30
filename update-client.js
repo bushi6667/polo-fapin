@@ -223,7 +223,7 @@
     }
 
     async function fetchZip(sha) {
-        try { return await fetchZipViaExtension(sha); } catch (_) {}
+        // 镜像 8MB 约 40 秒；扩展分块（8×1MB 走消息通道）反而更慢，所以镜像优先
         let lastErr = '';
         for (const make of MIRRORS) {
             const url = make(sha);
@@ -235,6 +235,7 @@
                 lastErr = '返回内容为空';
             } catch (e) { lastErr = String((e && e.message) || e); }
         }
+        try { return await fetchZipViaExtension(sha); } catch (e) { lastErr = lastErr || String((e && e.message) || e); }
         throw Error('下载失败：' + (lastErr || '所有通道都不通'));
     }
 
@@ -366,8 +367,12 @@
         if (!info.hasUpdate) return { updated: false, sha: info.remote.sha, written: 0, failed: [] };
 
         const sha = info.remote.sha;
-        report({ phase: 'zip' });
-        const zipBuf = await fetchZip(sha);
+        report({ phase: 'zip', elapsed: 0 });
+        const t0 = Date.now();
+        const tick = setInterval(() => report({ phase: 'zip', elapsed: Math.round((Date.now() - t0) / 1000) }), 1000);
+        let zipBuf;
+        try { zipBuf = await fetchZip(sha); }
+        finally { clearInterval(tick); }
         const entries = (await unzip(zipBuf)).filter(e => keep(e.path));
         const total = entries.length;
         report({ phase: 'download', done: 0, total });
