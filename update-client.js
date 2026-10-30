@@ -152,7 +152,12 @@
     async function check(force) {
         const cached = readCache();
         if (!force && cached && cached.value && (Date.now() - cached.at) < CACHE_MS) {
-            return Object.assign({}, cached.value, { fromCache: true });
+            // 缓存可能是"更新前"算的（那时判定有新版）；现在要用当前 appliedSha 重新校验，
+            // 否则更新完成刷新页面后，还会拿着旧结论说"有新版本"
+            const v = Object.assign({}, cached.value, { fromCache: true });
+            const nowApplied = (function () { try { return localStorage.getItem('polo_update_applied') || ''; } catch (_) { return ''; } })();
+            if (nowApplied && v.remote && v.remote.sha) v.hasUpdate = (nowApplied !== String(v.remote.sha));
+            return v;
         }
         const local = localBuild();
         let remote;
@@ -162,7 +167,10 @@
             const msg = String((e && e.message) || e);
             const old = readCache();
             if (/403/.test(msg) && old && old.value) {
-                return Object.assign({}, old.value, { rateLimited: true, fromCache: true });
+                const v = Object.assign({}, old.value, { rateLimited: true, fromCache: true });
+                const nowApplied = (function () { try { return localStorage.getItem('polo_update_applied') || ''; } catch (_) { return ''; } })();
+                if (nowApplied && v.remote && v.remote.sha) v.hasUpdate = (nowApplied !== String(v.remote.sha));
+                return v;
             }
             if (/403/.test(msg)) throw Error('GitHub 查询额度已用完（每小时 60 次），稍后再试');
             throw e;
