@@ -18,7 +18,7 @@
     const DB_NAME = 'PoloUpdater';
     const STORE = 'h';
     const KEY = 'projectDir';
-    const BACKUP_DIR = '归档/update-backup';
+    const BACKUP_PARTS = ['归档', 'update-backup'];   // 目录 API 不接受带 / 的名字，必须拆段
 
     // 目录句柄统一由 PageDirectories 管理（路径配置里选择），这里只取用
     async function pdReady() {
@@ -225,7 +225,7 @@
                 // 备份旧文件，写失败还能找回
                 const old = await readExisting(root, parts, name);
                 if (old) {
-                    await writeFile(root, [BACKUP_DIR, ts, ...parts], name, old);
+                    await writeFile(root, [...BACKUP_PARTS, ts, ...parts], name, old);
                 }
 
                 await writeFile(root, parts, name, bytes);
@@ -239,7 +239,7 @@
 
         try { localStorage.setItem('polo_update_applied', sha); } catch (_) {}
         report({ phase: 'done', done, total, written: written.length, failed });
-        return { updated: true, sha, written: written.length, failed, backup: BACKUP_DIR + '/' + ts };
+        return { updated: true, sha, written: written.length, failed, backup: BACKUP_PARTS.join('/') + '/' + ts };
     }
 
     window.PoloUpdater = { getDir, pickDir, requestPerm, check, apply, localBuild, REPO, BRANCH };
