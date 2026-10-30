@@ -4263,19 +4263,13 @@ function createPage3Panel() {
     }
 
     if (modeFillDropdownBtn) {
+        // 折叠态的 ▾：此前是独立旧处理器（block 单列、只向下），展开态修好后这里没跟上。
+        // 统一走 positionMenu：grid 两列 + 上下自适应。
         modeFillDropdownBtn.onclick = (e) => {
             e.stopPropagation();
-            // 动态计算菜单位置：定位到 modeFillSplit 容器下方
-            const splitRect = document.getElementById('polo-mode-fill-split').getBoundingClientRect();
-            menu.style.top = (splitRect.bottom + 4) + 'px';
-            menu.style.left = splitRect.left + 'px';
-            menu.style.width = splitRect.width + 'px';
-            const maxH = window.innerHeight - splitRect.bottom - 16;
-            menu.style.maxHeight = Math.max(160, maxH) + 'px';
-            
-            // 关闭另一个下拉按钮的菜单状态（可选，这里直接切换显示）
-            const isDisplayed = menu.style.display === 'block';
-            menu.style.display = isDisplayed ? 'none' : 'block';
+            const isDisplayed = menu.style.display === 'grid';
+            if (isDisplayed) { menu.style.display = 'none'; return; }
+            positionMenu('polo-mode-fill-split');
         };
     }
 
@@ -4380,8 +4374,8 @@ function createPage3Panel() {
 
     // CDP 提示条出现/消失、窗口缩放都会改变视口高度；
     // 菜单位置只在打开瞬间算一次，视口一变就悬在错的地方 → resize 时重算
-    function positionMenu() {
-        const splitRect = document.getElementById('polo-autofill-split').getBoundingClientRect();
+    function positionMenu(anchorId) {
+        const splitRect = document.getElementById(anchorId || 'polo-autofill-split').getBoundingClientRect();
         const GAP = 4, EDGE = 10, MAXH = 420;
 
         menu.style.left = splitRect.left + 'px';
