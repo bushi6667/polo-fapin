@@ -154,8 +154,15 @@
         return false;
     }
 
-    // 整包下载（后台取 codeload zip，分块回传）：8MB / 2 秒，比逐文件快一个数量级
-    async function fetchZip(sha) {
+    // 整包下载：
+    //   ① 扩展后台（快，但需要扩展已重载并带权限）
+    //   ② 公共加速代理（页面可直接跨域下载，无需扩展）
+    const MIRRORS = [
+        sha => 'https://gh-proxy.com/https://github.com/' + REPO + '/archive/' + sha + '.zip',
+        sha => 'https://ghproxy.net/https://github.com/' + REPO + '/archive/' + sha + '.zip',
+    ];
+
+    async function fetchZipViaExtension(sha) {
         await withTimeout(viaExtension({ action: 'updaterZip', sha }), 70000, '下载整包');
         const CHUNK = 1 << 20;
         const parts = [];
@@ -174,7 +181,24 @@
         const out = new Uint8Array(total);
         let off = 0;
         for (const a of parts) { out.set(a, off); off += a.length; }
+        if (!out.length) throw Error('扩展没有返回内容');
         return out;
+    }
+
+    async function fetchZip(sha) {
+        try { return await fetchZipViaExtension(sha); } catch (_) {}
+        let lastErr = '';
+        for (const make of MIRRORS) {
+            const url = make(sha);
+            try {
+                const r = await withTimeout(fetch(url, { cache: 'no-store' }), 120000, '下载整包');
+                if (!r.ok) { lastErr = 'HTTP ' + r.status; continue; }
+                const buf = new Uint8Array(await r.arrayBuffer());
+                if (buf.length > 1000) return buf;
+                lastErr = '返回内容为空';
+            } catch (e) { lastErr = String((e && e.message) || e); }
+        }
+        throw Error('下载失败：' + (lastErr || '所有通道都不通'));
     }
 
     function u16(b, o) { return b[o] | (b[o + 1] << 8); }
