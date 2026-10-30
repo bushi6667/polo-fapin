@@ -20,106 +20,38 @@
     const KEY = 'projectDir';
     const BACKUP_DIR = '归档/update-backup';
 
-    function db() {
-        return new Promise((resolve, reject) => {
-            const req = indexedDB.open(DB_NAME, 1);
-            req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => reject(req.error);
-        });
-    }
-
-    async function idbGet() {
-        const d = await db();
-        try {
-            return await new Promise((resolve, reject) => {
-                const tx = d.transaction(STORE, 'readonly');
-                const r = tx.objectStore(STORE).get(KEY);
-                r.onsuccess = () => resolve(r.result || null);
-                r.onerror = () => reject(r.error);
-            });
-        } finally { d.close(); }
-    }
-
-    async function idbSet(value) {
-        const d = await db();
-        try {
-            await new Promise((resolve, reject) => {
-                const tx = d.transaction(STORE, 'readwrite');
-                tx.objectStore(STORE).put(value, KEY);
-                tx.oncomplete = resolve;
-                tx.onerror = () => reject(tx.error);
-            });
-        } finally { d.close(); }
+    // 目录句柄统一由 PageDirectories 管理（路径配置里选择），这里只取用
+    async function pdReady() {
+        const pd = window.PageDirectories;
+        if (!pd) return null;
+        try { await pd.ready; } catch (_) {}
+        return pd;
     }
 
     async function getDir() {
-        const rec = await idbGet();
-        if (!rec || !rec.handle) return null;
-        const h = rec.handle;
-        const perm = await h.queryPermission({ mode: 'readwrite' });
-        return { handle: h, name: rec.name || h.name, granted: perm === 'granted' };
+        const pd = await pdReady();
+        const h = pd && pd.handles && pd.handles.projectDir;
+        if (!h) return null;
+        let perm = 'prompt';
+        try { perm = await h.queryPermission({ mode: 'readwrite' }); } catch (_) {}
+        const rec = pd.records && pd.records.projectDir;
+        return { handle: h, name: (rec && rec.name) || h.name, granted: perm === 'granted' };
     }
 
-    // 必须在点击手势内调用
+    // 必须在点击手势内调用；优先走路径配置的同一入口
     async function pickDir() {
-        const handle = await window.showDirectoryPicker({ id: 'polo-project', mode: 'readwrite' });
-        await idbSet({ handle, name: handle.name, at: Date.now() });
-        return { handle, name: handle.name, granted: true };
+        const pd = await pdReady();
+        if (!pd) throw Error('目录模块未加载');
+        const rec = await pd.choose('projectDir');
+        return { handle: rec.handle, name: rec.name, granted: true };
     }
 
     async function requestPerm() {
         const cur = await getDir();
         if (!cur) return null;
-        const perm = await cur.handle.requestPermission({ mode: 'readwrite' });
+        let perm = 'prompt';
+        try { perm = await cur.handle.requestPermission({ mode: 'readwrite' }); } catch (_) {}
         return { ...cur, granted: perm === 'granted' };
-    }
-
-
-    // ---- 网络：页面直连优先，失败改走扩展后台（绕过 CORS，可重试）----
-    function extId() {
-        try { return localStorage.getItem('polo_extension_id') || ''; } catch (_) { return ''; }
-    }
-
-    function viaExtension(payload) {
-        return new Promise((resolve, reject) => {
-            const id = extId();
-            if (!id) return reject(Error('未配置扩展 ID'));
-            try {
-                chrome.runtime.sendMessage(id, payload, resp => {
-                    const err = chrome.runtime.lastError;
-                    if (err) return reject(Error(err.message));
-                    if (!resp) return reject(Error('扩展未回复'));
-                    if (!resp.ok) return reject(Error(resp.error || '取回失败'));
-                    resolve(resp);
-                });
-            } catch (e) { reject(e); }
-        });
-    }
-
-    async function getJson(url) {
-        try {
-            const r = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
-            if (!r.ok) throw Error('HTTP ' + r.status);
-            return await r.json();
-        } catch (_) {
-            const r = await viaExtension({ action: 'updaterFetch', url, json: true });
-            return JSON.parse(r.text);
-        }
-    }
-
-    async function getBytes(url) {
-        try {
-            const r = await fetch(url, { cache: 'no-store' });
-            if (!r.ok) throw Error('HTTP ' + r.status);
-            return new Uint8Array(await r.arrayBuffer());
-        } catch (_) {
-            const r = await viaExtension({ action: 'updaterFetch', url, json: false });
-            const bin = atob(r.base64 || '');
-            const out = new Uint8Array(bin.length);
-            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-            return out;
-        }
     }
 
     function localBuild() {

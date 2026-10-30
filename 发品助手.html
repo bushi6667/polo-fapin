@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="polo-build" content="2026-10-30T11:20:00+08:00">
+<meta name="polo-build" content="2026-10-30T11:05:00+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -8024,8 +8024,11 @@ document.addEventListener('keydown', (e) => {
         try {
             let dir = await PoloUpdater.getDir();
             if (!dir) {
-                show('请选择项目根目录（只需一次）', '#faad14');
-                dir = await PoloUpdater.pickDir();          // 必须在点击手势内
+                // 目录授权统一放在「路径配置」里管理，这里只引导过去
+                show('请先在「路径配置」选择项目根目录', '#faad14');
+                try { PathConfig.open(); } catch (_) {}
+                busy = false;
+                return;
             } else if (!dir.granted) {
                 dir = await PoloUpdater.requestPerm();
                 if (!dir || !dir.granted) { show('目录授权被拒绝', '#ff4d4f'); busy = false; return; }

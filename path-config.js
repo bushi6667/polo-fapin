@@ -16,7 +16,8 @@
     const FIELDS = [
         { key: 'colorImgDir', label: '产品图片目录', hint: '统一保存颜色图与套图成品（<Excel文件名>/rowN/）' },
         { key: 'imageDir', label: '产品原图目录', hint: '产品主图来源目录' },
-        { key: 'scriptDir', label: 'JS 脚本目录', hint: '后处理脚本所在目录' }
+        { key: 'scriptDir', label: 'JS 脚本目录', hint: '后处理脚本所在目录' },
+        { key: 'projectDir', label: '项目根目录（自更新）', hint: '更新时直接覆盖代码文件；只改 .html/.js/.css 和 chrome_extension，不动表格与图片' }
     ];
 
     const KEY_BY_FIELD = FIELDS.reduce((m, f) => { m[f.key] = f.label; return m; }, {});

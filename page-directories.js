@@ -2,7 +2,7 @@
 (() => {
     'use strict';
     const handles = {}, records = {}, scriptSnapshots = new Map();
-    const keys = ['colorImgDir','imageDir','scriptDir'];
+    const keys = ['colorImgDir','imageDir','scriptDir','projectDir'];
     let migrationConflict=false;
     function db() { return new Promise((resolve,reject)=>{
         const req=indexedDB.open('PoloPageDirectories',1);
