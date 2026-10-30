@@ -3889,6 +3889,8 @@ async function fillAllPage3(product, step) {
     return results;
 }
 
+const POLO_BUILD = '10-31 00:50';
+
 function createPage3Panel() {
     if (document.getElementById('polo-helper-panel')) return;
 
@@ -3963,8 +3965,7 @@ function createPage3Panel() {
 
     const verEl = document.getElementById('polo-ver');
     if (verEl) {
-        const mb = document.querySelector('meta[name="polo-build"]');
-        verEl.textContent = mb ? ' ' + String(mb.getAttribute('content') || '').replace('T', ' ').slice(5, 16) : '';
+        verEl.textContent = ' ' + POLO_BUILD;
     }
 
     const header = document.getElementById('polo-panel-header');
