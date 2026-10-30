@@ -593,7 +593,10 @@ function updateProductInfo(product) {
     const titleEn = product.seo_title_en || product.seo_title || product.title_en || '无标题';
     const titleCn = product.seo_title_cn || product.title_cn || '';
     info.innerHTML = `
-        <div style="color:#666;font-size:12px;margin-bottom:4px;">当前产品 (行${product.row})</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;color:#666;font-size:12px;margin-bottom:4px;">
+            <span>当前产品 (行${product.row})</span>
+            <span style="white-space:nowrap;">${(function(){var m=String(product._publishFileKey||product._fileName||'').match(/第(\d+)批/);return m?(m[1]+'批次'):'';})()}</span>
+        </div>
         <div style="font-weight:500;color:#333;line-height:1.4;word-break:break-all;">${titleEn}</div>
         ${titleCn ? `<div style="font-weight:500;color:#333;line-height:1.4;word-break:break-all;margin-top:4px;">${titleCn}</div>` : ''}
         <div style="color:#999;font-size:11px;margin-top:4px;">

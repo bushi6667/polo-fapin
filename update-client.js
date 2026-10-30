@@ -150,11 +150,11 @@
         const lt = Date.parse(local);
         const rt = Date.parse(remote.date);
         // 用「上次更新写入的 sha」优先判定：光比时间会在更新后仍显示有新版本，来回循环。
+        // 判定只看时间：远端提交比本地构建新（>60s）才算有更新。
+        // 「我本地改完直接提交」的场景，本地文件就是远端内容 → built >= commit → 已是最新。
         let applied = '';
         try { applied = localStorage.getItem('polo_update_applied') || ''; } catch (_) {}
-        const hasUpdate = applied
-            ? (String(applied) !== String(remote.sha))
-            : (isFinite(lt) && isFinite(rt) && (rt - lt) > 60 * 1000);
+        const hasUpdate = isFinite(lt) && isFinite(rt) && (rt - lt) > 60 * 1000;
         return { localBuild: local, remote, appliedSha: applied, hasUpdate };
     }
 

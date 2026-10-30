@@ -3889,7 +3889,7 @@ async function fillAllPage3(product, step) {
     return results;
 }
 
-const POLO_BUILD = '10-31 00:50';
+const POLO_BUILD = '10-31 01:02';
 
 function createPage3Panel() {
     if (document.getElementById('polo-helper-panel')) return;
@@ -3905,7 +3905,10 @@ function createPage3Panel() {
 
     panel.innerHTML = `
         <div id="polo-panel-header" style="background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">
-            <h3 style="margin:0;font-size:15px;font-weight:600;">📦 Polo发品助手 (页3)<span id="polo-ver" style="opacity:.75;font-size:10px;font-weight:400;margin-left:6px;vertical-align:middle;"></span></h3>
+            <div style="min-width:0;">
+                <h3 style="margin:0;font-size:15px;font-weight:600;">📦 Polo发品助手 (页3)</h3>
+                <div id="polo-ver" style="opacity:.75;font-size:10px;font-weight:400;margin-top:2px;white-space:nowrap;"></div>
+            </div>
             <div style="display:flex;align-items:center;gap:8px;">
                 <span id="polo-collapse" style="cursor:pointer;opacity:0.8;font-size:16px;padding:0 4px;line-height:1;">−</span>
                 <span id="polo-close" style="cursor:pointer;opacity:0.8;font-size:18px;padding:0 4px;">×</span>
@@ -3965,7 +3968,7 @@ function createPage3Panel() {
 
     const verEl = document.getElementById('polo-ver');
     if (verEl) {
-        verEl.textContent = ' ' + POLO_BUILD;
+        verEl.textContent = '版本 ' + POLO_BUILD;
     }
 
     const header = document.getElementById('polo-panel-header');
