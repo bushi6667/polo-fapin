@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="polo-build" content="2026-10-30T10:43:58+08:00">
+<meta name="polo-build" content="2026-10-30T10:45:33+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -1798,15 +1798,15 @@ body::after {
 <body>
 
 
-<div id="updaterBar" style="display:none;position:sticky;top:0;z-index:9998;margin:0 0 10px;padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);font-size:12px;color:#d9d9d9;align-items:center;gap:10px;flex-wrap:wrap;">
-    <span id="updBranch" style="color:#8c8c8c;"></span>
-    <span id="updHead" style="font-family:monospace;color:#91caff;"></span>
-    <span id="updMsg"></span>
-    <button id="updBtn" style="margin-left:auto;padding:4px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.2);background:rgba(22,119,255,.25);color:#e6f4ff;cursor:pointer;display:none;">立即更新</button>
-</div>
 <div class="page-header">
     <h1>产品发品助手</h1>
     <p class="sub-title">上传Excel · 选择产品 · 一键发品</p>
+    <div id="updaterBar" style="display:none;align-items:center;gap:8px;margin-top:10px;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);font-size:12px;color:#bfbfbf;max-width:560px;">
+        <span id="updBranch" style="color:#8c8c8c;flex:none;"></span>
+        <span id="updHead" style="font-family:monospace;color:#91caff;flex:none;"></span>
+        <span id="updMsg" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        <button id="updBtn" style="display:none;flex:none;padding:3px 10px;border-radius:6px;border:1px solid rgba(22,119,255,.5);background:rgba(22,119,255,.2);color:#e6f4ff;cursor:pointer;">下载新版</button>
+    </div>
 </div>
 
 <div class="container">
@@ -8021,8 +8021,9 @@ document.addEventListener('keydown', (e) => {
         if (remoteTime <= localTime) { show('已是最新', '#8c8c8c'); return; }
 
         const shortSha = String(remote.sha).slice(0, 7);
-        const title = String((remote.commit && remote.commit.message) || '').split(String.fromCharCode(10))[0].slice(0, 40);
-        show('有新版本 ' + shortSha + '：' + title, '#69b1ff');
+        const title = String((remote.commit && remote.commit.message) || '').split(String.fromCharCode(10))[0];
+        show('有新版本 ' + shortSha, '#69b1ff');
+        elMsg.title = title;
         btn.style.display = 'inline-block';
         btn.textContent = '下载新版';
     }
