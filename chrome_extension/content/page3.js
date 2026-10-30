@@ -4361,28 +4361,27 @@ function createPage3Panel() {
             // 动态计算菜单位置：父容器 #polo-autofill-split 有 overflow:hidden，
             // 用 position:fixed + getBoundingClientRect() 避免菜单被裁剪
             const splitRect = document.getElementById('polo-autofill-split').getBoundingClientRect();
+            const GAP = 4, EDGE = 10, MAXH = 420;
+
             menu.style.left = splitRect.left + 'px';
             menu.style.width = splitRect.width + 'px';
-            menu.style.display = 'block';   // 先显示，才能量到真实高度
+            menu.style.maxHeight = 'none';
+            menu.style.display = 'block';
+            const contentH = menu.scrollHeight || 320;
 
-            const GAP = 4, EDGE = 16;
-            const spaceBelow = window.innerHeight - splitRect.bottom - EDGE;
-            const spaceAbove = splitRect.top - EDGE;
-            const need = Math.min(menu.scrollHeight || 320, 420);
+            const spaceUp = splitRect.top - GAP - EDGE;
+            const spaceDown = window.innerHeight - splitRect.bottom - GAP - EDGE;
 
-            // 面板贴左下角后，下方常常不够 → 放不下就改成往上展开（用户要求）
-            // 判定加一条"按钮在下半屏就往上"，不依赖 scrollHeight 的测量结果
-            const inBottomHalf = splitRect.top > window.innerHeight * 0.5;
-            window.__poloMenuDebug = { top: splitRect.top, bottom: splitRect.bottom, vh: window.innerHeight, spaceBelow, spaceAbove, need, inBottomHalf };
-            if (inBottomHalf && spaceAbove > spaceBelow) {
-                menu.style.top = 'auto';
-                menu.style.bottom = (window.innerHeight - splitRect.top + GAP) + 'px';
-                menu.style.maxHeight = Math.max(120, Math.min(spaceAbove, 420)) + 'px';
-            } else {
-                menu.style.bottom = 'auto';
-                menu.style.top = (splitRect.bottom + GAP) + 'px';
-                menu.style.maxHeight = Math.max(120, Math.min(spaceBelow, 420)) + 'px';
-            }
+            // 上方更宽裕、且下方装不下就往上弹
+            const need = Math.min(contentH, MAXH);
+            const up = spaceDown < need && spaceUp > spaceDown;
+
+            const h = Math.max(120, Math.min(contentH, up ? spaceUp : spaceDown, MAXH));
+            menu.style.maxHeight = h + 'px';
+            menu.style.bottom = 'auto';
+            menu.style.top = (up ? Math.max(EDGE, splitRect.top - GAP - h) : splitRect.bottom + GAP) + 'px';
+
+            window.__poloMenuDebug = { up, contentH, h, spaceUp, spaceDown, top: menu.style.top };
         } else {
             menu.style.display = 'none';
         }
