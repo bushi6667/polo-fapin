@@ -473,6 +473,22 @@ async function loadBatchProduct(rowNum) {
             log('✓ 从批量数据加载产品: 行' + rowNum, 'success');
             if (resp.autoFillAllowed === false) {
                 log('该页已保存或产品页身份不匹配，不自动重填', 'info');
+                // 必须给队列一个完成信号，否则它一直等这一行 → 超时暂停。
+                // 真机事故：09:59 停在这里，队列卡了 13 小时（pauseReason=rowTimeout）。
+                try {
+                    const r = await sendMessageRetry({
+                        action: 'publishFilled',
+                        row: rowNum,
+                        taskId: (function () {
+                            try { return new URLSearchParams(window.location.search).get('task') || null; } catch (e) { return null; }
+                        })(),
+                        skipped: true,
+                        note: 'skip-already-saved'
+                    });
+                    log('已上报跳过（该行不再等待）: ' + ((r && (r.message || r.ok)) || 'ok'), 'info');
+                } catch (e) {
+                    log('上报跳过失败: ' + e.message, 'warn');
+                }
                 return true;
             }
             
