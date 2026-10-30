@@ -1465,7 +1465,10 @@ async function fillAttributesPage3(product) {
         try {
             const res = await fillAttributeField(field, product);
             if (!res) continue;
-            results.push(res.ok ? `✅ ${res.lbl} = ${res.usedVal}` : `⚠️ ${res.lbl}: 未找到`);
+            // pending = 页面上还没渲染出这个字段；本类目可能根本没有该字段（如 Polo 没有「产品类型」），
+            // 记成"未找到"会污染结果并触发"仍有未完成项"。
+            if (res.pending) { log(`⏭️ ${res.lbl} 本类目无此字段，跳过`, 'info'); continue; }
+            results.push(res.ok ? `✅ ${res.lbl} = ${res.usedVal}` : `⚠️ ${res.lbl}: 填入失败`);
         } catch (e) {
             log(`❌ ${field.lbl} 填入异常: ${e.message}`, 'error');
             results.push(`⚠️ ${field.lbl}: 异常`);
@@ -4182,7 +4185,7 @@ function createPage3Panel() {
             const hasProblems = results.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
             // 只说"有未完成项"没法定位，把具体是哪几条打出来
             if (hasProblems) {
-                const bad = results.filter(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim())).slice(0, 5);
+                const bad = results.filter(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()) && !String(r).includes('仍有未完成项')).slice(0, 5);
                 log('填入结束，仍有未完成项：' + (bad.join(' | ') || '（无明细）'), 'warn');
             } else {
                 log('🎉 全部填入完成！', 'success');
@@ -4547,7 +4550,7 @@ async function loadBatchProduct(rowNum) {
                 const hasErrors = results.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
                 // 只说"有未完成项"没法定位，把具体是哪几条打出来
             if (hasProblems) {
-                const bad = results.filter(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim())).slice(0, 5);
+                const bad = results.filter(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()) && !String(r).includes('仍有未完成项')).slice(0, 5);
                 log('填入结束，仍有未完成项：' + (bad.join(' | ') || '（无明细）'), 'warn');
             } else {
                 log('🎉 全部填入完成！', 'success');
