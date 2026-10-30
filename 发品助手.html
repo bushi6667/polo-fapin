@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="polo-build" content="2026-10-30T10:45:33+08:00">
+<meta name="polo-build" content="2026-10-30T10:52:21+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -1797,16 +1797,17 @@ body::after {
 </head>
 <body>
 
+<div id="updaterBar" style="display:none;position:fixed;top:14px;right:18px;z-index:20000;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;background:rgba(18,18,28,.78);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);font-size:12px;color:#bfbfbf;max-width:420px;box-shadow:0 4px 16px rgba(0,0,0,.35);">
+    <span id="updBranch" style="color:#8c8c8c;flex:none;"></span>
+    <span id="updHead" style="font-family:monospace;color:#91caff;flex:none;"></span>
+    <span id="updMsg" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+    <button id="updBtn" style="display:none;flex:none;padding:3px 10px;border-radius:999px;border:1px solid rgba(22,119,255,.5);background:rgba(22,119,255,.2);color:#e6f4ff;cursor:pointer;">下载新版</button>
+</div>
+
 
 <div class="page-header">
     <h1>产品发品助手</h1>
     <p class="sub-title">上传Excel · 选择产品 · 一键发品</p>
-    <div id="updaterBar" style="display:none;align-items:center;gap:8px;margin-top:10px;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);font-size:12px;color:#bfbfbf;max-width:560px;">
-        <span id="updBranch" style="color:#8c8c8c;flex:none;"></span>
-        <span id="updHead" style="font-family:monospace;color:#91caff;flex:none;"></span>
-        <span id="updMsg" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
-        <button id="updBtn" style="display:none;flex:none;padding:3px 10px;border-radius:6px;border:1px solid rgba(22,119,255,.5);background:rgba(22,119,255,.2);color:#e6f4ff;cursor:pointer;">下载新版</button>
-    </div>
 </div>
 
 <div class="container">
@@ -8011,7 +8012,8 @@ document.addEventListener('keydown', (e) => {
         } catch (_) { remote = null; }
 
         if (!remote || !remote.sha) {
-            show('检查失败（无网络或仓库不可读）', '#ff9c6e');
+            show('检查失败', '#ff9c6e');
+            elMsg.title = '无法读取 GitHub（可能无网络，或 API 临时限流）';
             return;
         }
         const remoteTime = Date.parse((remote.commit && remote.commit.committer && remote.commit.committer.date) || '');
@@ -8040,5 +8042,6 @@ document.addEventListener('keydown', (e) => {
 window.__dirPermCheck=check;
 })();
 </script>
+
 </body>
 </html>
