@@ -788,6 +788,16 @@ async function setSimpleSelect(c, val, labelHint, fallback) {
         log(`⚠️ setSimpleSelect: 未找到trigger - ${labelHint}`, 'warn');
         return { ok: false, used: '' };
     }
+
+    // 已经是目标值就直接成功：真机「省份」明明显示 Zhejiang，仍被反复打开下拉找选项，
+    // 找不到就重试 3 轮、刷满日志，最后还判未填。
+    const normEarly = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9一-龥]/g, '');
+    const shown = c.querySelector('.next-select-values, .next-select-value');
+    const shownText = shown ? String(shown.textContent || '').trim() : '';
+    if (shownText && normEarly(shownText) === normEarly(val)) {
+        return { ok: true, used: shownText, already: true };
+    }
+
     nativeMouseClick(trigger);
     await sleep3(200);
 
@@ -1580,12 +1590,14 @@ async function finalAttributeAudit(requiredFields, optionalFields, product) {
     const allFields = [...requiredFields, ...optionalFields];
     const emptyFields = [];
     const filledFields = [];
+    const skippedFields = [];
 
     for (const field of allFields) {
         if (!field.val) continue;
         const c = findFieldContainer('', field.lbl);
         if (!c) {
-            emptyFields.push({ ...field, reason: '字段未找到' });
+            // 本类目页面上就没有这个字段（如 Polo 没有「产品类型」），属跳过，不算未填
+            skippedFields.push(field.lbl);
             continue;
         }
         // 配置写 tag 但页面是自由输入框时，值在 input.value，不在 .next-tag 里；
