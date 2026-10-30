@@ -7969,7 +7969,8 @@ document.addEventListener('keydown', (e) => {
   window.addEventListener('focus',function(){ setTimeout(check,300); });
   
 (function () {
-    // 版本检查 / 下载新版（零依赖：只读公开仓库的 version.json，不需要任何本地程序）
+    // 版本检查 / 下载新版：零依赖，只读公开仓库。
+    // 判定方式：本地 version.json 的构建时间 vs 远端分支最新提交时间（不比较自身 sha，避免自引用）。
     const REPO = 'bushi6667/polo-fapin';
     const bar = document.getElementById('updaterBar');
     const elBranch = document.getElementById('updBranch');
@@ -7978,7 +7979,7 @@ document.addEventListener('keydown', (e) => {
     const btn = document.getElementById('updBtn');
     if (!bar || !btn) return;
 
-    let local = null, remote = null;
+    let remote = null;
 
     function show(msg, color) {
         bar.style.display = 'flex';
@@ -7987,36 +7988,39 @@ document.addEventListener('keydown', (e) => {
     }
 
     async function readJson(url) {
-        const r = await fetch(url, { cache: 'no-store' });
+        const r = await fetch(url, { cache: 'no-store', headers: { 'Accept': 'application/json' } });
         if (!r.ok) return null;
         return await r.json();
     }
 
     async function refresh() {
-        try {
-            local = await readJson('version.json?t=' + Date.now());
-        } catch (_) { local = null; }
-        if (!local || !local.sha) { bar.style.display = 'none'; return; }
+        let local = null;
+        try { local = await readJson('version.json?t=' + Date.now()); } catch (_) { local = null; }
+        if (!local || !local.builtAt) { bar.style.display = 'none'; return; }
 
-        elBranch.textContent = local.branch || '';
-        elHead.textContent = local.sha;
         bar.style.display = 'flex';
+        elBranch.textContent = local.branch || '';
+        elHead.textContent = 'built ' + String(local.builtAt).replace('T', ' ').slice(5, 16);
         btn.style.display = 'none';
 
         const branch = local.branch || 'master';
         try {
-            remote = await readJson('https://raw.githubusercontent.com/' + REPO + '/' + encodeURIComponent(branch) + '/version.json?t=' + Date.now());
+            remote = await readJson('https://api.github.com/repos/' + REPO + '/commits/' + encodeURIComponent(branch) + '?t=' + Date.now());
         } catch (_) { remote = null; }
 
         if (!remote || !remote.sha) {
-            show('检查失败（仓库未公开或无网络）', '#ff9c6e');
+            show('检查失败（无网络或仓库不可读）', '#ff9c6e');
             return;
         }
-        if (remote.sha === local.sha) {
-            show('已是最新', '#8c8c8c');
-            return;
-        }
-        show('有新版本 ' + remote.sha + '（本地 ' + local.sha + '）', '#69b1ff');
+        const remoteTime = Date.parse((remote.commit && remote.commit.committer && remote.commit.committer.date) || '');
+        const localTime = Date.parse(local.builtAt);
+        if (!isFinite(remoteTime) || !isFinite(localTime)) { show('版本信息不完整', '#ff9c6e'); return; }
+
+        if (remoteTime <= localTime) { show('已是最新', '#8c8c8c'); return; }
+
+        const shortSha = String(remote.sha).slice(0, 7);
+        const title = String((remote.commit && remote.commit.message) || '').split(String.fromCharCode(10))[0].slice(0, 40);
+        show('有新版本 ' + shortSha + '：' + title, '#69b1ff');
         btn.style.display = 'inline-block';
         btn.textContent = '下载新版';
     }
@@ -8024,7 +8028,7 @@ document.addEventListener('keydown', (e) => {
     btn.addEventListener('click', () => {
         if (!remote || !remote.sha) return;
         window.open('https://github.com/' + REPO + '/archive/' + remote.sha + '.zip', '_blank');
-        show('已开始下载 ' + remote.sha + '，解压后覆盖目录并刷新扩展', '#52c41a');
+        show('已开始下载 ' + String(remote.sha).slice(0, 7) + '，解压覆盖目录后刷新扩展', '#52c41a');
     });
 
     refresh();
