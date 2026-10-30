@@ -328,28 +328,34 @@
         const ts = stamp();
         const written = [], failed = [];
         let done = 0;
+        let cursor = 0;
 
-        for (const node of nodes) {
-            const path = node.path;
-            const parts = path.split('/');
-            const name = parts.pop();
-            try {
-                const bytes = await downloadFile(sha, path);
+        // 6 路并发写盘（本地 IO，瓶颈在解压后的写入，不是网络）
+        const worker = async () => {
+            while (cursor < entries.length) {
+                const node = entries[cursor++];
+                const path = node.path;
+                const parts = path.split('/');
+                const name = parts.pop();
+                try {
+                    const bytes = node.bytes;
 
-                // 备份旧文件，写失败还能找回
-                const old = await readExisting(root, parts, name);
-                if (old) {
-                    await writeFile(root, [...BACKUP_PARTS, ts, ...parts], name, old);
+                    // 备份旧文件，写失败还能找回
+                    const old = await readExisting(root, parts, name);
+                    if (old) {
+                        await writeFile(root, [...BACKUP_PARTS, ts, ...parts], name, old);
+                    }
+
+                    await writeFile(root, parts, name, bytes);
+                    written.push(path);
+                } catch (e) {
+                    failed.push(path + '：' + ((e && e.message) || e));
                 }
-
-                await writeFile(root, parts, name, bytes);
-                written.push(path);
-            } catch (e) {
-                failed.push(path + '：' + ((e && e.message) || e));
+                done++;
+                report({ phase: 'download', done, total, path, failed: failed.length });
             }
-            done++;
-            report({ phase: 'download', done, total, path, failed: failed.length });
-        }
+        };
+        await Promise.all(Array.from({ length: Math.min(6, entries.length) }, worker));
 
         try { localStorage.setItem('polo_update_applied', sha); } catch (_) {}
         report({ phase: 'done', done, total, written: written.length, failed });
