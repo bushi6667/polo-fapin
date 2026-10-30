@@ -142,11 +142,13 @@
         const remote = await remoteCommit();
         const lt = Date.parse(local);
         const rt = Date.parse(remote.date);
-        return {
-            localBuild: local,
-            remote,
-            hasUpdate: isFinite(lt) && isFinite(rt) && rt > lt,
-        };
+        // 用「上次更新写入的 sha」优先判定：光比时间会在更新后仍显示有新版本，来回循环。
+        let applied = '';
+        try { applied = localStorage.getItem('polo_update_applied') || ''; } catch (_) {}
+        const hasUpdate = applied
+            ? (String(applied) !== String(remote.sha))
+            : (isFinite(lt) && isFinite(rt) && (rt - lt) > 60 * 1000);
+        return { localBuild: local, remote, appliedSha: applied, hasUpdate };
     }
 
     // 只更新这些文件；其余（表格、图片、归档、tests）一律跳过
@@ -245,6 +247,7 @@
             report({ phase: 'download', done, total, path, failed: failed.length });
         }
 
+        try { localStorage.setItem('polo_update_applied', sha); } catch (_) {}
         report({ phase: 'done', done, total, written: written.length, failed });
         return { updated: true, sha, written: written.length, failed, backup: BACKUP_DIR + '/' + ts };
     }
