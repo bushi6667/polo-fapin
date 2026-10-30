@@ -3895,9 +3895,9 @@ function createPage3Panel() {
     const panel = document.createElement('div');
     panel.id = 'polo-helper-panel';
     panel.style.cssText = `
-        position:fixed;top:60px;left:0;z-index:99999;
+        position:fixed;bottom:16px;left:16px;top:auto;z-index:99999;
         background:#fff;border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,0.18);
-        width:380px;max-height:85vh;overflow-y:auto;
+        width:380px;max-height:80vh;overflow-y:auto;
         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:14px;
     `;
 
