@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="polo-build" content="2026-10-31T00:38:16+08:00">
+<meta name="polo-build" content="2026-10-31T00:38:34+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -8010,8 +8010,7 @@ document.addEventListener('keydown', (e) => {
             elMsg.title = String((e && e.message) || e);
             return;
         }
-        if (state.rateLimited) { elMsg.title = 'GitHub 查询额度已用完（每小时 60 次），当前显示的是上次结果'; }
-        if (!state.hasUpdate) { show('已是最新 · ' + String(state.appliedSha || state.remote.sha).slice(0, 7) + (state.rateLimited ? '（额度用完·缓存）' : '')); return; }
+        if (!state.hasUpdate) { show('已是最新 · ' + String(state.appliedSha || state.remote.sha).slice(0, 7)); return; }
         show('有新版本 ' + String(state.remote.sha).slice(0, 7), '#69b1ff');
         elMsg.title = state.remote.message || '';
         btn.textContent = '更新到最新';
