@@ -4196,7 +4196,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             let lastErr = '';
             for (let i = 0; i < 3; i++) {
                 try {
-                    const r = await fetch(url, { cache: 'no-store', headers: { Accept: request.json ? 'application/json' : '*/*' } });
+                    const ctrl = new AbortController();
+                    const tid = setTimeout(() => ctrl.abort(), 8000);
+                    let r;
+                    try { r = await fetch(url, { cache: 'no-store', signal: ctrl.signal, headers: { Accept: request.json ? 'application/json' : '*/*' } }); }
+                    finally { clearTimeout(tid); }
                     if (!r.ok) { lastErr = 'HTTP ' + r.status; if (r.status === 404) break; }
                     else if (request.json) sendResponse({ ok: true, status: r.status, text: await r.text() });
                     else {

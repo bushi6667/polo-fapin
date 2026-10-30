@@ -55,6 +55,19 @@
     }
 
 
+    // 任何网络请求都不能无限等：页面直连常被墙/挂起，表现为"一直不返回"
+    function timeout(ms, label) {
+        let timer;
+        const p = new Promise((_, reject) => { timer = setTimeout(() => reject(Error((label || '请求') + '超时')), ms); });
+        return { promise: p, clear: () => clearTimeout(timer) };
+    }
+
+    async function withTimeout(promise, ms, label) {
+        const t = timeout(ms, label);
+        try { return await Promise.race([promise, t.promise]); }
+        finally { t.clear(); }
+    }
+
     // ---- 网络：页面直连优先，失败改走扩展后台（绕过 CORS，可重试）----
     function extId() {
         try { return localStorage.getItem('polo_extension_id') || ''; } catch (_) { return ''; }
@@ -78,22 +91,22 @@
 
     async function getJson(url) {
         try {
-            const r = await fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } });
+            const r = await withTimeout(fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } }), 8000, '直连');
             if (!r.ok) throw Error('HTTP ' + r.status);
             return await r.json();
         } catch (_) {
-            const r = await viaExtension({ action: 'updaterFetch', url, json: true });
+            const r = await withTimeout(viaExtension({ action: 'updaterFetch', url, json: true }), 20000, '扩展代取');
             return JSON.parse(r.text);
         }
     }
 
     async function getBytes(url) {
         try {
-            const r = await fetch(url, { cache: 'no-store' });
+            const r = await withTimeout(fetch(url, { cache: 'no-store' }), 8000, '直连');
             if (!r.ok) throw Error('HTTP ' + r.status);
             return new Uint8Array(await r.arrayBuffer());
         } catch (_) {
-            const r = await viaExtension({ action: 'updaterFetch', url, json: false });
+            const r = await withTimeout(viaExtension({ action: 'updaterFetch', url, json: false }), 30000, '扩展代取');
             const bin = atob(r.base64 || '');
             const out = new Uint8Array(bin.length);
             for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
