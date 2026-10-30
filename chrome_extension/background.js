@@ -3904,7 +3904,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle', 'savePathConfig'];
+    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle', 'savePathConfig', 'reloadExtension', 'updaterFetch'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
@@ -4183,6 +4183,41 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ ok: true, filename: CURRENT_FILENAME });
             });
         }).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+
+    // 自更新：由后台代取网络资源（页面 file:// 直连 GitHub 常被 CORS/网络拦）
+    if (request.action === 'updaterFetch') {
+        (async () => {
+            const url = String(request.url || '');
+            if (!/^https:\/\/(api\.github\.com|cdn\.jsdelivr\.net|raw\.githubusercontent\.com)\//.test(url)) {
+                return sendResponse({ ok: false, error: '不允许的地址' });
+            }
+            let lastErr = '';
+            for (let i = 0; i < 3; i++) {
+                try {
+                    const r = await fetch(url, { cache: 'no-store', headers: { Accept: request.json ? 'application/json' : '*/*' } });
+                    if (!r.ok) { lastErr = 'HTTP ' + r.status; if (r.status === 404) break; }
+                    else if (request.json) sendResponse({ ok: true, status: r.status, text: await r.text() });
+                    else {
+                        const buf = new Uint8Array(await r.arrayBuffer());
+                        let bin = '';
+                        for (let k = 0; k < buf.length; k += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(k, k + 0x8000));
+                        sendResponse({ ok: true, status: r.status, base64: btoa(bin) });
+                    }
+                    return;
+                } catch (e) { lastErr = String((e && e.message) || e); }
+                await new Promise(r2 => setTimeout(r2, 700));
+            }
+            sendResponse({ ok: false, error: lastErr || '请求失败' });
+        })();
+        return true;
+    }
+
+    // 自更新完成后重载扩展自身（等于在 chrome://extensions 点刷新）
+    if (request.action === 'reloadExtension') {
+        sendResponse({ ok: true });
+        setTimeout(() => { try { chrome.runtime.reload(); } catch (_) {} }, 500);
         return true;
     }
 

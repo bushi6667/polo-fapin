@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="polo-build" content="2026-10-30T10:58:19+08:00">
+<meta name="polo-build" content="2026-10-30T11:08:50+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -1917,6 +1917,7 @@ body::after {
 <script src="chrome_extension/suite/suite-rembg.js"></script>
 <script src="page-directories.js"></script>
 <script src="path-config.js"></script>
+<script src="update-client.js"></script>
 <script>
 if (typeof XLSX === 'undefined') {
     console.error('XLSX库加载失败，请确保xlsx.full.min.js文件与发品助手.html在同一目录下');
@@ -7975,70 +7976,80 @@ document.addEventListener('keydown', (e) => {
   window.addEventListener('focus',function(){ setTimeout(check,300); });
   
 (function () {
-    // 版本检查 / 下载新版：零依赖，只读公开仓库。
-    // 判定方式：本地 version.json 的构建时间 vs 远端分支最新提交时间（不比较自身 sha，避免自引用）。
-    const REPO = 'bushi6667/polo-fapin';
+    // 更新：授权一次项目目录后，点按钮就能下载并直接写盘替换（不需要解压）
     const bar = document.getElementById('updaterBar');
     const elHead = document.getElementById('updHead');
     const elMsg = document.getElementById('updMsg');
-    const btn = document.getElementById('updBtn');
     const checkBtn = document.getElementById('updCheck');
+    const btn = document.getElementById('updBtn');
     if (!bar || !btn) return;
 
-    let remote = null;
+    let state = null;
+    let busy = false;
 
     function show(msg, color) {
         bar.style.display = 'flex';
         elMsg.textContent = msg;
-        elMsg.style.color = color || '#8c8c8c';
+        elMsg.style.color = color || 'rgba(255,255,255,.34)';
     }
 
-    async function readJson(url) {
-        const r = await fetch(url, { cache: 'no-store', headers: { 'Accept': 'application/json' } });
-        if (!r.ok) return null;
-        return await r.json();
+    function head() {
+        const local = (window.PoloUpdater && PoloUpdater.localBuild()) || '';
+        elHead.textContent = local ? 'built ' + local.replace('T', ' ').slice(5, 16) : '';
     }
 
     async function refresh() {
-        // file:// 下 fetch 本地 json 会被拦，构建时间直接写在页面 meta 里
-        const meta = document.querySelector('meta[name="polo-build"]');
-        const local = meta ? { builtAt: meta.getAttribute('content'), branch: 'fix/group-select-double-click' } : null;
-        if (!local || !local.builtAt) { bar.style.display = 'none'; return; }
-
+        if (!window.PoloUpdater) { show('更新模块未加载', '#ff9c6e'); return; }
+        head();
         bar.style.display = 'flex';
-        elHead.textContent = 'built ' + String(local.builtAt).replace('T', ' ').slice(5, 16);
         btn.style.display = 'none';
-
-        const branch = local.branch || 'master';
         try {
-            // 分支名里的 / 不能被整体编码（%2F 会被 GitHub 当成非法路径 → 404），按段编码
-            const branchPath = String(branch).split('/').map(encodeURIComponent).join('/');
-            remote = await readJson('https://api.github.com/repos/' + REPO + '/commits/' + branchPath);
-        } catch (_) { remote = null; }
-
-        if (!remote || !remote.sha) {
+            state = await PoloUpdater.check();
+        } catch (e) {
             show('检查失败', '#ff9c6e');
-            elMsg.title = '无法读取 GitHub（可能无网络，或 API 临时限流）';
+            elMsg.title = String((e && e.message) || e);
             return;
         }
-        const remoteTime = Date.parse((remote.commit && remote.commit.committer && remote.commit.committer.date) || '');
-        const localTime = Date.parse(local.builtAt);
-        if (!isFinite(remoteTime) || !isFinite(localTime)) { show('版本信息不完整', '#ff9c6e'); return; }
-
-        if (remoteTime <= localTime) { show('已是最新', '#8c8c8c'); return; }
-
-        const shortSha = String(remote.sha).slice(0, 7);
-        const title = String((remote.commit && remote.commit.message) || '').split(String.fromCharCode(10))[0];
-        show('有新版本 ' + shortSha, '#69b1ff');
-        elMsg.title = title;
-        btn.style.display = 'inline-block';
-        btn.textContent = '下载新版';
+        if (!state.hasUpdate) { show('已是最新'); return; }
+        show('有新版本 ' + String(state.remote.sha).slice(0, 7), '#69b1ff');
+        elMsg.title = state.remote.message || '';
+        btn.textContent = '更新到最新';
+        btn.style.display = 'inline';
     }
 
-    btn.addEventListener('click', () => {
-        if (!remote || !remote.sha) return;
-        window.open('https://github.com/' + REPO + '/archive/' + remote.sha + '.zip', '_blank');
-        show('已开始下载 ' + String(remote.sha).slice(0, 7) + '，解压覆盖目录后刷新扩展', '#52c41a');
+    btn.addEventListener('click', async () => {
+        if (busy) return;
+        busy = true;
+        btn.style.display = 'none';
+        try {
+            let dir = await PoloUpdater.getDir();
+            if (!dir) {
+                show('请选择项目根目录（只需一次）', '#faad14');
+                dir = await PoloUpdater.pickDir();          // 必须在点击手势内
+            } else if (!dir.granted) {
+                dir = await PoloUpdater.requestPerm();
+                if (!dir || !dir.granted) { show('目录授权被拒绝', '#ff4d4f'); busy = false; return; }
+            }
+            show('正在下载…', '#69b1ff');
+            const r = await PoloUpdater.apply(p => {
+                if (p.phase === 'download' && p.total) show('下载 ' + p.done + '/' + p.total, '#69b1ff');
+            });
+            if (!r.updated) { show('已是最新'); busy = false; return; }
+            if (r.failed && r.failed.length) {
+                show('已更新 ' + r.written + ' 个文件，' + r.failed.length + ' 个失败', '#faad14');
+                elMsg.title = r.failed.slice(0, 10).join(String.fromCharCode(10));
+                busy = false;
+                return;
+            }
+            show('已更新 ' + r.written + ' 个文件，正在重载…', '#52c41a');
+            try { chrome.runtime.sendMessage((typeof EXTENSION_ID !== 'undefined' ? EXTENSION_ID : ''), { action: 'reloadExtension' }, () => { void chrome.runtime.lastError; }); } catch (_) {}
+            setTimeout(() => location.reload(), 1500);
+        } catch (e) {
+            show('更新失败', '#ff4d4f');
+            elMsg.title = String((e && e.message) || e);
+            btn.style.display = 'inline';
+            busy = false;
+        }
     });
 
     if (checkBtn) {
@@ -8052,6 +8063,7 @@ document.addEventListener('keydown', (e) => {
             }
         });
     }
+
     refresh();
     setInterval(refresh, 600000);
 })();

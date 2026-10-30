@@ -14,16 +14,19 @@
     "alarms"
   ],
   "host_permissions": [
-    "https://api.deepseek.com/*",
-    "*://post.alibaba.com/*",
     "*://*.alibaba.com/*",
-    "*://www.doubao.com/*",
-    "*://doubao.com/*",
     "*://*.byteimg.com/*",
-    "*://www.photopea.com/*",
+    "*://doubao.com/*",
     "*://photopea.com/*",
+    "*://post.alibaba.com/*",
+    "*://www.doubao.com/*",
+    "*://www.photopea.com/*",
     "http://127.0.0.1/*",
-    "http://localhost/*"
+    "http://localhost/*",
+    "https://api.deepseek.com/*",
+    "https://api.github.com/*",
+    "https://cdn.jsdelivr.net/*",
+    "https://raw.githubusercontent.com/*"
   ],
   "action": {
     "default_title": "Polo发品助手",
