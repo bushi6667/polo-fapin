@@ -280,6 +280,24 @@
         } catch (_) { return null; }
     }
 
+    // 仓库里的文本是 LF，工作区是 CRLF（git core.autocrlf=true）；
+    // 直接写 LF 会让所有文本文件在 git 里显示"已修改"（内容其实一样）。
+    const TEXT_EXT = /\.(js|css|html?|json|md|txt|yml|yaml)$/i;
+    function toCRLF(bytes, path) {
+        if (!TEXT_EXT.test(path)) return bytes;
+        let crlf = 0;
+        for (let i = 0; i < bytes.length; i++) if (bytes[i] === 0x0a) crlf++;
+        if (crlf === 0) return bytes;
+        const out = new Uint8Array(bytes.length + crlf);
+        let j = 0;
+        for (let i = 0; i < bytes.length; i++) {
+            const b = bytes[i];
+            if (b === 0x0a && (i === 0 || bytes[i - 1] !== 0x0d)) { out[j++] = 0x0d; out[j++] = 0x0a; }
+            else out[j++] = b;
+        }
+        return out.subarray(0, j);
+    }
+
     async function writeFile(root, parts, name, bytes) {
         const dir = await ensureSubdir(root, parts);
         const fh = await dir.getFileHandle(name, { create: true });
@@ -346,7 +364,7 @@
                         await writeFile(root, [...BACKUP_PARTS, ts, ...parts], name, old);
                     }
 
-                    await writeFile(root, parts, name, bytes);
+                    await writeFile(root, parts, name, toCRLF(bytes, path));
                     written.push(path);
                 } catch (e) {
                     failed.push(path + '：' + ((e && e.message) || e));
