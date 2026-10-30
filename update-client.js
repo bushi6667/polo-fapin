@@ -187,8 +187,19 @@
     async function apply(onProgress) {
         const report = (o) => { try { onProgress && onProgress(o); } catch (_) {} };
         const cur = await getDir();
-        if (!cur || !cur.granted) throw Error('还没有授权项目目录（首次需要选一次）');
+        if (!cur || !cur.granted) throw Error('还没有授权项目目录（路径配置里选一次）');
         const root = cur.handle;
+
+        // 防呆：必须是项目根目录（认 发品助手.html），否则会把整个仓库写进子目录
+        // 真机踩过：路径配置里误选了 chrome_extension，结果整仓库被拷进扩展目录，扩展直接加载失败。
+        if (String(root.name || '').toLowerCase() === 'chrome_extension') {
+            throw Error('选中的是 chrome_extension 子目录，请改选项目根目录（含 发品助手.html 的那一层）');
+        }
+        let isProjectRoot = false;
+        try { await root.getFileHandle('发品助手.html'); isProjectRoot = true; } catch (_) {}
+        if (!isProjectRoot) {
+            throw Error('选中的目录里没有 发品助手.html，不像项目根目录；请到「路径配置」重新选择项目根目录');
+        }
 
         report({ phase: 'check' });
         const info = await check();
