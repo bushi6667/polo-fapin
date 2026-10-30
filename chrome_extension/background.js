@@ -2663,6 +2663,75 @@ async function relayDoubaoAccountAction(request) {
 // （saveProductData/saveBatchProducts/getProductByRow/openPublishPage/…/getConfig），
 // 各动作内直接操作 storage 与目录配置并 sendResponse
 async function handleSharedAction(request, sendResponse, sender) {
+    // ---------- 自更新（file:// 页面走外部通道，必须在这里处理） ----------
+    if (request.action === 'updaterFetch') {
+        (async () => {
+            const url = String(request.url || '');
+            if (!/^https:\/\/(api\.github\.com|cdn\.jsdelivr\.net|raw\.githubusercontent\.com|codeload\.github\.com)\//.test(url)) {
+                return sendResponse({ ok: false, error: '不允许的地址' });
+            }
+            let lastErr = '';
+            for (let i = 0; i < 3; i++) {
+                try {
+                    const ctrl = new AbortController();
+                    const tid = setTimeout(() => ctrl.abort(), 8000);
+                    let r;
+                    try { r = await fetch(url, { cache: 'no-store', signal: ctrl.signal, headers: { Accept: request.json ? 'application/json' : '*/*' } }); }
+                    finally { clearTimeout(tid); }
+                    if (!r.ok) { lastErr = 'HTTP ' + r.status; if (r.status === 404) break; }
+                    else if (request.json) { sendResponse({ ok: true, status: r.status, text: await r.text() }); return; }
+                    else {
+                        const buf = new Uint8Array(await r.arrayBuffer());
+                        let bin = '';
+                        for (let k = 0; k < buf.length; k += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(k, k + 0x8000));
+                        sendResponse({ ok: true, status: r.status, base64: btoa(bin) });
+                        return;
+                    }
+                } catch (e) { lastErr = String((e && e.message) || e); }
+                await new Promise(r2 => setTimeout(r2, 700));
+            }
+            sendResponse({ ok: false, error: lastErr || '请求失败' });
+        })();
+        return true;
+    }
+    if (request.action === 'updaterZip') {
+        (async () => {
+            const sha = String(request.sha || '');
+            if (!/^[0-9a-f]{7,40}$/i.test(sha)) return sendResponse({ ok: false, error: 'sha 无效' });
+            const url = 'https://codeload.github.com/bushi6667/polo-fapin/zip/' + sha;
+            try {
+                const ctrl = new AbortController();
+                const tid = setTimeout(() => ctrl.abort(), 90000);
+                let r;
+                try { r = await fetch(url, { cache: 'no-store', signal: ctrl.signal }); }
+                finally { clearTimeout(tid); }
+                if (!r.ok) return sendResponse({ ok: false, error: 'HTTP ' + r.status });
+                const buf = new Uint8Array(await r.arrayBuffer());
+                zipCache = { sha, buf };
+                sendResponse({ ok: true, size: buf.length });
+            } catch (e) {
+                sendResponse({ ok: false, error: String((e && e.message) || e) });
+            }
+        })();
+        return true;
+    }
+    if (request.action === 'updaterZipChunk') {
+        if (!zipCache || zipCache.sha !== request.sha) { sendResponse({ ok: false, error: '缓存里没有该版本' }); return true; }
+        const from = Math.max(0, Number(request.from) || 0);
+        const len = Math.min(Number(request.len) || 1048576, zipCache.buf.length - from);
+        if (len <= 0) { sendResponse({ ok: true, done: true, base64: '' }); return true; }
+        let bin = '';
+        const slice = zipCache.buf.subarray(from, from + len);
+        for (let k = 0; k < slice.length; k += 0x8000) bin += String.fromCharCode.apply(null, slice.subarray(k, k + 0x8000));
+        sendResponse({ ok: true, done: from + len >= zipCache.buf.length, base64: btoa(bin) });
+        return true;
+    }
+    if (request.action === 'reloadExtension') {
+        sendResponse({ ok: true });
+        setTimeout(() => { try { chrome.runtime.reload(); } catch (_) {} }, 600);
+        return true;
+    }
+
     if(['listScriptDirectory','readScriptDirectory','psDirectoryStatus','readPsImage','writePsImage','suiteOutputStatus','suiteWriteOutput','suiteVerifyOutput'].includes(request.action)){
         try{sendResponse(await pageDirectoryRequest(request));}catch(e){sendResponse({ok:false,error:e.message});}
         return true;
@@ -4184,72 +4253,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ ok: true, filename: CURRENT_FILENAME });
             });
         }).catch(e => sendResponse({ ok: false, error: e.message }));
-        return true;
-    }
-
-    // 自更新：整包下载（codeload zip），分块回传避免单条消息过大
-    if (request.action === 'updaterZip') {
-        (async () => {
-            const sha = String(request.sha || '');
-            if (!/^[0-9a-f]{7,40}$/i.test(sha)) return sendResponse({ ok: false, error: 'sha 无效' });
-            const url = 'https://codeload.github.com/bushi6667/polo-fapin/zip/' + sha;
-            try {
-                const ctrl = new AbortController();
-                const tid = setTimeout(() => ctrl.abort(), 60000);
-                let r;
-                try { r = await fetch(url, { cache: 'no-store', signal: ctrl.signal }); }
-                finally { clearTimeout(tid); }
-                if (!r.ok) return sendResponse({ ok: false, error: 'HTTP ' + r.status });
-                const buf = new Uint8Array(await r.arrayBuffer());
-                zipCache = { sha, buf };
-                sendResponse({ ok: true, size: buf.length });
-            } catch (e) {
-                sendResponse({ ok: false, error: String((e && e.message) || e) });
-            }
-        })();
-        return true;
-    }
-    if (request.action === 'updaterZipChunk') {
-        if (!zipCache || zipCache.sha !== request.sha) { sendResponse({ ok: false, error: '缓存里没有该版本' }); return true; }
-        const from = Math.max(0, Number(request.from) || 0);
-        const len = Math.min(Number(request.len) || 1048576, zipCache.buf.length - from);
-        if (len <= 0) { sendResponse({ ok: true, done: true, base64: '' }); return true; }
-        let bin = '';
-        const slice = zipCache.buf.subarray(from, from + len);
-        for (let k = 0; k < slice.length; k += 0x8000) bin += String.fromCharCode.apply(null, slice.subarray(k, k + 0x8000));
-        sendResponse({ ok: true, done: from + len >= zipCache.buf.length, base64: btoa(bin) });
-        return true;
-    }
-
-    // 自更新：由后台代取网络资源（页面 file:// 直连 GitHub 常被 CORS/网络拦）
-    if (request.action === 'updaterFetch') {
-        (async () => {
-            const url = String(request.url || '');
-            if (!/^https:\/\/(api\.github\.com|cdn\.jsdelivr\.net|raw\.githubusercontent\.com)\//.test(url)) {
-                return sendResponse({ ok: false, error: '不允许的地址' });
-            }
-            let lastErr = '';
-            for (let i = 0; i < 3; i++) {
-                try {
-                    const ctrl = new AbortController();
-                    const tid = setTimeout(() => ctrl.abort(), 8000);
-                    let r;
-                    try { r = await fetch(url, { cache: 'no-store', signal: ctrl.signal, headers: { Accept: request.json ? 'application/json' : '*/*' } }); }
-                    finally { clearTimeout(tid); }
-                    if (!r.ok) { lastErr = 'HTTP ' + r.status; if (r.status === 404) break; }
-                    else if (request.json) sendResponse({ ok: true, status: r.status, text: await r.text() });
-                    else {
-                        const buf = new Uint8Array(await r.arrayBuffer());
-                        let bin = '';
-                        for (let k = 0; k < buf.length; k += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(k, k + 0x8000));
-                        sendResponse({ ok: true, status: r.status, base64: btoa(bin) });
-                    }
-                    return;
-                } catch (e) { lastErr = String((e && e.message) || e); }
-                await new Promise(r2 => setTimeout(r2, 700));
-            }
-            sendResponse({ ok: false, error: lastErr || '请求失败' });
-        })();
         return true;
     }
 
