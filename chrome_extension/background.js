@@ -2663,6 +2663,38 @@ async function relayDoubaoAccountAction(request) {
 // （saveProductData/saveBatchProducts/getProductByRow/openPublishPage/…/getConfig），
 // 各动作内直接操作 storage 与目录配置并 sendResponse
 async function handleSharedAction(request, sendResponse, sender) {
+    // 只读诊断：为什么某一行被判「已保存或身份不匹配」
+    if (request.action === 'debugPublishRow') {
+        (async () => {
+            try {
+                const t = await loadPublishTask();
+                if (!t) return sendResponse({ ok: false, error: '没有进行中的发品任务' });
+                const rowNum = Number(request.row || t.currentRow);
+                const savedMap = await getVerifiedSavedMap(taskFileKey(t));
+                const savedRow = savedMap[rowNum];
+                const filledRows = (t.filledRows || []).map(Number);
+                const senderTab = sender && sender.tab ? sender.tab.id : null;
+                sendResponse({
+                    ok: true,
+                    taskId: t.taskId,
+                    currentRow: t.currentRow,
+                    filledRows,
+                    alreadyFilled: filledRows.includes(rowNum),
+                    savedRecord: savedRow || null,
+                    savedVerified: !!(savedRow && !isUnverifiedSave(savedRow)),
+                    savedKind: savedRow ? (isUnverifiedSave(savedRow) ? '未确认(可重填)' : '已确认(跳过)') : '无记录',
+                    taskCurrentTabId: t.currentTabId,
+                    senderTabId: senderTab,
+                    tabMatched: senderTab !== null && senderTab === t.currentTabId,
+                    paused: !!t.paused,
+                    pauseReason: t.pauseReason || '',
+                });
+            } catch (e) { sendResponse({ ok: false, error: String(e && e.message || e) }); }
+        })();
+        return true;
+    }
+
+
     // ---------- 自更新（file:// 页面走外部通道，必须在这里处理） ----------
     if (request.action === 'updaterFetch') {
         (async () => {
@@ -3974,7 +4006,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle', 'savePathConfig', 'reloadExtension', 'updaterFetch', 'updaterZip', 'updaterZipChunk'];
+    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle', 'savePathConfig', 'reloadExtension', 'debugPublishRow', 'updaterFetch', 'updaterZip', 'updaterZipChunk'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
