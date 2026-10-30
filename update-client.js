@@ -90,13 +90,21 @@
     }
 
     async function getJson(url) {
+        // 网络对 api.github.com 时通时断，直连先重试 3 次再改走扩展
+        let lastErr = '';
+        for (let i = 0; i < 3; i++) {
+            try {
+                const r = await withTimeout(fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } }), 8000, '直连');
+                if (!r.ok) { lastErr = 'HTTP ' + r.status; }
+                else return await r.json();
+            } catch (e) { lastErr = String((e && e.message) || e); }
+            await new Promise(r2 => setTimeout(r2, 800));
+        }
         try {
-            const r = await withTimeout(fetch(url, { cache: 'no-store', headers: { Accept: 'application/json' } }), 8000, '直连');
-            if (!r.ok) throw Error('HTTP ' + r.status);
-            return await r.json();
-        } catch (_) {
             const r = await withTimeout(viaExtension({ action: 'updaterFetch', url, json: true }), 20000, '扩展代取');
             return JSON.parse(r.text);
+        } catch (e) {
+            throw Error(lastErr || String((e && e.message) || e));
         }
     }
 
