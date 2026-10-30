@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="polo-build" content="2026-10-30T10:53:28+08:00">
+<meta name="polo-build" content="2026-10-30T10:58:19+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -1797,11 +1797,15 @@ body::after {
 </head>
 <body>
 
-<div id="updaterBar" style="display:none;position:fixed;top:12px;right:20px;z-index:20000;align-items:center;gap:8px;font-size:12px;color:rgba(255,255,255,.34);background:none;border:none;padding:0;max-width:420px;">
-    <span id="updBranch" style="flex:none;color:rgba(255,255,255,.24);"></span>
-    <span id="updHead" style="flex:none;font-family:monospace;color:rgba(145,202,255,.55);"></span>
-    <span id="updMsg" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
-    <button id="updBtn" style="display:none;flex:none;padding:0;border:none;background:none;color:#91caff;cursor:pointer;font-size:12px;text-decoration:underline;">下载新版</button>
+<div id="updaterBar" style="display:none;position:fixed;top:12px;right:20px;z-index:20000;flex-direction:column;align-items:flex-end;gap:2px;font-size:12px;color:rgba(255,255,255,.34);background:none;border:none;padding:0;">
+    <span id="updHead" style="font-family:monospace;color:rgba(145,202,255,.55);"></span>
+    <span style="display:flex;align-items:center;gap:6px;">
+        <span id="updMsg" style="color:rgba(255,255,255,.34);"></span>
+        <button id="updCheck" title="检查更新" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;border:none;background:none;color:rgba(255,255,255,.34);cursor:pointer;">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        </button>
+        <button id="updBtn" style="display:none;padding:0;border:none;background:none;color:#91caff;cursor:pointer;font-size:12px;text-decoration:underline;">下载新版</button>
+    </span>
 </div>
 
 
@@ -7975,10 +7979,10 @@ document.addEventListener('keydown', (e) => {
     // 判定方式：本地 version.json 的构建时间 vs 远端分支最新提交时间（不比较自身 sha，避免自引用）。
     const REPO = 'bushi6667/polo-fapin';
     const bar = document.getElementById('updaterBar');
-    const elBranch = document.getElementById('updBranch');
     const elHead = document.getElementById('updHead');
     const elMsg = document.getElementById('updMsg');
     const btn = document.getElementById('updBtn');
+    const checkBtn = document.getElementById('updCheck');
     if (!bar || !btn) return;
 
     let remote = null;
@@ -8002,13 +8006,14 @@ document.addEventListener('keydown', (e) => {
         if (!local || !local.builtAt) { bar.style.display = 'none'; return; }
 
         bar.style.display = 'flex';
-        elBranch.textContent = local.branch || '';
         elHead.textContent = 'built ' + String(local.builtAt).replace('T', ' ').slice(5, 16);
         btn.style.display = 'none';
 
         const branch = local.branch || 'master';
         try {
-            remote = await readJson('https://api.github.com/repos/' + REPO + '/commits/' + encodeURIComponent(branch) + '?t=' + Date.now());
+            // 分支名里的 / 不能被整体编码（%2F 会被 GitHub 当成非法路径 → 404），按段编码
+            const branchPath = String(branch).split('/').map(encodeURIComponent).join('/');
+            remote = await readJson('https://api.github.com/repos/' + REPO + '/commits/' + branchPath);
         } catch (_) { remote = null; }
 
         if (!remote || !remote.sha) {
@@ -8036,6 +8041,17 @@ document.addEventListener('keydown', (e) => {
         show('已开始下载 ' + String(remote.sha).slice(0, 7) + '，解压覆盖目录后刷新扩展', '#52c41a');
     });
 
+    if (checkBtn) {
+        checkBtn.addEventListener('click', async () => {
+            if (checkBtn.dataset.busy === '1') return;
+            checkBtn.dataset.busy = '1';
+            checkBtn.style.opacity = '0.4';
+            try { await refresh(); } finally {
+                checkBtn.dataset.busy = '';
+                checkBtn.style.opacity = '';
+            }
+        });
+    }
     refresh();
     setInterval(refresh, 600000);
 })();
