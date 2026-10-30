@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
+<meta name="polo-build" content="2026-10-30T10:43:58+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -7994,8 +7995,9 @@ document.addEventListener('keydown', (e) => {
     }
 
     async function refresh() {
-        let local = null;
-        try { local = await readJson('version.json?t=' + Date.now()); } catch (_) { local = null; }
+        // file:// 下 fetch 本地 json 会被拦，构建时间直接写在页面 meta 里
+        const meta = document.querySelector('meta[name="polo-build"]');
+        const local = meta ? { builtAt: meta.getAttribute('content'), branch: 'fix/group-select-double-click' } : null;
         if (!local || !local.builtAt) { bar.style.display = 'none'; return; }
 
         bar.style.display = 'flex';
