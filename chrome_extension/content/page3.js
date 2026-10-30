@@ -4361,13 +4361,25 @@ function createPage3Panel() {
             // 动态计算菜单位置：父容器 #polo-autofill-split 有 overflow:hidden，
             // 用 position:fixed + getBoundingClientRect() 避免菜单被裁剪
             const splitRect = document.getElementById('polo-autofill-split').getBoundingClientRect();
-            menu.style.top = (splitRect.bottom + 4) + 'px';
             menu.style.left = splitRect.left + 'px';
             menu.style.width = splitRect.width + 'px';
-            // 动态计算最大高度，避免菜单超出视口底部无法滚动
-            const maxH = window.innerHeight - splitRect.bottom - 16;
-            menu.style.maxHeight = Math.max(160, maxH) + 'px';
-            menu.style.display = 'block';
+            menu.style.display = 'block';   // 先显示，才能量到真实高度
+
+            const GAP = 4, EDGE = 16;
+            const spaceBelow = window.innerHeight - splitRect.bottom - EDGE;
+            const spaceAbove = splitRect.top - EDGE;
+            const need = Math.min(menu.scrollHeight || 320, 420);
+
+            // 面板贴左下角后，下方常常不够 → 放不下就改成往上展开（用户要求）
+            if (spaceBelow < need && spaceAbove > spaceBelow) {
+                menu.style.top = 'auto';
+                menu.style.bottom = (window.innerHeight - splitRect.top + GAP) + 'px';
+                menu.style.maxHeight = Math.max(120, Math.min(spaceAbove, 420)) + 'px';
+            } else {
+                menu.style.bottom = 'auto';
+                menu.style.top = (splitRect.bottom + GAP) + 'px';
+                menu.style.maxHeight = Math.max(120, Math.min(spaceBelow, 420)) + 'px';
+            }
         } else {
             menu.style.display = 'none';
         }
