@@ -4131,6 +4131,11 @@ function createPage3Panel() {
         const rect = panel.getBoundingClientRect();
         panelStartLeft = rect.left;
         panelStartTop = rect.top;
+        // 面板默认用 bottom 定位；拖动要写 top，必须先把 bottom 清掉，
+        // 否则 top 和 bottom 同时存在会把面板上下拉开（真机：inset:242px auto 16px 124px，空白一大片）
+        panel.style.bottom = 'auto';
+        panel.style.top = rect.top + 'px';
+        panel.style.left = rect.left + 'px';
         panel.style.cursor = 'grabbing';
         e.preventDefault();
     });
@@ -4148,6 +4153,7 @@ function createPage3Panel() {
         panel.style.left = newLeft + 'px';
         panel.style.top = newTop + 'px';
         panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
     });
 
     document.addEventListener('mouseup', () => {
@@ -4312,10 +4318,15 @@ function createPage3Panel() {
     };
 
     const menu = document.getElementById('polo-action-menu');
+    // 动作有 20 多项，单列会拉成一条长条 → 两列网格
+    menu.style.display = 'none';
+    menu.style.gridTemplateColumns = '1fr 1fr';
+    menu.style.gap = '2px';
+    menu.style.width = 'auto';
 
     items.forEach(({ icon, label, act, mode: needMode }) => {
         const el = document.createElement('div');
-        el.style.cssText = 'padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:#333;transition:background 0.15s;';
+        el.style.cssText = 'padding:6px 8px;border-radius:6px;cursor:pointer;font-size:12px;color:#333;transition:background 0.15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
         el.innerText = `${icon} ${label}`;
         el.onmouseenter = () => { el.style.background = '#f1f5f9'; };
         el.onmouseleave = () => { el.style.background = 'transparent'; };
@@ -4366,7 +4377,7 @@ function createPage3Panel() {
             menu.style.left = splitRect.left + 'px';
             menu.style.width = splitRect.width + 'px';
             menu.style.maxHeight = 'none';
-            menu.style.display = 'block';
+            menu.style.display = 'grid';   // 两列网格，避免长条
             const contentH = menu.scrollHeight || 320;
 
             const spaceUp = splitRect.top - GAP - EDGE;
