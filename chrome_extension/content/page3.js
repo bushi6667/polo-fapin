@@ -4180,7 +4180,13 @@ function createPage3Panel() {
             for (const r of results) log(r, r.startsWith('✅') ? 'success' : r.startsWith('⚠️') ? 'warn' : 'info');
 
             const hasProblems = results.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
-            log(hasProblems ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', hasProblems ? 'warn' : 'success');
+            // 只说"有未完成项"没法定位，把具体是哪几条打出来
+            if (hasProblems) {
+                const bad = results.filter(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim())).slice(0, 5);
+                log('填入结束，仍有未完成项：' + (bad.join(' | ') || '（无明细）'), 'warn');
+            } else {
+                log('🎉 全部填入完成！', 'success');
+            }
 
             let autoSaved = false;
             if (hasProblems) {
@@ -4539,7 +4545,13 @@ async function loadBatchProduct(rowNum) {
                 // 只有「硬失败」才阻断自动保存。⚠️ 多半是"某项没找到/未确认"这类可容忍项，
                 // 若也阻断，一行一个警告就会让整批停在等人工保存（实测：省份误判导致每行都不保存）。
                 const hasErrors = results.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
-                log(hasProblems ? '填入结束，仍有未完成项，请核对' : '🎉 全部填入完成！', hasProblems ? 'warn' : 'success');
+                // 只说"有未完成项"没法定位，把具体是哪几条打出来
+            if (hasProblems) {
+                const bad = results.filter(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim())).slice(0, 5);
+                log('填入结束，仍有未完成项：' + (bad.join(' | ') || '（无明细）'), 'warn');
+            } else {
+                log('🎉 全部填入完成！', 'success');
+            }
 
                 let autoSaved = false;
                 if (hasErrors) {
