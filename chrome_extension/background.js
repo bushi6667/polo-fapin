@@ -64,6 +64,7 @@ function handleBridgePortMessage(port,msg){
     }
 }
 const publicationUploadLocks=new Set();
+let zipCache = null;
 function readPublicationGenerated(request){
     return new Promise((resolve,reject)=>{
         if(!assistantPort){reject(Error('请先打开本项目发品助手页面以读取生成套图'));return;}
@@ -3904,7 +3905,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     console.log(`🔍 [onMessage] 调用handleSharedAction: action=${request.action}`);
-    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle', 'savePathConfig', 'reloadExtension', 'updaterFetch'];
+    const sharedActions = ['listScriptDirectory','readScriptDirectory','psDirectoryStatus', 'readPsImage', 'writePsImage', 'saveProductData', 'saveBatchProducts', 'getProductByRow', 'openPublishPage', 'openBatchPublish', 'publishCompleted', 'markUploaded', 'getUploadedRows', 'startColorChange', 'startAiEdit', 'startPsEdit', 'getColorImage', 'getColorImagesInfo', 'getColorImagePath', 'setCurrentFilename', 'getPsEditResult', 'clearPsEditResult', 'getConfig', 'colorTaskAccepted', 'getColorExecStatus', 'clearColorExec', 'getColorTaskEvents', 'pauseColorDispatch', 'getMemoryGate', 'pausePublishQueue', 'resumePublishQueue', 'getPublishState', 'setPublishSettings', 'getDiagLog', 'clearDiagLog', 'retryPublishRow', 'skipPublishRow', 'suiteCreate', 'suiteGetTask', 'suiteListTasks', 'suiteCancel', 'suiteProgress', 'suiteRecover', 'suiteRecoverResults', 'suiteRun', 'openExtensionPopup', 'aiSimplifyTitle', 'savePathConfig', 'reloadExtension', 'updaterFetch', 'updaterZip', 'updaterZipChunk'];
     if (sharedActions.includes(request.action)) {
         handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
@@ -4183,6 +4184,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ ok: true, filename: CURRENT_FILENAME });
             });
         }).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+
+    // 自更新：整包下载（codeload zip），分块回传避免单条消息过大
+    if (request.action === 'updaterZip') {
+        (async () => {
+            const sha = String(request.sha || '');
+            if (!/^[0-9a-f]{7,40}$/i.test(sha)) return sendResponse({ ok: false, error: 'sha 无效' });
+            const url = 'https://codeload.github.com/bushi6667/polo-fapin/zip/' + sha;
+            try {
+                const ctrl = new AbortController();
+                const tid = setTimeout(() => ctrl.abort(), 60000);
+                let r;
+                try { r = await fetch(url, { cache: 'no-store', signal: ctrl.signal }); }
+                finally { clearTimeout(tid); }
+                if (!r.ok) return sendResponse({ ok: false, error: 'HTTP ' + r.status });
+                const buf = new Uint8Array(await r.arrayBuffer());
+                zipCache = { sha, buf };
+                sendResponse({ ok: true, size: buf.length });
+            } catch (e) {
+                sendResponse({ ok: false, error: String((e && e.message) || e) });
+            }
+        })();
+        return true;
+    }
+    if (request.action === 'updaterZipChunk') {
+        if (!zipCache || zipCache.sha !== request.sha) { sendResponse({ ok: false, error: '缓存里没有该版本' }); return true; }
+        const from = Math.max(0, Number(request.from) || 0);
+        const len = Math.min(Number(request.len) || 1048576, zipCache.buf.length - from);
+        if (len <= 0) { sendResponse({ ok: true, done: true, base64: '' }); return true; }
+        let bin = '';
+        const slice = zipCache.buf.subarray(from, from + len);
+        for (let k = 0; k < slice.length; k += 0x8000) bin += String.fromCharCode.apply(null, slice.subarray(k, k + 0x8000));
+        sendResponse({ ok: true, done: from + len >= zipCache.buf.length, base64: btoa(bin) });
         return true;
     }
 

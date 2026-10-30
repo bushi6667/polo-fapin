@@ -154,6 +154,74 @@
         return false;
     }
 
+    // 整包下载（后台取 codeload zip，分块回传）：8MB / 2 秒，比逐文件快一个数量级
+    async function fetchZip(sha) {
+        await withTimeout(viaExtension({ action: 'updaterZip', sha }), 70000, '下载整包');
+        const CHUNK = 1 << 20;
+        const parts = [];
+        let from = 0, done = false;
+        while (!done) {
+            const r = await withTimeout(viaExtension({ action: 'updaterZipChunk', sha, from, len: CHUNK }), 30000, '读取分块');
+            if (!r.base64) break;
+            const bin = atob(r.base64);
+            const arr = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+            parts.push(arr);
+            from += arr.length;
+            done = !!r.done;
+        }
+        const total = parts.reduce((n, a) => n + a.length, 0);
+        const out = new Uint8Array(total);
+        let off = 0;
+        for (const a of parts) { out.set(a, off); off += a.length; }
+        return out;
+    }
+
+    function u16(b, o) { return b[o] | (b[o + 1] << 8); }
+    function u32(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; }
+
+    async function inflateRaw(bytes) {
+        if (typeof DecompressionStream === 'undefined') throw Error('浏览器不支持解压');
+        const ds = new DecompressionStream('deflate-raw');
+        const stream = new Blob([bytes]).stream().pipeThrough(ds);
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+
+    // 解析 zip（中央目录），去掉 zipball 最外层目录那一层
+    async function unzip(buf) {
+        let eocd = -1;
+        for (let i = buf.length - 22; i >= 0 && i > buf.length - 66000; i--) {
+            if (buf[i] === 0x50 && buf[i + 1] === 0x4b && buf[i + 2] === 0x05 && buf[i + 3] === 0x06) { eocd = i; break; }
+        }
+        if (eocd < 0) throw Error('不是有效的 zip');
+        const count = u16(buf, eocd + 10);
+        let p = u32(buf, eocd + 16);
+        const out = [];
+        for (let n = 0; n < count; n++) {
+            if (u32(buf, p) !== 0x02014b50) break;
+            const method = u16(buf, p + 10);
+            const compSize = u32(buf, p + 20);
+            const nameLen = u16(buf, p + 28);
+            const extraLen = u16(buf, p + 30);
+            const commentLen = u16(buf, p + 32);
+            const localOff = u32(buf, p + 42);
+            const name = new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nameLen));
+            p += 46 + nameLen + extraLen + commentLen;
+            if (name.endsWith('/')) continue;
+            const lNameLen = u16(buf, localOff + 26);
+            const lExtraLen = u16(buf, localOff + 28);
+            const dataStart = localOff + 30 + lNameLen + lExtraLen;
+            const raw = buf.subarray(dataStart, dataStart + compSize);
+            let bytes;
+            if (method === 0) bytes = raw;
+            else if (method === 8) bytes = await inflateRaw(raw);
+            else continue;
+            const rel = name.split('/').slice(1).join('/');
+            if (rel) out.push({ path: rel, bytes });
+        }
+        return out;
+    }
+
     async function fileTree(sha) {
         const url = 'https://api.github.com/repos/' + REPO + '/git/trees/' + sha + '?recursive=1';
         const j = await getJson(url);
@@ -219,9 +287,10 @@
         if (!info.hasUpdate) return { updated: false, sha: info.remote.sha, written: 0, failed: [] };
 
         const sha = info.remote.sha;
-        report({ phase: 'tree' });
-        const nodes = await fileTree(sha);
-        const total = nodes.length;
+        report({ phase: 'zip' });
+        const zipBuf = await fetchZip(sha);
+        const entries = (await unzip(zipBuf)).filter(e => keep(e.path));
+        const total = entries.length;
         report({ phase: 'download', done: 0, total });
 
         const ts = stamp();
