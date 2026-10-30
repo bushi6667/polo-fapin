@@ -4368,35 +4368,34 @@ function createPage3Panel() {
     ddBtn.onclick = (e) => {
         e.stopPropagation();
         open = !open;
-        if (open) {
-            // 动态计算菜单位置：父容器 #polo-autofill-split 有 overflow:hidden，
-            // 用 position:fixed + getBoundingClientRect() 避免菜单被裁剪
-            const splitRect = document.getElementById('polo-autofill-split').getBoundingClientRect();
-            const GAP = 4, EDGE = 10, MAXH = 420;
-
-            menu.style.left = splitRect.left + 'px';
-            menu.style.width = splitRect.width + 'px';
-            menu.style.maxHeight = 'none';
-            menu.style.display = 'grid';   // 两列网格，避免长条
-            const contentH = menu.scrollHeight || 320;
-
-            const spaceUp = splitRect.top - GAP - EDGE;
-            const spaceDown = window.innerHeight - splitRect.bottom - GAP - EDGE;
-
-            // 上方更宽裕、且下方装不下就往上弹
-            const need = Math.min(contentH, MAXH);
-            const up = spaceDown < need && spaceUp > spaceDown;
-
-            const h = Math.max(120, Math.min(contentH, up ? spaceUp : spaceDown, MAXH));
-            menu.style.maxHeight = h + 'px';
-            menu.style.bottom = 'auto';
-            menu.style.top = (up ? Math.max(EDGE, splitRect.top - GAP - h) : splitRect.bottom + GAP) + 'px';
-
-            window.__poloMenuDebug = { up, contentH, h, spaceUp, spaceDown, top: menu.style.top };
-        } else {
-            menu.style.display = 'none';
-        }
+        if (open) positionMenu(); else menu.style.display = 'none';
     };
+
+    // CDP 提示条出现/消失、窗口缩放都会改变视口高度；
+    // 菜单位置只在打开瞬间算一次，视口一变就悬在错的地方 → resize 时重算
+    function positionMenu() {
+        const splitRect = document.getElementById('polo-autofill-split').getBoundingClientRect();
+        const GAP = 4, EDGE = 10, MAXH = 420;
+
+        menu.style.left = splitRect.left + 'px';
+        menu.style.width = splitRect.width + 'px';
+        menu.style.maxHeight = 'none';
+        menu.style.display = 'grid';   // 两列网格，避免长条
+        const contentH = menu.scrollHeight || 320;
+
+        const spaceUp = splitRect.top - GAP - EDGE;
+        const spaceDown = window.innerHeight - splitRect.bottom - GAP - EDGE;
+
+        const need = Math.min(contentH, MAXH);
+        const up = spaceDown < need && spaceUp > spaceDown;
+
+        const h = Math.max(120, Math.min(contentH, up ? spaceUp : spaceDown, MAXH));
+        menu.style.maxHeight = h + 'px';
+        menu.style.bottom = 'auto';
+        menu.style.top = (up ? Math.max(EDGE, splitRect.top - GAP - h) : splitRect.bottom + GAP) + 'px';
+    }
+
+    window.addEventListener('resize', () => { if (open) positionMenu(); });
     document.addEventListener('click', () => { open = false; menu.style.display = 'none'; });
 
     document.getElementById('polo-paste-btn').onclick = loadFromClipboard;
