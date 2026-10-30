@@ -4371,7 +4371,10 @@ function createPage3Panel() {
             const need = Math.min(menu.scrollHeight || 320, 420);
 
             // 面板贴左下角后，下方常常不够 → 放不下就改成往上展开（用户要求）
-            if (spaceBelow < need && spaceAbove > spaceBelow) {
+            // 判定加一条"按钮在下半屏就往上"，不依赖 scrollHeight 的测量结果
+            const inBottomHalf = splitRect.top > window.innerHeight * 0.5;
+            window.__poloMenuDebug = { top: splitRect.top, bottom: splitRect.bottom, vh: window.innerHeight, spaceBelow, spaceAbove, need, inBottomHalf };
+            if (inBottomHalf && spaceAbove > spaceBelow) {
                 menu.style.top = 'auto';
                 menu.style.bottom = (window.innerHeight - splitRect.top + GAP) + 'px';
                 menu.style.maxHeight = Math.max(120, Math.min(spaceAbove, 420)) + 'px';
