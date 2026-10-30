@@ -137,9 +137,36 @@
         };
     }
 
-    async function check() {
+    // 匿名调用 GitHub API 每小时只有 60 次，两套环境 + 手动点很容易耗尽（403）。
+    // 结果缓存 10 分钟，自动检查用缓存；手动点「检查」才强制刷新。
+    const CACHE_KEY = 'polo_update_check_v1';
+    const CACHE_MS = 10 * 60 * 1000;
+
+    function readCache() {
+        try { return JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (_) { return null; }
+    }
+    function writeCache(v) {
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), value: v })); } catch (_) {}
+    }
+
+    async function check(force) {
+        const cached = readCache();
+        if (!force && cached && cached.value && (Date.now() - cached.at) < CACHE_MS) {
+            return Object.assign({}, cached.value, { fromCache: true });
+        }
         const local = localBuild();
-        const remote = await remoteCommit();
+        let remote;
+        try {
+            remote = await remoteCommit();
+        } catch (e) {
+            const msg = String((e && e.message) || e);
+            const old = readCache();
+            if (/403/.test(msg) && old && old.value) {
+                return Object.assign({}, old.value, { rateLimited: true, fromCache: true });
+            }
+            if (/403/.test(msg)) throw Error('GitHub 查询额度已用完（每小时 60 次），稍后再试');
+            throw e;
+        }
         const lt = Date.parse(local);
         const rt = Date.parse(remote.date);
         // 用「上次更新写入的 sha」优先判定：光比时间会在更新后仍显示有新版本，来回循环。
@@ -148,7 +175,9 @@
         const hasUpdate = applied
             ? (String(applied) !== String(remote.sha))
             : (isFinite(lt) && isFinite(rt) && (rt - lt) > 60 * 1000);
-        return { localBuild: local, remote, appliedSha: applied, hasUpdate };
+        const result = { localBuild: local, remote, appliedSha: applied, hasUpdate };
+        writeCache(result);
+        return result;
     }
 
     // 只更新这些文件；其余（表格、图片、归档、tests）一律跳过
