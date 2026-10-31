@@ -1024,9 +1024,13 @@ async function publishTickOnce() {
             await pausePublishTaskLocked('fileSwitch', `当前文件已切换（任务绑定 ${taskFileKey(t) || '(无文件名)'}），任务已暂停以防数据互串`);
             return;
         }
-        // 当前行超时
+        // 当前行超时：自动跳过该行并继续，不再整批暂停。
+        // 真机两次事故（13 小时 / 11 小时）：某行流程无声中断 → 队列等超时 → 整批挂起。
         if (t.currentRow !== null && t.currentStartedAt && Date.now() - t.currentStartedAt > t.rowTimeoutMs) {
-            await pauseForRowFailureLocked('rowTimeout', `第 ${t.currentRow} 行填写超时（>${Math.round(t.rowTimeoutMs / 60000)} 分钟）`);
+            try {
+                appendPublishLog({ level: 'page3', row: t.currentRow, msg: `rowTimeout 自动跳过（>${Math.round(t.rowTimeoutMs / 60000)} 分钟），队列继续` });
+            } catch (_) {}
+            await skipCurrentRowLocked();
             return;
         }
         // 当前标签是否被用户关闭
@@ -1292,7 +1296,12 @@ async function retryPublishRow() {
 }
 
 async function skipPublishRow() {
-    return withPublishLock(async () => {
+    return withPublishLock(() => skipCurrentRowLocked());
+}
+
+// 锁内执行：跳过当前行（队列首行必须等于当前行，防止删错）
+async function skipCurrentRowLocked() {
+    {
         const t = await loadPublishTask();
         if (!t) return { ok: false, message: '没有发品任务' };
         if (t.currentRow === null) return { ok: false, message: '当前没有可跳过的行' };
@@ -1327,7 +1336,7 @@ async function skipPublishRow() {
         }
         await broadcastPublishState();
         return { ok: true, row, remaining: t.remaining.length };
-    });
+    }
 }
 
 // ---------- 后台冷启动恢复（不把用户暂停变运行） ----------
