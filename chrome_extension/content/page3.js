@@ -1,19 +1,3 @@
-let IMG_EXT = 'jpg';
-
-function loadImgExt() {
-    return new Promise((resolve) => {
-        chrome.storage.local.get('img_ext', (result) => {
-            IMG_EXT = result.img_ext || 'jpg';
-            resolve(IMG_EXT);
-        });
-    });
-}
-
-function saveImgExt(ext) {
-    IMG_EXT = ext;
-    chrome.storage.local.set({ img_ext: ext });
-}
-
 function nativeKeyPress(key) {
     const keyCode = key === 'Enter' ? 13 : key === 'Tab' ? 9 : key === 'Escape' ? 27 : key === 'ArrowDown' ? 40 : key === 'ArrowUp' ? 38 : 0;
     document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', {key, code: key, keyCode, which: keyCode, bubbles: true}));
@@ -3949,15 +3933,6 @@ function createPage3Panel() {
                 </button>
             </div>
             </div>
-            <div id="polo-ext-container" style="position:relative;display:flex;gap:4px;padding:4px;margin-bottom:8px;background:#f1f5f9;border-radius:12px;border:1px solid #e2e8f0;">
-                <div style="position:absolute;top:4px;left:4px;height:28px;border-radius:10px;background:linear-gradient(135deg,#52c41a 0%,#389e0d 100%);box-shadow:0 2px 8px rgba(82,196,26,0.3);transition:transform 0.4s cubic-bezier(0.34,1.56,0.64,1),width 0.3s cubic-bezier(0.34,1.56,0.64,1);z-index:1;pointer-events:none;" id="polo-ext-glider"></div>
-                <button id="polo-ext-jpg" style="position:relative;z-index:2;flex:1;height:28px;border:none;background:transparent;color:#fff;font-size:12px;font-weight:500;cursor:pointer;border-radius:10px;display:flex;align-items:center;justify-content:center;user-select:none;transition:color 0.35s ease;">
-                    JPG
-                </button>
-                <button id="polo-ext-png" style="position:relative;z-index:2;flex:1;height:28px;border:none;background:transparent;color:#64748b;font-size:12px;font-weight:500;cursor:pointer;border-radius:10px;display:flex;align-items:center;justify-content:center;user-select:none;transition:color 0.35s ease;">
-                    PNG
-                </button>
-            </div>
             <div id="polo-log" style="background:#1e1e2e;color:#a6e3a1;padding:10px;border-radius:6px;font-family:monospace;font-size:11px;line-height:1.5;max-height:200px;overflow-y:auto;margin-top:8px;">
                 <div style="color:#a6e3a1;">[系统] 发品助手已加载</div>
             </div>
@@ -4021,7 +3996,6 @@ function createPage3Panel() {
             autofillDropdownBtn.style.display = 'none';
             actionMenu.style.display = 'none';
             logArea.style.display = 'none';
-            if (extContainer) extContainer.style.display = 'none';
             
             if (modeOverwriteBtn) modeOverwriteBtn.style.display = 'none';
             if (modeAppendBtn) modeAppendBtn.style.display = 'none';
@@ -4036,7 +4010,6 @@ function createPage3Panel() {
             autofillBtn.style.display = 'block';
             autofillDropdownBtn.style.display = 'block';
             logArea.style.display = 'block';
-            if (extContainer) extContainer.style.display = 'flex';
             
             if (modeOverwriteBtn) modeOverwriteBtn.style.display = 'flex';
             if (modeAppendBtn) modeAppendBtn.style.display = 'flex';
@@ -4046,7 +4019,6 @@ function createPage3Panel() {
             panel.style.width = '380px';
             panel.style.maxHeight = '85vh';
             updateModeGlider();
-            updateExtGlider();
         }
     }
 
@@ -4082,52 +4054,9 @@ function createPage3Panel() {
         log('📌 模式切换为：追加填入', 'info');
     };
 
-    const extJpgBtn = document.getElementById('polo-ext-jpg');
-    const extPngBtn = document.getElementById('polo-ext-png');
-    const extGlider = document.getElementById('polo-ext-glider');
-    const extContainer = document.getElementById('polo-ext-container');
-
-    function updateExtGlider() {
-        if (!extGlider || !extJpgBtn || !extPngBtn) return;
-        const activeBtn = IMG_EXT === 'jpg' ? extJpgBtn : extPngBtn;
-        if (activeBtn) {
-            const rect = activeBtn.getBoundingClientRect();
-            const containerRect = activeBtn.parentElement.getBoundingClientRect();
-            extGlider.style.transform = `translateX(${rect.left - containerRect.left - 4}px)`;
-            extGlider.style.width = `${rect.width}px`;
-            activeBtn.style.color = '#fff';
-            const inactiveBtn = IMG_EXT === 'jpg' ? extPngBtn : extJpgBtn;
-            inactiveBtn.style.color = '#64748b';
-        }
-    }
-
-    function updateImgExtButtons() {
-        if (!extJpgBtn || !extPngBtn) return;
-        updateExtGlider();
-    }
-
-    extJpgBtn?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        saveImgExt('jpg');
-        updateImgExtButtons();
-        log('📷 图片格式切换为: JPG', 'info');
-    });
-
-    extPngBtn?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        saveImgExt('png');
-        updateImgExtButtons();
-        log('📷 图片格式切换为: PNG', 'info');
-    });
-
     setTimeout(updateModeGlider, 100);
-    setTimeout(updateExtGlider, 100);
 
     togglePanel();
-
-    loadImgExt().then(() => {
-        updateImgExtButtons();
-    });
 
     let isDragging = false;
     let dragStartX = 0, dragStartY = 0;

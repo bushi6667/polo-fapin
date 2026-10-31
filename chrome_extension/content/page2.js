@@ -19,24 +19,6 @@ async function uploadPage2PublicationImages(product){
     log('✓ 六张主图上传完成（统一JPG、每张不超过1MB）','success');
     return result;
 }
-let IMG_EXT = 'jpg';
-
-// 从 storage 加载图片格式配置（默认 jpg）
-function loadImgExt() {
-    return new Promise((resolve) => {
-        chrome.storage.local.get('img_ext', (result) => {
-            IMG_EXT = result.img_ext || 'jpg';
-            resolve(IMG_EXT);
-        });
-    });
-}
-
-// 保存图片格式配置（页2/页3 共享同一 storage key）
-function saveImgExt(ext) {
-    IMG_EXT = ext;
-    chrome.storage.local.set({ img_ext: ext });
-}
-
 // 创建页面隐藏 file input（供 CDP 注入图片文件用）
 function createHiddenFileInput() {
     if (hiddenFileInput) return hiddenFileInput;
@@ -342,11 +324,6 @@ function createPage2Panel() {
             <button id="polo-upload-img-btn" disabled style="display:block;width:100%;padding:10px;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;margin-bottom:8px;background:#f0f1f5;color:#333;">
                 🖼️ 仅上传主图
             </button>
-            <div style="display:flex;gap:6px;margin-bottom:8px;">
-                <div style="flex:1;font-size:12px;color:#666;line-height:28px;">图片格式:</div>
-                <button id="polo-ext-jpg" style="flex:1;padding:6px 8px;border:1px solid #52c41a;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;background:#52c41a;color:white;">JPG</button>
-                <button id="polo-ext-png" style="flex:1;padding:6px 8px;border:1px solid #d9d9d9;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;background:white;color:#666;">PNG</button>
-            </div>
             <div id="polo-log" style="background:#1e1e2e;color:#a6e3a1;padding:10px;border-radius:6px;font-family:monospace;font-size:11px;line-height:1.5;max-height:200px;overflow-y:auto;margin-top:8px;">
                 <div style="color:#a6e3a1;">[系统] 发品助手已加载</div>
             </div>
@@ -387,42 +364,6 @@ function createPage2Panel() {
         } catch (e) {
             log('✗ 上传失败: ' + e.message, 'error');
         } finally {button.disabled=false;}
-    };
-
-    // 图片格式按钮选中态切换（JPG/PNG 高亮）
-    function updateExtButtons() {
-        const btnJpg = document.getElementById('polo-ext-jpg');
-        const btnPng = document.getElementById('polo-ext-png');
-        if (IMG_EXT === 'jpg') {
-            btnJpg.style.background = '#52c41a';
-            btnJpg.style.borderColor = '#52c41a';
-            btnJpg.style.color = 'white';
-            btnPng.style.background = 'white';
-            btnPng.style.borderColor = '#d9d9d9';
-            btnPng.style.color = '#666';
-        } else {
-            btnPng.style.background = '#52c41a';
-            btnPng.style.borderColor = '#52c41a';
-            btnPng.style.color = 'white';
-            btnJpg.style.background = 'white';
-            btnJpg.style.borderColor = '#d9d9d9';
-            btnJpg.style.color = '#666';
-        }
-    }
-
-    loadImgExt().then(updateExtButtons);
-
-    // 格式切换
-    document.getElementById('polo-ext-jpg').onclick = () => {
-        saveImgExt('jpg');
-        updateExtButtons();
-        log('图片格式切换为 JPG');
-    };
-
-    document.getElementById('polo-ext-png').onclick = () => {
-        saveImgExt('png');
-        updateExtButtons();
-        log('图片格式切换为 PNG');
     };
 
     document.getElementById('polo-paste-btn').onclick = loadFromClipboard;
