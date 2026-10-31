@@ -3838,7 +3838,10 @@ async function fillAllPage3(product, step) {
     if (run('fill_box_rule')) results.push(...await retryStepOnce('箱规关联', () => fillBoxRule(product)));
     if (run('fill_detail_template')) {
         const template=await fillDetailTemplate(product);results.push(...template);
-        if(!template.some(r=>r.startsWith('✅ 商品详情模板:')))return results;
+        // 详情模板没选中不能再 return：那会把细节图、公司介绍（FAQ 挂在它末尾）整段吞掉，
+        // 而且失败只留一条 ⚠️，视觉上等于"什么都没发生"（真机：每行 3 秒就保存上报）。
+        // 记一条 ⚠️ 后继续，是否阻保存交给既有规则（❌ 才阻断批量自动保存）。
+        if(!template.some(r=>r.startsWith('✅ 商品详情模板:')))results.push('⚠️ 商品详情模板未选中，已继续执行细节图/公司介绍（需人工确认）');
     }
     if (run('fill_detail_images')) {
         const images=await fillDetailImagesPage3(product);results.push(...images);
