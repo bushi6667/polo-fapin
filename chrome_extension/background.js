@@ -203,7 +203,7 @@ async function getPendingColorTask() {
 // ============================================================
 const PUBLISH_TASK_KEY = 'polo_publish_task';
 const PUBLISH_LOG_KEY = 'polo_publish_log';
-const PUBLISH_LOG_MAX = 500;
+const PUBLISH_LOG_MAX = 2000;   // 500 条只够存 1 小时（真机 13 小时被覆盖，等于没日志）
 const PUBLISH_SETTINGS_KEY = 'polo_publish_settings';
 const PUBLISH_VERIFIED_SAVED_KEY = 'polo_publish_verified_saved';   // 保存记录（用户定义：页3菜单点击保存；记录来源）
 // 点击保存后等待平台反馈的时长：太短采不到 toast/红字，太长拖慢批量。测试里置 0。
@@ -394,15 +394,30 @@ async function savePublishTask(task) {
     });
 }
 
-// ---------- 诊断日志（有界 500 条；只记数值与标识，不记凭据/文案/图片） ----------
-async function appendPublishLog(entry) {
+// ---------- 诊断日志（有界 2000 条；只记数值与标识，不记凭据/文案/图片） ----------
+// 批量写入 + 连续重复行合并：页面每行约 200 条日志，逐条「读全量→写全量」会互相覆盖丢条。
+async function appendPublishLogBatch(entries) {
+    if (!Array.isArray(entries) || !entries.length) return;
     try {
         const r = await new Promise(res => chrome.storage.local.get(PUBLISH_LOG_KEY, res));
         const list = Array.isArray(r[PUBLISH_LOG_KEY]) ? r[PUBLISH_LOG_KEY] : [];
-        list.push({ t: Date.now(), ...entry });
+        for (const e of entries) {
+            const last = list[list.length - 1];
+            // 只折叠「有文案的连续重复行」；saveRejected 这类无 msg 的事件必须各自留一条
+            if (last && e.msg && last.msg === e.msg && last.row === e.row) {
+                last.n = (last.n || 1) + 1;
+                last.t = e.t;
+                continue;
+            }
+            list.push(e);
+        }
         while (list.length > PUBLISH_LOG_MAX) list.shift();
         await new Promise(res => chrome.storage.local.set({ [PUBLISH_LOG_KEY]: list }, res));
     } catch (_) {}
+}
+
+async function appendPublishLog(entry) {
+    return appendPublishLogBatch([{ t: Date.now(), ...entry }]);
 }
 
 // ---------- 目标页面统计（全部 easyListing/publish 顶层标签，含旧批次与已保存页面） ----------
@@ -4316,6 +4331,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         } catch (_) {}
         appendPublishLog({ level: 'page3', tabId, row, msg: String(request.msg || '').slice(0, 160), pageLevel: request.level || 'info' });
         sendResponse({ ok: true });
+        return true;
+    }
+
+    // 页面日志批量上报（新）；旧页面仍可能发单条 page3Log，两条通路并存
+    if (request.action === 'page3LogBatch') {
+        const tabId = sender && sender.tab ? sender.tab.id : 0;
+        let row = 0;
+        try { row = Number(new URL((sender && sender.tab && sender.tab.url) || '').searchParams.get('row')) || 0; } catch (_) {}
+        const list = Array.isArray(request.batch) ? request.batch : [];
+        const entries = list.map(b => ({
+            t: Number(b && b.t) || Date.now(),
+            level: 'page3',
+            tabId,
+            row,
+            msg: String((b && b.m) || '').slice(0, 300),
+            pageLevel: String((b && b.l) || 'info')
+        })).filter(e => e.msg);
+        sendResponse({ ok: true });                 // 不等写入，避免拖慢页面
+        appendPublishLogBatch(entries);
         return true;
     }
 

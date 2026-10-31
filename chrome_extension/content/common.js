@@ -51,7 +51,30 @@ function startHeartbeat(intervalMs = 15000) {
 }
 
 // 页面浮动面板日志输出（按类型着色 success/error/warn/info）
+// —— 日志上报队列 ——
+// 以前只有命中关键词正则的行才上报（标题/颜色/尺码/详情模板/公司介绍/FAQ 全静默），
+// 线上排查基本靠猜。现在全量上报，但攒成批（1.5s 或 40 条）发一次，避免刷爆 storage。
+const POLO_LOG_QUEUE = { buf: [], timer: 0, MAX: 40, FLUSH_MS: 1500 };
+
+function poloFlushLogs() {
+    if (POLO_LOG_QUEUE.timer) { clearTimeout(POLO_LOG_QUEUE.timer); POLO_LOG_QUEUE.timer = 0; }
+    const batch = POLO_LOG_QUEUE.buf.splice(0);
+    if (!batch.length) return;
+    try { chrome.runtime.sendMessage({ action: 'page3LogBatch', batch }); } catch (_) {}
+}
+
+function reportLog(msg, type) {
+    POLO_LOG_QUEUE.buf.push({ t: Date.now(), m: String(msg == null ? '' : msg).slice(0, 300), l: type || 'info' });
+    if (POLO_LOG_QUEUE.buf.length >= POLO_LOG_QUEUE.MAX) poloFlushLogs();
+    else if (!POLO_LOG_QUEUE.timer) POLO_LOG_QUEUE.timer = setTimeout(poloFlushLogs, POLO_LOG_QUEUE.FLUSH_MS);
+}
+
+try { window.addEventListener('pagehide', poloFlushLogs); } catch (_) {}
+
 function log(msg, type = 'info') {
+    // 上报优先：面板还没建好（#polo-log 不存在）时也要留痕，否则失败原因彻底丢失
+    reportLog(msg, type);
+
     const logArea = document.getElementById('polo-log');
     if (!logArea) return;
     const line = document.createElement('div');
@@ -63,13 +86,6 @@ function log(msg, type = 'info') {
     line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
     logArea.appendChild(line);
     logArea.scrollTop = logArea.scrollHeight;
-    // 关键行同时落后台日志（publish log）：页面关掉/被刷新后还能查到这一行为什么失败。
-    // 只转关键词行，避免刷爆 storage。
-    try {
-        if (/箱规|分组|已保存|跳过|主图|❌|⚠️|填完|未关联|超时|产品特性|自由文本|关键项|重试/.test(String(msg))) {
-            chrome.runtime.sendMessage({ action: 'page3Log', msg: String(msg).slice(0, 160), level: type || 'info' });
-        }
-    } catch (_) {}
 }
 
 // 设置输入框值：走原生 value setter（绕过 React 受控组件）+ input/change 事件
