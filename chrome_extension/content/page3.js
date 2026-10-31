@@ -4187,24 +4187,24 @@ function createPage3Panel() {
 
     // 标签一律 ≤4 字，两列 360px 内完整显示（真机原标签被截成「填入商品…」，分不清）
     const items = [
-        { icon: '🖼️', label: '主图', act: 'fill_images' },
-        { icon: '📌', label: '名称', act: 'fill_title' },
-        { icon: '📁', label: '分组', act: 'fill_group' },
+        { icon: '🖼️', label: '上传主图', act: 'fill_images' },
+        { icon: '📌', label: '商品名称', act: 'fill_title' },
+        { icon: '📁', label: '商品分组', act: 'fill_group' },
         { icon: '🔑', label: '关键词', act: 'fill_keywords' },
-        { icon: '📋', label: '属性', act: 'fill_attributes' },
-        { icon: '🎨', label: '颜色', act: 'fill_colors' },
-        { icon: '📏', label: '尺码', act: 'fill_sizes' },
+        { icon: '📋', label: '商品属性', act: 'fill_attributes' },
+        { icon: '🎨', label: '商品颜色', act: 'fill_colors' },
+        { icon: '📏', label: '商品尺码', act: 'fill_sizes' },
         { icon: '📐', label: '尺码模板', act: 'fill_size_template' },
         { icon: '💲', label: '计量单位', act: 'fill_price_unit' },
         { icon: '💰', label: '阶梯价', act: 'fill_ladder_price' },
         { icon: '🔢', label: '批量数量', act: 'fill_batch_qty' },
         { icon: '📦', label: '物流信息', act: 'fill_logistics' },
-        { icon: '📦', label: '箱规', act: 'fill_box_rule' },
+        { icon: '📦', label: '箱规关联', act: 'fill_box_rule' },
         { icon: '📑', label: '物流模板', act: 'fill_logistics_template' },
         { icon: '🖼️', label: '详情模板', act: 'fill_detail_template' },
         { icon: '🖼️', label: '细节图', act: 'fill_detail_images' },
         { icon: '🏢', label: '公司介绍', act: 'fill_company_intro_template' },
-        { icon: '✨', label: '卖点', act: 'fill_highlights', mode: true },
+        { icon: '✨', label: '商品卖点', act: 'fill_highlights', mode: true },
         { icon: '❓', label: 'FAQs', act: 'fill_faqs', mode: true },
     ];
 
