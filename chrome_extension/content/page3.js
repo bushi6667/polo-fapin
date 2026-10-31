@@ -4233,7 +4233,7 @@ function createPage3Panel() {
     const menu = document.getElementById('polo-action-menu');
     // 动作有 20 多项，单列会拉成一条长条 → 两列网格
     menu.style.display = 'none';
-    menu.style.gridTemplateColumns = '1fr 1fr';
+    menu.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
     menu.style.gap = '2px';
     menu.style.width = 'auto';
 
@@ -4241,6 +4241,7 @@ function createPage3Panel() {
         const el = document.createElement('div');
         el.style.cssText = 'padding:6px 8px;border-radius:6px;cursor:pointer;font-size:12px;color:#333;transition:background 0.15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
         el.innerText = `${icon} ${label}`;
+        el.title = label;   // 列宽仍不够时，悬停可看全名
         el.onmouseenter = () => { el.style.background = '#f1f5f9'; };
         el.onmouseleave = () => { el.style.background = 'transparent'; };
         el.onclick = async (e) => {
@@ -4291,7 +4292,8 @@ function createPage3Panel() {
         const GAP = 4, EDGE = 10, MAXH = 420;
 
         menu.style.left = splitRect.left + 'px';
-        menu.style.width = splitRect.width + 'px';
+        // 真机只有 228px：两列各 107px，'填入商品名称' 被截成 '填入商品…'
+        menu.style.width = Math.max(splitRect.width, 360) + 'px';
         menu.style.maxHeight = 'none';
         menu.style.display = 'grid';   // 两列网格，避免长条
         const contentH = menu.scrollHeight || 320;
