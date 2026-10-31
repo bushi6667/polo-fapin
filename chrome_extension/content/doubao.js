@@ -173,34 +173,6 @@ function findSendButton() {
     return null;
 }
 
-// 定位可见的 file input（用于 CDP 注入图片文件）
-function findFileInput() {
-    const inputs = document.querySelectorAll('input[type="file"]');
-    for (const inp of inputs) {
-        if (inp.offsetParent !== null || inp.style.display !== 'none') {
-            return inp;
-        }
-    }
-    return inputs[0] || null;
-}
-
-// 定位「上传图片」按钮（优先找含 file input 的按钮，其次用 file input 父元素）
-function findUploadButton() {
-    const allEls = document.querySelectorAll('button, div, span, label');
-    for (const el of allEls) {
-        const txt = (el.innerText || '').trim();
-        if ((txt.includes('上传') || txt.includes('图片') || txt.includes('+')) && el.offsetHeight > 0) {
-            const inp = el.querySelector('input[type="file"]');
-            if (inp) return { btn: el, input: inp };
-        }
-    }
-    const fileInp = findFileInput();
-    if (fileInp) {
-        return { btn: fileInp.parentElement, input: fileInp };
-    }
-    return null;
-}
-
 // 切换豆包到「图像生成」模式（点击图像生成按钮并等待渲染）
 async function switchToImageGenMode() {
     log('切换到图像生成模式...');

@@ -17,7 +17,6 @@ function isRasterImageType(blobType) {
 const IMAGE_DIR_KEY = 'polo_image_dir';
 const COLOR_IMG_DIR_KEY = 'polo_color_img_dir';
 const PENDING_COLOR_TASK_KEY = 'polo_pending_color_task';
-const DOUBAO_TAB_ID_KEY = 'polo_doubao_tab_id';
 const HELPER_PATH_KEY = 'polo_helper_path'; // popup.js 中配置的发品助手.html 路径（存在 chrome.storage.local）
 
 let IMAGE_DIR = '';
@@ -198,24 +197,6 @@ async function getPendingColorTask() {
     });
 }
 
-async function saveDoubaoTabId(tabId) {
-    return new Promise((resolve) => {
-        if (tabId) {
-            chrome.storage.local.set({ [DOUBAO_TAB_ID_KEY]: tabId }, resolve);
-        } else {
-            chrome.storage.local.remove(DOUBAO_TAB_ID_KEY, resolve);
-        }
-    });
-}
-
-async function getDoubaoTabId() {
-    return new Promise((resolve) => {
-        chrome.storage.local.get(DOUBAO_TAB_ID_KEY, (result) => {
-            resolve(result[DOUBAO_TAB_ID_KEY] || null);
-        });
-    });
-}
-
 // ============================================================
 // 发品任务：分批预填 + 资源闸门 + 停止/继续
 // 真相源一律在 chrome.storage.local，不依赖会随 MV3 休眠消失的内存变量
@@ -227,7 +208,6 @@ const PUBLISH_SETTINGS_KEY = 'polo_publish_settings';
 const PUBLISH_VERIFIED_SAVED_KEY = 'polo_publish_verified_saved';   // 保存记录（用户定义：页3菜单点击保存；记录来源）
 // 点击保存后等待平台反馈的时长：太短采不到 toast/红字，太长拖慢批量。测试里置 0。
 const SAVE_VERIFY_WAIT_MS = 2500;
-const PUBLISH_LEGACY_UPLOADED_KEY = 'polo_publish_legacy_uploaded'; // 旧 uploaded 标记：历史待核，仅供展示
 const PUBLISH_TICK_MS = 30000;                          // 运行期资源巡检间隔上限
 // 扩展自己点保存后的「自记账窗口」时长（内存，不落盘）：
 // CDP 注入的点击在渲染器里 isTrusted === true，页3 的点击监听会把它当成用户手动点击再回传一次
@@ -1729,7 +1709,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (changeInfo.status === 'complete' && tab.url && (tab.url.includes('doubao.com') || tab.url.includes('www.doubao.com'))) {
         console.log('🌐 豆包页面加载完成:', tabId);
         doubaoTabId = tabId;
-        await saveDoubaoTabId(tabId);
         dispatchPendingAiEdit(tabId).catch(e => console.warn('改图任务接收失败:', e.message));
         
         const pendingTask = await getPendingColorTask();
@@ -4542,7 +4521,6 @@ async function openDoubaoAndStartTaskLocked(task, epochAtRequest) {
     let tab = await findDoubaoTab();
     if (tab) {
         doubaoTabId = tab.id;
-        await saveDoubaoTabId(tab.id);
         if (!await bindPendingColorTab(task, tab.id)) return { ok: false, error: '派发已停止或文件已切换' };
         await chrome.tabs.update(tab.id, { active: true });
         console.log('📌 找到已有豆包标签页:', tab.id);
@@ -4577,7 +4555,6 @@ async function openDoubaoAndStartTaskLocked(task, epochAtRequest) {
     if (!await colorDispatchAllowed(task)) return { ok: false, error: '派发已停止或文件已切换' };
     const newTab = await chrome.tabs.create({ url: DOUBAO_URL, active: true });
     doubaoTabId = newTab.id;
-    await saveDoubaoTabId(newTab.id);
     if (!await bindPendingColorTab(task, newTab.id)) return { ok: false, error: '开页期间已停止，保留页面但不派发任务' };
     // 新页加载后再派发：身份先记为 pending，doubao 真正启动后回传 accepted
     return { ok: true, tabId: doubaoTabId, pending: true };

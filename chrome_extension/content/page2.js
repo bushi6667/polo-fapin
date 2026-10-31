@@ -32,34 +32,6 @@ function createHiddenFileInput() {
     return hiddenFileInput;
 }
 
-// 轮询等待主图上传完成（出现已上传图片列表项），超时返回 false
-function waitForImageUploadPage2(timeoutMs = 20000) {
-    return new Promise((resolve) => {
-        const startTime = Date.now();
-        const check = () => {
-            let imgs;
-            if (window.smartFind && typeof window.smartFind.findAll === 'function') {
-                imgs = window.smartFind.findAll('page2', 'imageUploaded');
-            } else {
-                const selectors = window.selectors && window.selectors.getList ?
-                    window.selectors.getList('page2', 'imageUploaded') :
-                    ['.image-upload-list-item img', '.image-item img', '.image-previewer img', '.image-uploader img'];
-                imgs = document.querySelectorAll(selectors.join(','));
-            }
-            if (imgs.length > 0) {
-                resolve(true);
-                return;
-            }
-            if (Date.now() - startTime > timeoutMs) {
-                resolve(false);
-                return;
-            }
-            setTimeout(check, 500);
-        };
-        check();
-    });
-}
-
 // 轮询等待「预测/常用类目」tab 与类目列表渲染完成（上传主图后异步出现）
 function waitForPredictCategoryRender(timeoutMs = 15000) {
     return new Promise((resolve) => {

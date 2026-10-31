@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta name="polo-build" content="2026-10-31T13:06:54+08:00">
+<meta name="polo-build" content="2026-10-31T13:35:34+08:00">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="theme-color" content="#30263f">
@@ -2085,19 +2085,6 @@ let currentColMap = {};
 // startRow 是表头所在的真实 Excel 行号（1 基），用于把产品行号还原成实际行号。
 let currentSheet = null;
 
-const FIELD_DISPLAY_CONFIG = [
-    { key: 'material', label: '材质', type: 'bilingual', group: 'grid' },
-    { key: 'technics', label: '工艺', type: 'bilingual', group: 'grid' },
-    { key: 'design', label: '设计', type: 'bilingual', group: 'grid' },
-    { key: 'features', label: '产品特性', type: 'bilingual', group: 'grid' },
-    { key: 'style', label: '样式', type: 'bilingual', group: 'grid' },
-    { key: 'printing', label: '印花', type: 'bilingual', group: 'grid' },
-    { key: 'fabric', label: '面料', type: 'bilingual', group: 'grid' },
-    { key: 'length', label: '衣长', type: 'bilingual', group: 'grid' },
-    { key: 'sleeve', label: '袖长', type: 'bilingual', group: 'grid' },
-    { key: 'price', label: '价格', type: 'price', group: 'grid' },
-];
-
 function getColorImagePath(rowNum, color) {
     // 句柄配置交给扩展读取，不把配置标识拼成file URL。
     if (colorImgBaseDir.startsWith('polo-dir:')) return '';
@@ -2447,8 +2434,6 @@ const HEADER_KEYWORDS_BY_CATEGORY = {
         status: ['是否废弃', '废弃', '状态', '审核状态', 'Discard', 'Status'],
     },
 };
-
-const CORE_FIELDS = new Set(['index', 'title', 'price', 'seo_title', 'highlights', 'faq', 'category', 'status']);
 
 function detectCategoryFromHeader(header) {
     const headerLower = header.map(h => String(h || '').toLowerCase().trim());

@@ -19,8 +19,7 @@ const CONFIG_EXPORT_KEYS = [
     COLOR_IMG_DIR_KEY,
     COLOR_IMG_DIR_HISTORY_KEY,
     'current_filename',
-    'polo_image_dir',
-    'polo_last_config'
+    'polo_image_dir'
 ];
 
 let helperPath = '';
@@ -128,17 +127,6 @@ loadHelperPath();
 loadHistoryIntoSelect('helper-path-history', HELPER_PATH_HISTORY_KEY);
 loadHistoryIntoSelect('color-img-dir-history', COLOR_IMG_DIR_HISTORY_KEY);
 
-// 汇总当前配置写入 polo_last_config（供其他页面/发品助手读取）
-function broadcastConfigChange() {
-    chrome.storage.local.get([COLOR_IMG_DIR_KEY, HELPER_PATH_KEY], (result) => {
-        const config = {
-            colorImgDir: result[COLOR_IMG_DIR_KEY] || '',
-            helperPath: result[HELPER_PATH_KEY] || ''
-        };
-        chrome.storage.local.set({ 'polo_last_config': config });
-    });
-}
-
 // ========== 路径保存 ==========
 
 // 解析路径：支持相对路径（相对扩展根目录），返回最终用于 chrome.tabs.create 的 file:/// URL
@@ -182,7 +170,6 @@ document.getElementById('save-helper-path').addEventListener('click', async () =
         helperPath = path;
         window.PoloSavedHelperPath = path;
         await window.PoloPathPickers?.['helper-path']?.committed();
-        broadcastConfigChange();
         if (path) {
             await addToHistory(HELPER_PATH_HISTORY_KEY, path);
             loadHistoryIntoSelect('helper-path-history', HELPER_PATH_HISTORY_KEY);
@@ -199,14 +186,12 @@ document.getElementById('helper-path-history').addEventListener('change', (e) =>
     if (v) {
         document.getElementById('helper-path').value = v;
         helperPath = v;
-        broadcastConfigChange();
     }
 });
 
 async function saveExtensionColorDirectory(dir) {
     const result = await chrome.runtime.sendMessage({action:'updateConfig',config:{colorImgDir:dir}});
     if (!result?.ok) throw new Error(result?.error || '目录保存失败');
-    broadcastConfigChange();
     if (dir) await addToHistory(COLOR_IMG_DIR_HISTORY_KEY,dir);
     loadHistoryIntoSelect('color-img-dir-history',COLOR_IMG_DIR_HISTORY_KEY);
 }

@@ -1089,23 +1089,6 @@ async function scrollToSection(sectionText, maxAttempts = 6) {
     }, maxAttempts);
 }
 
-async function waitForProvinceField() {
-    const maxWait = 5000;
-    const interval = 200;
-    let elapsed = 0;
-    while (elapsed < maxWait) {
-        const provinceContainer = findFieldContainer('', '省份');
-        if (provinceContainer) {
-            log('ℹ️ 省份字段已渲染', 'info');
-            return true;
-        }
-        await sleep3(interval);
-        elapsed += interval;
-    }
-    log('⚠️ 省份字段未在5秒内渲染', 'warn');
-    return false;
-}
-
 // ============================================================
 // 🖼️ 上传主图 fillImagesPage3
 // 输入方式: CDP DOM.setFileInputFiles 直接操作文件选择器
@@ -3814,12 +3797,6 @@ async function fillKeywordsPage3(product) {
         }
     }
     return results;
-}
-
-async function scrollToRenderAll() {
-    const totalHeight = document.documentElement.scrollHeight;
-    window.scrollTo(0, totalHeight);
-    await sleep3(200);
 }
 
 // ============================================================
