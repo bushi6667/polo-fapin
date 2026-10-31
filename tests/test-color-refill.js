@@ -83,6 +83,8 @@ function createSandbox(initial, remount = false) {
 
     const context = vm.createContext(Object.assign({}, stubs, {
         document, sleep3: async () => {}, realClick: async () => {},
+        // page3 的 fillAllPage3 已用 retryStepOnce 包步骤；沙箱必须提供同名桩，否则 ReferenceError
+        retryStepOnce: async (label, fn) => { const a = await fn(); const list = Array.isArray(a) ? a : []; const bad = list.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim())); if (!bad) return a; const b = await fn(); return Array.isArray(b) ? b : a; },
         scrollAndFind: async callback => callback(), log() {},
         setInputValue: (el, value) => { el.value = value; },
         KeyboardEvent: FakeEvent, MouseEvent: FakeEvent, Event: FakeEvent

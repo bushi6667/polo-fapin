@@ -35,6 +35,8 @@ function page(e, task, row, tab, { store = new Map(), dropCompletion = false, st
         updateProductInfo() {}, log: msg => logs.push(msg), ensureTabActive: async () => {},
         startHeartbeat: () => () => {}, setTimeout: callback => setTimeout(callback, 0),
         realClick: async el => clicks.push(el), sleep3: async () => {},
+        // fillAllPage3 用 retryStepOnce 包步骤；沙箱需同名桩，否则 ReferenceError（16 步断言会退化成 2）
+        retryStepOnce: async (label, fn) => { const a = await fn(); const list = Array.isArray(a) ? a : []; const bad = list.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim())); if (!bad) return a; const b = await fn(); return Array.isArray(b) ? b : a; },
         sendMessageRetry: async msg => {
             messages.push(msg);
             if (dropCompletion && msg.action === 'publishFilled') return { ok: false };
