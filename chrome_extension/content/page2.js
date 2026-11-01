@@ -92,15 +92,22 @@ function waitForPredictCategoryRender(timeoutMs = 15000) {
 async function abortRow(reason, detail) {
     try {
         const rowNum = getRowFromUrl();
-        const taskId = (typeof getTaskFromUrl === 'function' ? getTaskFromUrl() : '') || '';
+        // 页2 没有注入 page3.js，getTaskFromUrl 在这里根本不存在（旧写法恒为空 →
+        // 后台以「任务标识缺失」拒绝 → 三处 abort 全部空转，仍等 10 分钟）。
+        let taskId = '';
+        try { taskId = new URLSearchParams(window.location.search).get('task') || ''; } catch (_e) {}
+        if (!taskId) { try { taskId = sessionStorage.getItem('polo_batch_task') || ''; } catch (_e) {} }
         log('⛔ 本行中止：' + detail + '（' + reason + '）', 'error');
-        await chrome.runtime.sendMessage({
-            action: 'publishFilled',
-            row: rowNum,
-            taskId,
-            note: reason,
-            failed: true
+        const resp = await new Promise(resolve => {
+            try {
+                chrome.runtime.sendMessage({ action: 'publishFilled', row: rowNum, taskId, note: reason, failed: true }, r => {
+                    resolve(chrome.runtime.lastError ? { ok: false, message: chrome.runtime.lastError.message } : (r || {}));
+                });
+            } catch (e) { resolve({ ok: false, message: e.message }); }
         });
+        if (!resp || resp.ok !== true) {
+            log('⚠️ 中止信号未被队列接受（' + ((resp && resp.message) || '无响应') + '），本行将走超时跳过', 'warn');
+        }
     } catch (e) { log('⚠️ 中止信号发送失败: ' + e.message, 'warn'); }
 }
 
@@ -231,17 +238,26 @@ async function autoFillPage2(product) {
         await new Promise(r => setTimeout(r, 800));
 
         // 真机：realClick 永远返回 true，点没点到无从得知 → 必须校验页面真的跳走。
-        const href0 = location.href;
-        let jumped = false;
+        // 判定不能用 href !== href0（平台 replaceState 改 spm/参数就会假阳性），
+        // 也不能用 [class*="publish"]（页2 自己就命中）。只认 pathname 变化或页3 独有容器。
+        const path0 = location.pathname;
+        const isPage3 = () => !!document.querySelector('.sell-catProp-item, #struct-image, #scImages');
+        let jumped = isPage3() || location.pathname !== path0;
         for (let attempt = 1; attempt <= 2 && !jumped; attempt++) {
-            await realClick(publishBtn);
+            // 第二击前重新定位：旧引用可能已被平台移除或置灰，硬点会命中 (0,0)
+            const btnsNow = Array.from(document.querySelectorAll('button')).filter(b => {
+                const t = (b.innerText || b.textContent || '').trim();
+                return (t.includes('我已阅读') || t.includes('发布产品')) && b.offsetHeight > 0;
+            });
+            const btn = btnsNow.find(b => !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+            if (!btn) { log('⚠️ 发布按钮已不可用（第 ' + attempt + ' 次点击前），停止重试', 'warn'); break; }
+            await realClick(btn);
             log('🖱️ 已点击发布按钮（第 ' + attempt + ' 次），等待跳转…', 'info');
             for (let i = 0; i < 40; i++) {          // 最多 20s
                 await new Promise(r => setTimeout(r, 500));
-                if (location.href !== href0 || /product\/publish/.test(location.href)) { jumped = true; break; }
-                if (!document.querySelector('input#productTitle') && document.querySelector('[class*="publish"]')) { jumped = true; break; }
+                if (location.pathname !== path0 || isPage3()) { jumped = true; break; }
             }
-            if (!jumped) log('⚠️ 第 ' + attempt + ' 次点击后未跳转', 'warn');
+            if (!jumped) log('⚠️ 第 ' + attempt + ' 次点击后未跳转（页面仍有 ' + btnsNow.length + ' 个发布按钮）', 'warn');
         }
         if (jumped) {
             log('✅ 已跳转页3', 'success');

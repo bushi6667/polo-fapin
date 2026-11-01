@@ -395,6 +395,46 @@ function verifyFieldValue(container, expectedVal, mode) {
     return false;
 }
 
+// 合成 blur 事件不会真的移动焦点，React 受控组件不认 → 值不提交（真机：填了但保存后为空）。
+// 用真实点击同一表单项的 label 触发 blur + commit；没有 label 才退回点区块标题。
+// 真机：React 标签组对 CDP 坐标点击时灵时不灵，对完整指针序列稳定。
+// 普货、筛选项这类 .tag 一律先走指针序列，失败再退回 realClick。
+async function clickTagByPointer(el) {
+    try {
+        const r = el.getBoundingClientRect();
+        const base = { bubbles: true, cancelable: true, clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2), view: window, button: 0, detail: 1 };
+        const ptr = Object.assign({}, base, { buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true });
+        el.dispatchEvent(new PointerEvent('pointerdown', ptr));
+        el.dispatchEvent(new MouseEvent('mousedown', base));
+        el.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, ptr, { buttons: 0 })));
+        el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
+        el.dispatchEvent(new MouseEvent('click', base));
+        return true;
+    } catch (_) { return false; }
+}
+
+async function commitFieldByClick(inputEl, label) {
+    try {
+        const item = inputEl && inputEl.closest ? inputEl.closest('.next-form-item,[class*="form-item"]') : null;
+        const lab = item ? item.querySelector('.next-form-item-label,label,[class*="label"]') : null;
+        if (lab && lab.getClientRects().length) {
+            await realClick(lab);
+            await sleep3(150);
+            log('🖱️ ' + (label || '输入') + '：点击标签空白提交', 'info');
+            return true;
+        }
+        const sec = inputEl && inputEl.closest ? inputEl.closest('[role="all"]') : null;
+        const head = sec ? sec.querySelector('h3,h2,[class*="title"]') : null;
+        if (head && head.getClientRects().length) {
+            await realClick(head);
+            await sleep3(150);
+            log('🖱️ ' + (label || '输入') + '：点击区块标题提交', 'info');
+            return true;
+        }
+    } catch (_) {}
+    return false;
+}
+
 // ============================================================
 // 类目独立的字段填法
 // 每个类目一份映射：只影响本类目，改 polo 不会碰到卫衣/衬衫。
@@ -413,7 +453,8 @@ async function fillFreeTextAttribute(c, field) {
     await sleep3(120);
     await typeInto(inp, english);
     await sleep3(150);
-    inp.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+    if (typeof commitFieldByClick === 'function') await commitFieldByClick(inp, field.lbl);
+    else inp.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
     await sleep3(120);
     const got = String(inp.value || '').trim();
     log(got ? `✅ ${field.lbl} 已输入（自由文本）：${got}` : `⚠️ ${field.lbl} 输入后仍为空`, got ? 'success' : 'warn');
@@ -1202,6 +1243,13 @@ async function fillGroupPage3(product) {
     }
     
     await realClick(pg);
+    await sleep3(600);
+    // 真机：分组下拉用 CDP 点击有时打不开（选项一个都渲染不出来）→ 指针序列补一次
+    if (!document.querySelector('.next-tree-node-label, .next-menu-item')) {
+        log('🖱️ 分组下拉未展开，改用指针序列补点', 'warn');
+        try { if (typeof clickTagByPointer === 'function') await clickTagByPointer(pg); } catch (_) {}
+        await sleep3(800);
+    }
 
     const candidates = buildGroupCandidates(product.category);
     log(`📋 分组候选词: ${candidates.join(', ')}`, 'info');
@@ -1236,6 +1284,11 @@ async function fillGroupPage3(product) {
     for (let attempt = 0; attempt < 6 && !foundOption; attempt++) {
         await sleep3(1000);
         foundOption = findGroupOption();
+        if (!foundOption && attempt === 2) {
+            // 三次都没选项：可能下拉被关掉了，重新点一次输入框
+            try { if (typeof clickTagByPointer === 'function') await clickTagByPointer(pg); } catch (_) {}
+            log('🖱️ 分组选项仍未出现，重新点开下拉', 'warn');
+        }
         if (foundOption) {
             foundName = (foundOption.textContent || '').trim();
             log(`🔍 第 ${attempt + 1} 次查到分组选项: "${foundName}"`, 'info');
@@ -1788,14 +1841,22 @@ async function fillColorsPage3(product) {
                 await sleep3(30);
             }
             targetInput = getColorInputs()[i];
-            targetInput?.blur();
+            if (typeof commitFieldByClick === 'function') await commitFieldByClick(targetInput, '颜色文字 ' + color.label);
+            else targetInput?.blur();
             await sleep3(600);
             targetInput = getColorInputs()[i];
             if (targetInput && targetInput.value !== color.label) {
+                // 真机：逐字输入偶尔丢字/被 React 回填覆盖 → 用原生 setter 覆盖一次，
+                // 再真实点一次空白提交，最后回读；仍不一致就明确报错，不假装成功。
                 setInputValue(targetInput, color.label);
-                targetInput.blur();
+                if (typeof commitFieldByClick === 'function') await commitFieldByClick(targetInput, '颜色文字重填 ' + color.label);
+                else targetInput.blur();
                 await sleep3(600);
                 targetInput = getColorInputs()[i];
+                if (targetInput && targetInput.value !== color.label) {
+                    results.push('⚠️ 颜色文字「' + color.label + '」未生效（页面实际：' + String(targetInput.value || '空') + '）');
+                    log('⚠️ 颜色文字未生效: ' + color.label + ' → ' + String(targetInput.value || '空'), 'warn');
+                }
             }
             // 关闭颜色下拉浮层：Next 浮层不响应 blur（只认 Esc / 外部 mousedown），
             // 不关的话浮层一直展开，会挡住并误点下一行的输入框
@@ -2219,7 +2280,7 @@ async function fillSizeTemplate(product) {
             }
             if (confirmBtn) {
                 await realClick(confirmBtn);
-                await sleep3(800);
+                if (typeof waitDialogsGone === 'function') await waitDialogsGone(4000);
                 break;
             }
         }
@@ -2390,7 +2451,9 @@ async function fillLadderPricePage3(product) {
                 qtyInp.dispatchEvent(new Event('change', {bubbles: true}));
                 await sleep3(50);
                 pressEnter(qtyInp);
-                await sleep3(150);
+                // 真机：阶梯价只按 Enter 不点空白 → 值看着有、表格没提交，后面箱规点不动
+                if (typeof commitFieldByClick === 'function') await commitFieldByClick(qtyInp, '阶梯价数量');
+                await sleep3(120);
             }
             if (priceInp) {
                 await realClick(priceInp);
@@ -2406,6 +2469,17 @@ async function fillLadderPricePage3(product) {
                 priceInp.dispatchEvent(new Event('change', {bubbles: true}));
                 await sleep3(50);
                 pressEnter(priceInp);
+                if (typeof commitFieldByClick === 'function') await commitFieldByClick(priceInp, '阶梯价单价');
+                await sleep3(120);
+            }
+            // 回读校验：数字类字段最怕"看似填入实则没有"
+            const qNow = String(qtyInp && qtyInp.value || '').replace(/[^0-9]/g, '');
+            const pNow = String(priceInp && priceInp.value || '').replace(/[^0-9.]/g, '');
+            if (qNow !== String(ladder[i].qty) || pNow !== String(ladder[i].price)) {
+                log(`⚠️ 阶梯价第${i + 1}档未生效（数量 ${qNow || '空'}/${ladder[i].qty}，单价 ${pNow || '空'}/${ladder[i].price}），重填一次`, 'warn');
+                if (qtyInp) { setInputValue(qtyInp, String(ladder[i].qty)); qtyInp.dispatchEvent(new Event('input', {bubbles: true})); }
+                if (priceInp) { setInputValue(priceInp, String(ladder[i].price)); priceInp.dispatchEvent(new Event('input', {bubbles: true})); }
+                if (typeof commitFieldByClick === 'function') await commitFieldByClick(priceInp || qtyInp, '阶梯价重填');
                 await sleep3(150);
             }
         }
@@ -2563,7 +2637,8 @@ async function fillLogisticsPage3(product) {
         await sleep3(50);
         pressEnter(inputEl);
         await sleep3(50);
-        inputEl.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
+        if (typeof commitFieldByClick === 'function') await commitFieldByClick(inputEl, label);
+        else inputEl.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
         await sleep3(30);
         if (inputEl.isConnected === false || Number(inputEl.value) !== Number(value)) {
             results.push('⚠️ ' + label + '未生效');
@@ -2648,20 +2723,62 @@ async function fillLogisticsPage3(product) {
         button.scrollIntoView({ block: 'center' });
         await realClick(button);
         let dialog;
-        for (let i = 0; i < 20 && !dialog; i++) {
+        for (let i = 0; i < 15 && !dialog; i++) {
             await sleep3(200);
             dialog = Array.from(document.querySelectorAll('.product-attr-dialog, .next-dialog, [role="dialog"]')).find(el =>
                 visible(el) && el.querySelector('.tag') && /普货|Ordinary goods/i.test(el.textContent || ''));
         }
+        if (!dialog) {
+            // 真机：这个「添加」按钮用 el.click() 打不开弹窗，必须走完整指针序列。
+            // realClick 偶发也没打开时，用指针序列补一次。
+            log('⚠️ 物流属性弹窗未出现，改用指针序列补点', 'warn');
+            try {
+                const r = button.getBoundingClientRect();
+                const base = { bubbles: true, cancelable: true, clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2), view: window, button: 0, detail: 1 };
+                const ptr = Object.assign({}, base, { buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true });
+                button.dispatchEvent(new PointerEvent('pointerdown', ptr));
+                button.dispatchEvent(new MouseEvent('mousedown', base));
+                button.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, ptr, { buttons: 0 })));
+                button.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
+                button.dispatchEvent(new MouseEvent('click', base));
+            } catch (_) {}
+            for (let i = 0; i < 15 && !dialog; i++) {
+                await sleep3(200);
+                dialog = Array.from(document.querySelectorAll('.product-attr-dialog, .next-dialog, [role="dialog"]')).find(el =>
+                    visible(el) && el.querySelector('.tag') && /普货|Ordinary goods/i.test(el.textContent || ''));
+            }
+        }
         if (!dialog) return ['⚠️ 未找到物流属性弹窗'];
-        const tag = Array.from(dialog.querySelectorAll('.tag')).find(el => visible(el) && /^(普货|Ordinary goods)$/i.test(el.textContent.trim()));
-        if (!tag) return ['⚠️ 未找到普货选项'];
-        tag.click();
-        await sleep3(300);
+        // 弹窗刚出现时还在动画/布局中，立刻点标签会丢（真机：点了 className 不变）
+        await sleep3(700);
+        // 真机：弹窗里「普货」出现两次——第一个是分组标题（点了没反应），最后一个是真选项。
+        // 取最后一个；若点了没选中，再回头试前面的。
+        const candidates = Array.from(dialog.querySelectorAll('.tag')).filter(el => visible(el) && /^(普货|Ordinary goods)$/i.test(el.textContent.trim()));
+        if (!candidates.length) return ['⚠️ 未找到普货选项'];
+        // 真机：先用指针序列（稳定），不中再退回 CDP 真点击；从最后一个候选开始（前一个是分组标题）
+        const isSel = (el) => /selected|active|checked/i.test(String(el.className || '')) || !!el.querySelector('[class*="selected"],[class*="checked"]');
+        let tag = candidates[candidates.length - 1];
+        let tagSelected = false;
+        for (const cand of candidates.slice().reverse()) {
+            tag = cand;
+            try { cand.scrollIntoView({ block: 'center' }); } catch (_) {}
+            await sleep3(120);
+            try { await clickTagByPointer(cand); } catch (_) {}
+            await sleep3(350);
+            tagSelected = isSel(cand);
+            if (!tagSelected) {
+                try { await realClick(cand); } catch (_) {}
+                await sleep3(350);
+                tagSelected = isSel(cand);
+            }
+            if (tagSelected) break;
+        }
+        if (!tagSelected) log('⚠️ 普货标签点击后未见选中态，仍继续尝试确认', 'warn');
         const confirm = Array.from(dialog.querySelectorAll('button')).find(el =>
             visible(el) && !el.disabled && /^(确认|确定|OK)$/i.test((el.innerText || el.textContent || '').trim()));
         if (!confirm) return ['⚠️ 未找到物流属性确认按钮'];
-        confirm.click();
+        await realClick(confirm);
+        await waitDialogsGone(3000, '物流属性');
         for (let i = 0; i < 15; i++) {
             await sleep3(200);
             if (isOrdinary()) return ['✅ 物流属性: 普货'];
@@ -2691,8 +2808,132 @@ function getAssociatedBoxRule() {
     return null;
 }
 
+// 清障：平台弹窗/遮罩没关干净时，后续所有点击和输入都会打在遮罩上（表现为"填不进去"）。
+// 真机线索：箱规 iframe、切模板确认框关闭后仍残留 → FAQ/公司介绍/卖点写入全部无效。
+async function dismissOverlays(reason) {
+    const visible = el => !!(el && el.getClientRects().length);
+    const panels = () => Array.from(document.querySelectorAll('.next-dialog,.next-overlay-inner,[role="dialog"],[role="alertdialog"],.next-overlay-wrapper'))
+        .filter(visible);
+    let cleared = 0;
+    for (let round = 0; round < 3; round++) {
+        const list = panels();
+        if (!list.length) break;
+        for (const box of list) {
+            const btn = Array.from(box.querySelectorAll('.next-btn,button'))
+                .find(b => /^(取消|关闭|稍后|Cancel)$/.test(String(b.innerText || b.textContent || '').trim()) && visible(b));
+            if (btn) { try { await realClick(btn); } catch (_) {} cleared++; continue; }
+            const close = box.querySelector('.next-dialog-close,.next-overlay-close,[class*="close"]');
+            if (close && visible(close)) { try { await realClick(close); } catch (_) {} cleared++; continue; }
+            try { document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', keyCode: 27, bubbles: true})); } catch (_) {}
+            cleared++;
+        }
+        await sleep3(400);
+    }
+    const left = panels().length;
+    if (cleared || left) log(`🧹 清理遮挡(${reason})：处理 ${cleared} 个，剩余 ${left} 个`, left ? 'warn' : 'info');
+    return left === 0;
+}
+
+// 确认后等弹窗真的消失：只 sleep 固定时长就 continue，遮罩还在 → 后续点击全打在遮罩上。
+async function waitDialogsGone(maxMs = 4000, label = '') {
+    const alive = () => Array.from(document.querySelectorAll('.next-dialog,.next-overlay-inner,[role="dialog"],[role="alertdialog"]'))
+        .filter(el => el.getClientRects().length).length;
+    const deadline = Date.now() + maxMs;
+    while (Date.now() < deadline) {
+        if (!alive()) return true;
+        await sleep3(300);
+    }
+    const left = alive();
+    if (left) {
+        log('⚠️ ' + (label || '弹窗') + '确认后仍有 ' + left + ' 个浮层未关闭，按 ESC 清理', 'warn');
+        try { document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', keyCode: 27, bubbles: true})); } catch (_) {}
+        await sleep3(500);
+    }
+    return alive() === 0;
+}
+
+// 箱规的前置条件：物流属性=普货、发货期/重量/尺寸都真的提交了。
+// 真机：这些字段"看起来填了"但没提交时，箱规按钮点了没反应（不是箱规本身的问题）。
+// 平台自己在物流区下方给了标准答案（截图：「最小起订量的发货期已填写 / 重量已填写 /
+// 体积已填写 / 物流属性未填写」，绿勾=已填、灰勾=未填）。有这条提示就以它为准，
+// 比自己猜 DOM 可靠得多；没有提示条时才退回 DOM 推断。
+function readLogisticsTips() {
+    const all = Array.from(document.querySelectorAll('div,li,ul,section'));
+    const box = all.find(el => {
+        const t = String(el.innerText || '').replace(/\s+/g, ' ');
+        return /填写完整物流信息/.test(t) && /(已填写|未填写)/.test(t) && t.length < 200;
+    }) || all.find(el => {
+        const t = String(el.innerText || '').replace(/\s+/g, ' ');
+        return /物流属性(已填写|未填写)/.test(t) && t.length < 200;
+    });
+    if (!box) return null;
+    const items = [];
+    for (const el of box.querySelectorAll('li,span,div')) {
+        const t = String(el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (!t || t.length > 24) continue;
+        if (/已填写|未填写/.test(t)) {
+            const filled = !/未填写/.test(t);
+            const name = t.replace(/^[^一-鿿A-Za-z]*/, '').replace(/(未填写|已填写)/, '').trim();
+            if (name && !items.some(x => x.name === name)) items.push({ name, filled });
+        }
+    }
+    if (!items.length) return null;
+    return { items, allFilled: items.every(x => x.filled), missing: items.filter(x => !x.filled).map(x => x.name) };
+}
+
+async function ensureLogisticsReady(product) {
+    const problems = [];
+    const txt = el => el ? String(el.textContent || '').replace(/\s+/g, ' ').trim() : '';
+
+    const tips = (typeof readLogisticsTips === 'function') ? readLogisticsTips() : null;
+    if (tips && tips.missing.length) problems.push('平台提示未填：' + tips.missing.join('、'));
+
+    const prop = document.querySelector('#logisticsProperty, .component-logisticsProperty');
+    if (!/普货|Ordinary goods/i.test(txt(prop))) problems.push('物流属性未选中普货');
+
+    // 发货期/毛重/尺寸：同一区块内仍为空的输入框
+    const secs = Array.from(document.querySelectorAll('[role="all"]'))
+        .filter(x => /物流信息|Shipping/i.test(txt(x).slice(0, 40)));
+    const sec = secs[0] || prop;
+    if (sec) {
+        const empties = Array.from(sec.querySelectorAll('input:not([type="hidden"])'))
+            .filter(i => i.offsetHeight > 0 && !i.readOnly && !String(i.value || '').trim());
+        if (empties.length) problems.push('物流信息有 ' + empties.length + ' 个输入框为空');
+    }
+    if (!problems.length) {
+        log('✅ 箱规前置检查通过（' + (tips ? '平台提示全部已填' : '普货 + 物流信息无空项') + '）', 'info');
+        return [];
+    }
+
+    log('⚠️ 箱规前置检查未通过：' + problems.join(' / ') + ' → 先补填物流信息', 'warn');
+    try { await fillLogisticsPage3(product); } catch (e) { log('⚠️ 补填物流信息异常: ' + e.message, 'warn'); }
+    await sleep3(500);
+
+    const again = [];
+    const prop2 = document.querySelector('#logisticsProperty, .component-logisticsProperty');
+    if (!/普货|Ordinary goods/i.test(txt(prop2))) again.push('物流属性仍未选中普货');
+    const sec2 = Array.from(document.querySelectorAll('[role="all"]'))
+        .filter(x => /物流信息|Shipping/i.test(txt(x).slice(0, 40)))[0];
+    if (sec2) {
+        const empties2 = Array.from(sec2.querySelectorAll('input:not([type="hidden"])'))
+            .filter(i => i.offsetHeight > 0 && !i.readOnly && !String(i.value || '').trim());
+        if (empties2.length) again.push('仍有 ' + empties2.length + ' 个物流输入框为空');
+    }
+    const tips2 = (typeof readLogisticsTips === 'function') ? readLogisticsTips() : null;
+    if (tips2 && tips2.missing.length) again.push('平台仍提示未填：' + tips2.missing.join('、'));
+
+    if (again.length) log('⚠️ 补填后仍未通过：' + again.join(' / ') + '（箱规可能点不动）', 'warn');
+    else log('✅ 箱规前置检查通过（普货 + 物流信息已提交）', 'success');
+    return again;
+}
+
 async function fillBoxRule(product) {
-    if (getAssociatedBoxRule()) return ['✅ 箱规已关联: 50×40×30 / 25件'];
+    // 箱规点不动，通常不是箱规本身，而是物流属性/发货期没真正提交 → 先补一次
+    const pre = [];
+    if (typeof ensureLogisticsReady === 'function') {
+        try { pre.push(...await ensureLogisticsReady(product)); } catch (_) {}
+    }
+    if (getAssociatedBoxRule()) return [...pre.map(p => '⚠️ 箱规前置：' + p), '✅ 箱规已关联: 50×40×30 / 25件'];
     const findIframe = () => Array.from(document.querySelectorAll('iframe')).find(frame =>
         frame.src.includes('scm.alibaba.com') && frame.src.includes('template_relate_package') &&
         frame.getBoundingClientRect().height > 0);
@@ -2932,7 +3173,7 @@ async function fillLogisticsTemplate(product) {
             }
             if (confirmBtn) {
                 await realClick(confirmBtn);
-                await sleep3(800);
+                if (typeof waitDialogsGone === 'function') await waitDialogsGone(4000);
                 break;
             }
         }
@@ -3148,12 +3389,28 @@ async function fillHighlightsPage3(product, mode) {
         log('ℹ️ 本地解析 highlights: ' + descList.length + ' 条', 'info');
     }
 
+    // 卖点同样只写英文（平台按英文展示），中文条目直接剔除
+    const beforeFilter = descList.length;
+    descList = descList.filter(d => !CJK_RE.test(String(d)));
+    if (descList.length !== beforeFilter) {
+        log('ℹ️ 商品卖点：过滤掉 ' + (beforeFilter - descList.length) + ' 条非英文', 'info');
+    }
+
     if (descList.length === 0) {
-        results.push('⚠️ 商品卖点: 无数据');
+        results.push('⚠️ 商品卖点: 无数据（或全部为非英文）');
         return results;
     }
 
-    const editor = await scrollAndFind(() => document.querySelector('#struct-textDesc .text-area-list-editor[contenteditable="true"]'), 5);
+    // 真机：页面有 9 处含"商品详情/商品介绍"的区块，滚错位置时编辑器根本不渲染 →
+    // 报「未找到编辑器」。先精确滚到带序号的「1. 商品介绍」再找。
+    if (typeof scrollToSection === 'function') await scrollToSection('1. 商品介绍', 3);
+    await sleep3(500);
+    let editor = await scrollAndFind(() => document.querySelector('#struct-textDesc .text-area-list-editor[contenteditable="true"]'), 5);
+    if (!editor) {
+        if (typeof scrollToSection === 'function') await scrollToSection('商品介绍', 3);
+        await sleep3(800);
+        editor = await scrollAndFind(() => document.querySelector('#struct-textDesc .text-area-list-editor[contenteditable="true"]'), 5);
+    }
 
     if (!editor) {
         results.push('⚠️ 商品卖点: 未找到编辑器');
@@ -3161,46 +3418,79 @@ async function fillHighlightsPage3(product, mode) {
     }
 
     // 真机事故（11-01 行101）：直接改 ul.innerHTML 只动 DOM，平台富文本编辑器的
-    // 内部 model 不知道 → 点保存时内容被丢弃，刷新后卖点变回占位符。
-    // 改为「聚焦编辑器 + 全选删除（顺带清占位符）+ 逐条 insertText」，并回读校验。
+    // 内部 model 不知道 → 点保存时内容被丢弃。
+    // 现在全程只用编辑命令（聚焦 → 定位/清空 → insertText），不再直接改 DOM。
     editor.scrollIntoView({block: 'center'});
     await sleep3(150);
     await realClick(editor);
     await sleep3(200);
-    editor.focus();
-    await sleep3(80);
-    document.execCommand('selectAll', false, null);
-    await sleep3(50);
-    document.execCommand('delete', false, null);
-    await sleep3(120);
+    try { editor.focus(); } catch (_) {}
+    await sleep3(100);
 
-    for (const desc of descList) {
-        document.execCommand('insertText', false, String(desc));
-        await sleep3(20);
+    // 焦点断言：selectAll/delete 的作用域跟焦点走，焦点不在编辑器里会删掉整页内容
+    const inEditor = () => {
+        const a = document.activeElement;
+        return a === editor || (a && editor.contains(a));
+    };
+    if (!inEditor()) {
+        results.push('⚠️ 商品卖点: 编辑器未获得焦点，已中止（避免误删页面内容）');
+        log('⚠️ 商品卖点：焦点不在编辑器里，跳过写入', 'warn');
+        return results;
+    }
+
+    const beforeText = String(editor.innerText || '').trim();
+
+    if (mode === 'append') {
+        // 追加模式：把光标放到末尾，不清空
+        try {
+            const sel = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(editor);
+            range.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(range);
+        } catch (_) {}
+        await sleep3(80);
         document.execCommand('insertText', false, String.fromCharCode(10));
+        await sleep3(60);
+    } else {
+        document.execCommand('selectAll', false, null);
+        await sleep3(50);
+        document.execCommand('delete', false, null);
+        await sleep3(120);
+    }
+    if (beforeText) log('ℹ️ 商品卖点：覆盖前编辑器有 ' + beforeText.length + ' 字（前 20 字：' + beforeText.slice(0, 20) + '）', 'info');
+
+    for (let di = 0; di < descList.length; di++) {
+        document.execCommand('insertText', false, String(descList[di]));
         await sleep3(20);
+        // 最后一条不再补换行：否则编辑器会多出一个空 <li>（实测 5 条变 6 条）
+        if (di < descList.length - 1) {
+            document.execCommand('insertText', false, String.fromCharCode(10));
+            await sleep3(20);
+        }
     }
 
     editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: null}));
     editor.dispatchEvent(new Event('input', {bubbles: true}));
     editor.dispatchEvent(new Event('change', {bubbles: true}));
     await sleep3(250);
+
+    // 回读放在 blur 之前：blur 后平台可能把编辑区切成只读视图，读到的就不是刚写的内容
+    const norm = t => String(t || '').replace(/\s+/g, ' ').trim();
+    const written = norm(editor.innerText || editor.textContent || '');
+    const missing = descList.filter(d => !written.includes(norm(d).slice(0, Math.min(12, norm(d).length))));
+
     try { editor.blur(); } catch (_) {}
 
-    const written = String(editor.innerText || editor.textContent || '').replace(/\s+/g, ' ');
-    const missing = descList.filter(d => !written.includes(String(d).slice(0, 12)));
     if (missing.length) {
-        results.push('⚠️ 商品卖点: ' + missing.length + '/' + descList.length + ' 条未写入（编辑器未接受输入）');
+        results.push('⚠️ 商品卖点: ' + missing.length + '/' + descList.length + ' 条未写入（前 2 条：' + missing.slice(0, 2).map(d => norm(d).slice(0, 16)).join(' / ') + '）');
         log('⚠️ 商品卖点写入不完整: ' + missing.length + ' 条', 'warn');
     } else {
-        results.push('✅ 商品卖点: 写入 ' + descList.length + ' 条（已回读校验）');
+        const liCount = editor.querySelectorAll('li').length;
+        results.push('✅ 商品卖点: 写入 ' + descList.length + ' 条（已回读校验' + (liCount && liCount !== descList.length ? '，页面 li ' + liCount + ' 个' : '') + '）');
         log('✅ 商品卖点: 写入 ' + descList.length + ' 条并回读通过', 'success');
     }
-    editor.dispatchEvent(new Event('change', {bubbles: true}));
-    editor.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-    editor.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-    editor.dispatchEvent(new MouseEvent('click', {bubbles: true}));
-
     await sleep3(200);
 
     return results;
@@ -3354,7 +3644,7 @@ async function fillDetailTemplate(product) {
             }
             if (confirmBtn) {
                 await realClick(confirmBtn);
-                await sleep3(800);
+                if (typeof waitDialogsGone === 'function') await waitDialogsGone(4000);
                 break;
             }
         }
@@ -3397,23 +3687,73 @@ function pickCompanyIntroTemplate(product) {
     return 'Polo衫';
 }
 
+// 旧版只认「同一行 Q: … A: …」。遇到全角冒号、Q/A 分两行、或压根没前缀
+// （Excel 里很常见）就解析成 0 条 → 页3 直接报「FAQs: 无数据」不填。
 function parseFaqs(text) {
     if (!text) return [];
-    const faqs = [];
-    const lines = String(text).split('\n').filter(l => l.trim());
+    const lines = String(text).split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!lines.length) return [];
+
+    const Q_RE = /^(?:Q|问)\s*[：:]\s*/i;
+    const A_RE = /^(?:A|答)\s*[：:]\s*/i;
+    const INLINE_RE = /^(?:Q|问)\s*[：:]\s*([\s\S]*?)\s*(?:A|答)\s*[：:]\s*([\s\S]*)$/i;
+
+    // 宿主拼串格式是「Q: EN A: EN 问：CN 答：CN」，答案里会粘着中文段。
+    // 旧版用 cnIdx 截断活下来，改成宽容解析时丢了这一步 → 英文条目被 CJK 过滤整条丢掉。
+    const stripCnTail = (t) => {
+        const m = String(t || '').search(/\[?\s*(?:问|答)\s*[：:]/);
+        return m === -1 ? String(t || '').trim() : String(t).slice(0, m).trim();
+    };
+
+    // ① 行内 Q…A…（半角/全角冒号都认）
+    const inline = [];
     for (const line of lines) {
-        const str = line.trim();
-        if (!str.startsWith('Q:')) continue;
-        const qIdx = str.indexOf('Q:');
-        const aIdx = str.indexOf('A:');
-        if (qIdx === -1 || aIdx === -1) continue;
-        const q = str.substring(qIdx + 2, aIdx).trim();
-        let a = str.substring(aIdx + 2).trim();
-        const cnIdx = a.search(/\[?问[：:]/);
-        if (cnIdx !== -1) a = a.substring(0, cnIdx).trim();
-        if (q && a) faqs.push({ q, a });
+        const m = line.match(INLINE_RE);
+        if (m && m[1].trim() && m[2].trim()) inline.push({ q: m[1].trim(), a: stripCnTail(m[2]) });
     }
-    return faqs;
+    if (inline.length) return inline.filter(f => f.q && f.a);
+
+    // ② 跨行 Q/A：Q 行开启条目，A 行或后继无前缀行归到答案
+    const faqs = [];
+    let cur = null;
+    for (const line of lines) {
+        if (Q_RE.test(line)) {
+            if (cur && cur.q && cur.a) faqs.push(cur);
+            cur = { q: line.replace(Q_RE, '').trim(), a: '' };
+            continue;
+        }
+        if (A_RE.test(line)) {
+            const a = stripCnTail(line.replace(A_RE, ''));
+            if (cur && !cur.a) cur.a = a;
+            else if (cur && cur.a) { faqs.push(cur); cur = { q: '', a }; }
+            continue;
+        }
+        if (cur && !cur.a) cur.a = line;
+    }
+    if (cur && cur.q && cur.a) faqs.push(cur);
+    const clean = faqs.filter(f => f.q && f.a);
+    if (clean.length) return clean;
+
+    // ③ 完全没有前缀：奇数行=问题、偶数行=答案
+    const paired = [];
+    for (let i = 0; i + 1 < lines.length; i += 2) {
+        if (lines[i] && lines[i + 1]) paired.push({ q: lines[i], a: lines[i + 1] });
+    }
+    return paired;
+}
+
+// 平台 FAQ 只收英文；Excel 里常有中英双份，混进来会传中文上去（真机踩过）。
+const CJK_RE = /[一-鿿㐀-䶿]/;
+function pickEnglishFaqs(list) {
+    return (list || []).filter(f => f && f.q && f.a && !CJK_RE.test(f.q) && !CJK_RE.test(f.a));
+}
+
+// 填写与保存前自检必须用同一份"最终要填什么"，否则口径不一致会互相打架
+// （自检按未过滤的解析结果算期望值 → 把"被语言过滤掉"误判成"没填" → 阻断保存）。
+function resolveFaqs(product, max = 8) {
+    const all = parseFaqs((product && product.faq) || '');
+    const en = pickEnglishFaqs(all);
+    return { all, en, use: en.slice(0, max) };
 }
 
 // ============================================================
@@ -3441,18 +3781,27 @@ function parseFaqs(text) {
 async function fillFaqsPage3(product, mode) {
     if (!mode) mode = window.__polo_fill_mode || 'overwrite';
     const results = [];
-    const faqs = parseFaqs(product.faq || '');
-    log('📋 解析到 ' + faqs.length + ' 条FAQ', 'info');
+    const FAQ_MAX = 8;                       // 平台条目上限，超了「添加」按钮无响应（实测第 9 条点不动）
+    const { all: allFaqs, en: enFaqs, use: faqs } = resolveFaqs(product, FAQ_MAX);
+    if (!allFaqs.length) log('📋 FAQ：原文无 Q/A 结构（解析 0 条）', 'warn');
+    else log('📋 解析到 ' + allFaqs.length + ' 条FAQ（英文 ' + enFaqs.length + ' 条，本次填 ' + faqs.length + ' 条' +
+        (enFaqs.length > FAQ_MAX ? '，平台上限 ' + FAQ_MAX + ' 条已截断' : '') + '）', 'info');
     if (faqs.length === 0) {
         results.push('⚠️ FAQs: 无数据');
         return results;
     }
 
+    // 同上：先精确滚到「2. 公司介绍」，否则 FAQ 区不渲染
+    if (typeof scrollToSection === 'function') await scrollToSection('2. 公司介绍', 3);
+    await sleep3(500);
     const container = await scrollAndFind(() => document.querySelector('#struct-companyFaqDesc .company-faq-desc'), 6);
     if (!container) {
-        results.push('⚠️ FAQs: 未找到容器');
+        const alt = document.querySelectorAll('.company-faq-desc').length;
+        results.push('⚠️ FAQs: 未找到容器' + (alt ? `（页面上有 ${alt} 个 .company-faq-desc，但不在 #struct-companyFaqDesc 里）` : '（页面上没有 .company-faq-desc）'));
+        log('⚠️ FAQ 容器定位失败：alt=' + alt + '，页面模式=' + mode, 'warn');
         return results;
     }
+    log('📋 FAQ 容器就绪：现有 ' + container.querySelectorAll('.item').length + ' 条，目标 ' + faqs.length + ' 条，模式 ' + mode, 'info');
 
     container.scrollIntoView({block: 'center'});
     await sleep3(300);
@@ -3463,9 +3812,14 @@ async function fillFaqsPage3(product, mode) {
         startIdx = 0;
         while (existingItems.length > faqs.length) {
             const before = existingItems.length;
-            const remove = existingItems[before - 1].querySelector('.faq-handle .handle-item:last-child');
+            // 真机 DOM：.faq-handle > .handle-item > i.handle-drag + i.iconfont(删除)
+            // 旧选择器 .handle-item:last-child 选到的是整个手柄，点了只拖动不删除 → 永远删不掉。
+            const lastItem = existingItems[before - 1];
+            const remove = lastItem.querySelector('.faq-handle .handle-item i:last-child')
+                || lastItem.querySelector('.faq-handle .iconfont:last-child')
+                || lastItem.querySelector('.faq-handle .handle-item [class*="delete"]');
             if (!remove) { results.push('⚠️ FAQs: 未找到多余条目的删除按钮'); break; }
-            await realClick(remove);
+            try { remove.click(); } catch (_) { await realClick(remove); }
             for (let i = 0; i < 20 && container.querySelectorAll('.item').length >= before; i++) await sleep3(100);
             existingItems = container.querySelectorAll('.item');
             if (existingItems.length >= before) { results.push('⚠️ FAQs: 多余条目删除未生效'); break; }
@@ -3478,17 +3832,43 @@ async function fillFaqsPage3(product, mode) {
 
     while (container.querySelectorAll('.item').length < targetCount) {
         const addBtn = container.querySelector('.add-items');
-        if (!addBtn) break;
+        if (!addBtn) {
+            results.push('⚠️ FAQs: 找不到「添加」按钮，无法补齐到 ' + targetCount + ' 条');
+            log('⚠️ FAQ 缺少添加按钮（现有 ' + container.querySelectorAll('.item').length + ' 条，目标 ' + targetCount + ' 条）', 'warn');
+            break;
+        }
         const beforeCount = container.querySelectorAll('.item').length;
         addBtn.scrollIntoView({block: 'center'});
         await sleep3(50);
+        // 「添加」按钮在不同状态下响应不同：CDP 真实点击 → 原生 click → 悬停后再点，三种都试
         await realClick(addBtn);
-        for (let t = 0; t < 20; t++) {
+        for (let t = 0; t < 8; t++) {
             await sleep3(100);
             if (container.querySelectorAll('.item').length > beforeCount) break;
         }
         if (container.querySelectorAll('.item').length <= beforeCount) {
-            results.push('⚠️ FAQs: 添加条目未生效');
+            log('…「添加」无响应，改用原生 click 重试（第 ' + (beforeCount + 1) + ' 条）', 'warn');
+            try { addBtn.click(); } catch (_) {}
+            for (let t = 0; t < 10; t++) {
+                await sleep3(100);
+                if (container.querySelectorAll('.item').length > beforeCount) break;
+            }
+        }
+        if (container.querySelectorAll('.item').length <= beforeCount) {
+            const ME = (typeof MouseEvent === 'function') ? MouseEvent : (typeof Event === 'function' ? Event : null);
+            if (ME) {
+                addBtn.dispatchEvent(new ME('mouseover', {bubbles: true}));
+                addBtn.dispatchEvent(new ME('mousedown', {bubbles: true}));
+                addBtn.dispatchEvent(new ME('mouseup', {bubbles: true}));
+                addBtn.dispatchEvent(new ME('click', {bubbles: true}));
+            }
+            for (let t = 0; t < 10; t++) {
+                await sleep3(100);
+                if (container.querySelectorAll('.item').length > beforeCount) break;
+            }
+        }
+        if (container.querySelectorAll('.item').length <= beforeCount) {
+            results.push('⚠️ FAQs: 添加条目未生效（第 ' + (beforeCount + 1) + ' 条点击无响应）');
             break;
         }
     }
@@ -3550,7 +3930,12 @@ async function fillFaqsPage3(product, mode) {
         const question = item?.querySelector('.question input')?.value;
         const answer = item?.querySelector('.answers textarea[data-real="true"]')?.value;
         if (question === faqs[i].q && answer === faqs[i].a) filled++;
-        else results.push(`⚠️ FAQ${i + 1}: 问题或答案未完整生效`);
+        else {
+            // 说不清"哪个字段没生效"等于没报：把页面实际值与期望值各截一段
+            const qBad = question !== faqs[i].q ? `问题[页面:${String(question || '').slice(0, 16)}|期望:${faqs[i].q.slice(0, 16)}]` : '';
+            const aBad = answer !== faqs[i].a ? `答案[页面:${String(answer || '').slice(0, 12)}|期望:${faqs[i].a.slice(0, 12)}]` : '';
+            results.push(`⚠️ FAQ${i + 1}: ${qBad}${qBad && aBad ? ' / ' : ''}${aBad}`.trim());
+        }
     }
     if (filled === faqs.length && (mode !== 'overwrite' || actualItems.length === faqs.length)) {
         log('✅ FAQs: 已核对 ' + filled + ' 条', 'success');
@@ -3559,6 +3944,50 @@ async function fillFaqsPage3(product, mode) {
         results.push(`⚠️ FAQs: ${filled}/${faqs.length} 条核对正确，页面共 ${actualItems.length} 条`);
     }
     return results;
+}
+
+// 保存前自检：页3 一保存平台就跳「质量助手」，事后再也查不到页面内容，
+// 所以必须在点保存之前把"填完了"变成页面事实（数量级校验，不做内容比对）。
+async function auditPage3BeforeSave(product) {
+    const problems = [];
+    try {
+    const count = (sel) => document.querySelectorAll(sel).length;
+    const scrollToDetail = async () => {
+        const secs = Array.from(document.querySelectorAll('[role="all"]'));
+        const t = secs.find(x => /商品详情|商品介绍/.test(String(x.innerText || '')));
+        if (t) t.scrollIntoView({ block: 'center' });
+        await sleep3(600);
+    };
+
+    const main = count('.image-upload-list-item');
+    if (main < 6) problems.push(`主图 ${main}/6`);
+
+    await scrollToDetail();
+    const detail = count('.gallery-item-container');
+    if (detail < 3) problems.push(`细节图 ${detail}/3`);
+
+    const ed = document.querySelector('#struct-textDesc .text-area-list-editor[contenteditable="true"]');
+    const hlCount = ed ? ed.querySelectorAll('li').length : 0;
+    const descList = Array.isArray(product?._highlightDescs) ? product._highlightDescs.filter(Boolean) : [];
+    if (descList.length > 0 && hlCount === 0) problems.push('卖点 0 条');
+
+    // 与 fillFaqsPage3 同源（走 resolveFaqs）：否则"被语言过滤"会被当成"没填"
+    // 平台自己的物流提示条：有未填项就记下来（箱规点不动多半源于此）
+    try {
+        const tips = (typeof readLogisticsTips === 'function') ? readLogisticsTips() : null;
+        if (tips && tips.missing.length) problems.push('物流未填：' + tips.missing.join('、'));
+    } catch (_) {}
+
+    const faqWant = (typeof resolveFaqs === 'function') ? resolveFaqs(product, 8).use.length : 0;
+    if (faqWant > 0) {
+        const faqHave = count('.company-faq-desc .item .question input');
+        if (faqHave < Math.min(faqWant, 2)) problems.push(`FAQ ${faqHave}/${faqWant}`);
+    }
+    } catch (e) {
+        // 自检自身出错不能阻断保存：记一条，按"未检出问题"处理
+        if (typeof log === 'function') log('⚠️ 保存前自检异常（已忽略）：' + e.message, 'warn');
+    }
+    return problems;
 }
 
 async function saveDraft(product, opts = {}) {
@@ -3581,6 +4010,8 @@ async function saveDraft(product, opts = {}) {
         const response = await sendMessageRetry({
             action: 'savePublishProduct', row: product.row,
             taskId: product._publishTaskId || getTaskFromUrl(), fileKey: product._publishFileKey,
+            // 商品 ID：保存后页面上才有 itemId，助手页点「已保存」可以一键复制它
+            itemId: (function () { try { return new URLSearchParams(location.search).get('itemId') || ''; } catch (_) { return ''; } })(),
             // 有缺项（FAQ/介绍模板/箱规/属性没填全）时照样保存，但要记成"未确认"，
             // 这样重跑时不会被当成"已保存过"跳过（真机：62/71/74/78 就是这么卡死的）。
             incomplete: opts.incomplete === true,
@@ -3755,7 +4186,7 @@ async function fillCompanyIntroTemplate(product) {
             }
             if (confirmBtn) {
                 await realClick(confirmBtn);
-                await sleep3(800);
+                if (typeof waitDialogsGone === 'function') await waitDialogsGone(4000);
                 break;
             }
         }
@@ -3853,7 +4284,12 @@ async function fillAllPage3(product, step) {
     if (run('fill_batch_qty')) results.push(...await fillBatchQtyPage3(product));
     if (run('fill_logistics_template')) results.push(...await fillLogisticsTemplate(product));
     if (run('fill_logistics')) results.push(...await retryStepOnce('物流信息', () => fillLogisticsPage3(product)));
-    if (run('fill_box_rule')) results.push(...await retryStepOnce('箱规关联', () => fillBoxRule(product)));
+    if (run('fill_box_rule')) {
+        results.push(...await retryStepOnce('箱规关联', () => fillBoxRule(product)));
+        // 箱规是 iframe 弹层：关闭失败会留一层遮罩，后面细节图/卖点/FAQ 全点在遮罩上
+        if (typeof waitDialogsGone === 'function') await waitDialogsGone(3000, '箱规');
+        if (typeof dismissOverlays === 'function') await dismissOverlays('箱规后');
+    }
     if (run('fill_detail_template')) {
         const template=await fillDetailTemplate(product);results.push(...template);
         // 详情模板没选中不能再 return：那会把细节图、公司介绍（FAQ 挂在它末尾）整段吞掉，
@@ -3862,10 +4298,14 @@ async function fillAllPage3(product, step) {
         if(!template.some(r=>r.startsWith('✅ 商品详情模板:')))results.push('⚠️ 商品详情模板未选中，已继续执行细节图/公司介绍（需人工确认）');
     }
     if (run('fill_detail_images')) {
+        if (typeof dismissOverlays === 'function') await dismissOverlays('细节图前');
         const images=await fillDetailImagesPage3(product);results.push(...images);
         if(images.some(r=>r.startsWith('❌')))return results;
     }
-    if (run('fill_company_intro_template')) results.push(...await fillCompanyIntroTemplate(product));
+    if (run('fill_company_intro_template')) {
+        if (typeof dismissOverlays === 'function') await dismissOverlays('公司介绍前');
+        results.push(...await fillCompanyIntroTemplate(product));
+    }
 
     if (!step) results.push(results.some(r => /^[⚠️❌]/u.test(r)) ? '⚠️ 填入结束，仍有未完成项' : '✅ 全部字段处理完毕');
     return results;
@@ -4533,7 +4973,13 @@ async function loadBatchProduct(rowNum) {
                         // 明明保存成功却看着像没保存。
                         const keyMissing = ['箱规', '商品分组', '主图', '细节图'].filter(name =>
                             !results.some(r => String(r == null ? '' : r).trim().startsWith('✅') && String(r).includes(name)));
-                        const incomplete = hasErrors || keyMissing.length > 0;
+                        let auditProblems = [];
+                        try { auditProblems = await auditPage3BeforeSave(currentProduct); } catch (_) { auditProblems = []; }
+                        if (auditProblems.length) {
+                            log('⚠️ 保存前自检未通过：' + auditProblems.join(' / ') + '（本行记为未确认，重跑会重填）', 'warn');
+                            results.push('⚠️ 保存前自检：' + auditProblems.join(' / '));
+                        }
+                        const incomplete = hasErrors || keyMissing.length > 0 || auditProblems.length > 0;
                         if (keyMissing.length) log(`⚠️ 关键项未完成：${keyMissing.join(' / ')}，本行记为未确认（重跑会重填）`, 'warn');
                         const saveResults = await saveDraft(currentProduct, { incomplete });
                         const saveList = saveResults || [];
@@ -4574,6 +5020,19 @@ async function loadBatchProduct(rowNum) {
     return false;
 }
 
+// 保存后平台会刷新页面，刷新后 URL 才带 itemId：这里把它补写进该行的保存记录，
+// 助手页「✓ 已保存」点一下就能复制商品 ID。
+function backfillRowItemId() {
+    try {
+        const params = new URLSearchParams(location.search);
+        const itemId = params.get('itemId') || '';
+        const row = Number(params.get('row') || 0);
+        if (!itemId || !row) return;
+        const taskId = params.get('task') || sessionStorage.getItem('polo_batch_task') || '';
+        chrome.runtime.sendMessage({ action: 'setRowItemId', row, itemId, taskId, fileKey: (window.__poloFileKey || '') }, () => void chrome.runtime.lastError);
+    } catch (_) {}
+}
+
 function initPage3() {
     if (top !== self) return;
     createPage3Panel();
@@ -4590,7 +5049,7 @@ function initPage3() {
 }
 
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initPage3);
+    document.addEventListener('DOMContentLoaded', () => { initPage3(); backfillRowItemId(); });
 } else {
     initPage3();
 }

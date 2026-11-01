@@ -2974,14 +2974,33 @@ function renderProductList() {
                         <div class="product-cat"><span class="tag">${p.category.split("'s ")[1] || p.category}</span></div>
                         <div class="product-footer">
                             <div class="tags-row-media"></div>
-                            ${isUploaded ? '<span class="footer-status">✓ 已保存</span>' : (isLegacy ? '<span class="footer-status is-legacy" title="旧标记，未核实保存，不作为跳过依据">历史待核</span>' : '')}
+                            ${isUploaded ? `<span class="footer-status is-saved-copy" data-row="${p.row}" title="点击复制商品 ID" style="cursor:pointer;">✓ 已保存</span>` : (isLegacy ? '<span class="footer-status is-legacy" title="旧标记，未核实保存，不作为跳过依据">历史待核</span>' : '')}
                         </div>
                     </div>
                 </div>`;
         }).join('');
         productCards.querySelectorAll('.product-card').forEach(card => {
-            card.addEventListener('click', (e) => {
+            card.addEventListener('click', async (e) => {
                 if (e.target.closest('.batch-checkbox')) return;
+                // 「✓ 已保存」→ 复制该行商品 ID（不改样式，只是可点）
+                const savedTag = e.target.closest('.is-saved-copy');
+                if (savedTag) {
+                    e.stopPropagation();
+                    const row = savedTag.dataset.row;
+                    const rec = uploadedRows && uploadedRows[row];
+                    const itemId = rec && rec.itemId;
+                    if (!itemId) {
+                        showToast('⚠️ 第 ' + row + ' 行没有记录商品ID（旧保存记录），重新保存一次就会有');
+                        return;
+                    }
+                    try {
+                        await navigator.clipboard.writeText(String(itemId));
+                        showToast('📋 已复制商品ID：' + itemId);
+                    } catch (err) {
+                        showToast('❌ 复制失败：' + (err && err.message || err));
+                    }
+                    return;
+                }
                 selectProduct(parseInt(card.dataset.idx));
             });
         });

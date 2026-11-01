@@ -544,9 +544,16 @@ async function saveVerifyProbe(waitMs) {
         if (!el || typeof el.getBoundingClientRect !== 'function') return false;
         const r = el.getBoundingClientRect();
         if (!r || r.width <= 0 || r.height <= 0) return false;
-        let st = null;
-        try { st = window.getComputedStyle(el); } catch (_) {}
-        if (st && (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0)) return false;
+        // 常驻弹层常被移到视口外（transform/left:-9999px）或父级 opacity:0，
+        // 只判自身宽高会把它们当成"可见"，进而误判保存成功/失败。
+        if (r.bottom <= 0 || r.top >= window.innerHeight || r.right <= 0 || r.left >= window.innerWidth) return false;
+        let node = el;
+        while (node && node !== document.documentElement) {
+            let st = null;
+            try { st = window.getComputedStyle(node); } catch (_) {}
+            if (st && (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0)) return false;
+            node = node.parentElement;
+        }
         return true;
     };
     const redText = el => {
@@ -613,7 +620,9 @@ async function saveVerifyProbe(waitMs) {
         // 只有「明确报错 / 明确成功 / 已跳转」才提前结束轮询。
         // buttonGone / buttonDisabled 只是"提交已生效"的旁证，不能 break：点保存后按钮往往
         // 0-200ms 就 disabled，一 break 整个 2.5s 窗口就作废了，异步返回的拒绝文案永远采不到。
-        if (out.error || out.success || out.navigated) break;
+        // 只有"明确报错/已跳转"才结束轮询。成功弹窗 200ms 就出现，若因此 break，
+        // 平台 1s 后才飘红的二次校验错误（必填/校验不通过）就永远采不到 → 误记"已保存"。
+        if (out.error || out.navigated) break;
         if (Date.now() >= deadline) break;
         await sleep(200);
     }
@@ -745,6 +754,9 @@ async function savePublishProduct(request, sender, clickButton = true) {
         if (!tabId || !page || page.hostname !== 'post.alibaba.com' || !page.pathname.startsWith('/product/publish')
             || (sender.frameId !== undefined && sender.frameId !== 0)) return { ok: false, error: '仅允许页3保存入口' };
         const row = Number(request.row), x = Number(request.x), y = Number(request.y);
+        // 商品 ID：优先用页面传的，其次从当前标签 URL 取（人工点保存走这条）
+        let pageItemId = '';
+        try { pageItemId = page.searchParams.get('itemId') || ''; } catch (_) {}
         if (!Number.isInteger(row) || row <= 0 || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) return { ok: false, error: '保存产品或按钮位置无效' };
         const t = await loadPublishTask();
         let fileKey;
@@ -810,6 +822,17 @@ async function savePublishProduct(request, sender, clickButton = true) {
         const stored = await new Promise(resolve => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, resolve));
         const all = stored[PUBLISH_VERIFIED_SAVED_KEY] || {};
         const record = { at: Date.now(), source: 'page3_save_click', taskId: request.taskId || null, verified: verdict.verified };
+        // 保存后 URL 里才出现 itemId：请求没带就再读一次页面/标签，补上再记账
+        let finalItemId = String(request.itemId || pageItemId || '');
+        if (!finalItemId) {
+            try {
+                const r = await chrome.scripting.executeScript({
+                    target: { tabId }, func: () => { try { return new URLSearchParams(location.search).get('itemId') || ''; } catch (_) { return ''; } }
+                });
+                finalItemId = String((r && r[0] && r[0].result) || '');
+            } catch (_) {}
+        }
+        if (finalItemId) record.itemId = finalItemId;   // 供面板「已保存」点击复制
         if (unverified) record.unverified = true;
         if (incomplete) record.incomplete = true;
         all[fileKey] = { ...(all[fileKey] || {}), [row]: record };
@@ -1181,6 +1204,9 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
         if (isSkipped) {
             if (!Array.isArray(t.skippedRows)) t.skippedRows = [];
             if (!t.skippedRows.some(r => Number(r) === Number(row))) t.skippedRows.push(row);
+            // 页2 中止（failed）也占用了本批的一个名额，和用户手动跳过保持一致，
+            // 否则 batchFilledDone 不涨 → 「本批填满即暂停」的闸门被静默绕过。
+            if (msg.failed === true) t.batchFilledDone = (t.batchFilledDone || 0) + 1;
         } else {
             t.filledCount += 1;
             if (!Array.isArray(t.filledRows)) t.filledRows = [];
@@ -3503,6 +3529,31 @@ async function handleSharedAction(request, sendResponse, sender) {
         sendResponse({ ok: false, error: 'markUploaded 已废弃：请使用页3保存菜单记账' });
         return true;
     }
+    // 页3 保存后会自动刷新，刷新时 URL 里才有 itemId —— 由页面回调补写进保存记录，
+    // 面板「✓ 已保存」点一下就能复制商品 ID。
+    if (request.action === 'setRowItemId') {
+        const tabUrl = (sender && sender.tab && sender.tab.url) || sender.url || '';
+        if (!/post\.alibaba\.com\/product\/publish/.test(tabUrl)) { sendResponse({ ok: false, error: '仅允许页3上报' }); return true; }
+        const row = Number(request.row);
+        const itemId = String(request.itemId || '');
+        if (!Number.isInteger(row) || row <= 0 || !itemId) { sendResponse({ ok: false, error: '参数无效' }); return true; }
+        (async () => {
+            try {
+                const fileKey = request.fileKey || getFilePrefix();
+                const stored = await new Promise(r => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, r));
+                const all = stored[PUBLISH_VERIFIED_SAVED_KEY] || {};
+                const rec = all[fileKey] && all[fileKey][row];
+                if (!rec) { sendResponse({ ok: false, error: '该行没有保存记录' }); return; }
+                if (rec.itemId === itemId) { sendResponse({ ok: true, unchanged: true }); return; }
+                rec.itemId = itemId;
+                all[fileKey][row] = rec;
+                await new Promise(r => chrome.storage.local.set({ [PUBLISH_VERIFIED_SAVED_KEY]: all }, r));
+                sendResponse({ ok: true });
+            } catch (e) { sendResponse({ ok: false, error: e.message }); }
+        })();
+        return true;
+    }
+
     if (request.action === 'getUploadedRows') {
         const t = await loadPublishTask();
         const hasTaskId = (request.taskId !== undefined && request.taskId !== null && request.taskId !== '');
