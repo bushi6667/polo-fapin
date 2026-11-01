@@ -135,81 +135,40 @@ async function autoFillPage2(product) {
     log('开始自动填写页2...');
     await new Promise(r => setTimeout(r, 500));
 
-    // ---------- 步骤1：产品标题（逐字输入，最多 128 字符） ----------
-    dots[0].style.background = '#667eea';
-    setNextStep('主图');
-    log('填写产品标题...');
-    const title = (product.seo_title_en || product.seo_title || product.title_en || '').split('\n')[0].substring(0, 128);
-
-    if (!title) {
-        dots[0].style.background = '#ff4d4f';
-        log('✗ SEO标题数据为空', 'error');
-    } else {
-        let ti = null;
-        if (window.smartFind && typeof window.smartFind.find === 'function') {
-            ti = window.smartFind.find('page2', 'titleInput');
-        }
-        if (!ti) {
-            const titleSelectors = window.selectors && window.selectors.getList ?
-                window.selectors.getList('page2', 'titleInput') :
-                ['input#productTitle', 'input[name="title"]', '.title-input input'];
-            ti = document.querySelector(titleSelectors.join(','));
-        }
-        if (ti) {
-            await realClick(ti);
-            await new Promise(r => setTimeout(r, 300));
-            document.execCommand('selectAll', false, null);
-            await new Promise(r => setTimeout(r, 50));
-            for (const ch of String(title)) {
-                document.execCommand('insertText', false, ch);
-                await new Promise(r => setTimeout(r, 8));
-            }
-            ti.dispatchEvent(new Event('input', {bubbles: true}));
-            ti.dispatchEvent(new Event('change', {bubbles: true}));
-            dots[0].style.background = '#52c41a';
-            log('✓ 标题填写完成', 'success');
-        } else {
-            dots[0].style.background = '#ff4d4f';
-            log('✗ 未找到标题输入框 #productTitle', 'error');
-        }
-    }
-
-    await new Promise(r => setTimeout(r, 400));
+    // ---------- 步骤1：产品标题 → 已移到页3 ----------
+    // 真机：页2 先填标题会让平台按标题重新预测类目，类目列表整体位移，
+    // 紧接着按坐标/文本选类目就会落空（日志：未匹配到类目）。只传图时不预测、不位移。
+    // 标题由页3 的「商品名称」步骤填写（fillTitlePage3）。
+    log('跳过标题：本流程只传图 + 选类目，标题由页3填写');
 
     // ---------- 步骤2：上传主图（CDP 注入，等待上传完成） ----------
-    dots[1].style.background = '#667eea';
+    dots[0].style.background = '#667eea';
     setNextStep('类目');
     log('上传主图...');
     try {
         await uploadPage2PublicationImages(product);
-        dots[1].style.background = '#52c41a';
+        dots[0].style.background = '#52c41a';
     } catch (e) {
-        dots[1].style.background = '#ff4d4f';
+        dots[0].style.background = '#ff4d4f';
         log('✗ 图片上传失败: ' + e.message, 'error');
         return;
     }
 
-    // ---------- 步骤2.5：等待预测类目渲染 ----------
-    log('⏳ 等待预测类目渲染...', 'warn');
-    const predictOk = await waitForPredictCategoryRender(15000);
-    if (predictOk) {
-        log('✓ 预测类目已渲染', 'success');
-    } else {
-        log('⚠️ 预测类目等待超时，继续下一步', 'warn');
-    }
+    // 不填标题 → 平台不触发预测类目，无需等待（等待逻辑留在 waitForPredictCategoryRender，
+    // 仅当 selectCategory 常用类目全无匹配时才会用到预测 tab 兜底）
 
     await new Promise(r => setTimeout(r, 800));
 
     // ---------- 步骤3：选择类目 ----------
-    dots[2].style.background = '#667eea';
+    dots[1].style.background = '#667eea';
     setNextStep('');
     log('选择类目...');
     const catResult = await selectCategory(product.category);
     if (catResult.ok) {
-        dots[2].style.background = '#52c41a';
+        dots[1].style.background = '#52c41a';
         log('✓ 类目已选择: ' + catResult.name, 'success');
     } else {
-        dots[2].style.background = '#ff4d4f';
+        dots[1].style.background = '#ff4d4f';
         log('✗ 类目选择失败: ' + (catResult.error || '未知错误'), 'error');
     }
 
