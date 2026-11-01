@@ -2202,7 +2202,7 @@ async function fillSizeTemplate(product) {
     for (let i = 0; i < 20; i++) {
         const confirmDialog = document.querySelector('.size-chart-dialog-confirm, .next-dialog-quick, [role="alertdialog"]');
         if (confirmDialog && confirmDialog.offsetHeight > 0) {
-            log('⚠️ 检测到确认弹窗，点击确定...', 'warn');
+            log('⚠️ 检测到确认弹窗：' + (confirmDialog.innerText || confirmDialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) + ' → 点确定', 'warn');
             // 找"确定"按钮（中英文都支持）
             let confirmBtn = null;
             const btns = confirmDialog.querySelectorAll('.next-btn');
@@ -2857,18 +2857,24 @@ async function fillLogisticsTemplate(product) {
         'li[role="option"]',
     ];
 
-    for (let i = 0; i < 10; i++) {
+    // 真机（11-01 行94）：只等 2.8s，网络慢时下拉还是空的 → 判「未找到模板下拉选项」
+    // → 卖点/FAQ 连带不执行 → 该行不保存。改成等 10s，且中途再点一次触发器。
+    const collect = () => {
         for (const sel of optionSelectors) {
             const opts = document.querySelectorAll(sel);
             const visible = Array.from(opts).filter(o => o.offsetHeight > 0);
             if (visible.length > 0) {
-                options = visible;
                 log('🔍 找到 ' + visible.length + ' 个模板选项 (选择器: ' + sel + ')', 'info');
-                break;
+                return visible;
             }
         }
+        return [];
+    };
+    for (let i = 0; i < 40; i++) {
+        options = collect();
         if (options.length > 0) break;
-        await sleep3(200);
+        if (i === 12) { try { await realClick(trigger); } catch (_) {} }   // 约 3s 后补点一次
+        await sleep3(250);
     }
 
     if (options.length === 0) {
@@ -2910,7 +2916,7 @@ async function fillLogisticsTemplate(product) {
     for (let i = 0; i < 20; i++) {
         const dialog = document.querySelector('[role="alertdialog"], .component-dialog-confirm, .next-dialog-quick');
         if (dialog && dialog.offsetHeight > 0) {
-            log('⚠️ 检测到确认弹窗，点击确认...', 'warn');
+            log('⚠️ 检测到确认弹窗：' + (dialog.innerText || dialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) + ' → 点确认', 'warn');
             let confirmBtn = null;
             const btns = dialog.querySelectorAll('.next-btn');
             for (const btn of btns) {
@@ -3154,34 +3160,42 @@ async function fillHighlightsPage3(product, mode) {
         return results;
     }
 
-    let ul = editor.querySelector('ul');
-    if (!ul) {
-        ul = document.createElement('ul');
-        editor.appendChild(ul);
+    // 真机事故（11-01 行101）：直接改 ul.innerHTML 只动 DOM，平台富文本编辑器的
+    // 内部 model 不知道 → 点保存时内容被丢弃，刷新后卖点变回占位符。
+    // 改为「聚焦编辑器 + 全选删除（顺带清占位符）+ 逐条 insertText」，并回读校验。
+    editor.scrollIntoView({block: 'center'});
+    await sleep3(150);
+    await realClick(editor);
+    await sleep3(200);
+    editor.focus();
+    await sleep3(80);
+    document.execCommand('selectAll', false, null);
+    await sleep3(50);
+    document.execCommand('delete', false, null);
+    await sleep3(120);
+
+    for (const desc of descList) {
+        document.execCommand('insertText', false, String(desc));
+        await sleep3(20);
+        document.execCommand('insertText', false, String.fromCharCode(10));
+        await sleep3(20);
     }
 
-    if (mode === 'overwrite') {
-        ul.innerHTML = '';
-        for (const desc of descList) {
-            const li = document.createElement('li');
-            li.textContent = desc;
-            ul.appendChild(li);
-        }
-        log('✅ 商品卖点: 覆盖填入 ' + descList.length + ' 条', 'success');
-        results.push('✅ 商品卖点: 覆盖填入 ' + descList.length + ' 条');
-    } else {
-        const beforeCount = ul.children.length;
-        for (const desc of descList) {
-            const li = document.createElement('li');
-            li.textContent = desc;
-            ul.appendChild(li);
-        }
-        const addedCount = ul.children.length - beforeCount;
-        log('✅ 商品卖点: 追加 ' + addedCount + ' 条（原有 ' + beforeCount + ' 条）', 'success');
-        results.push('✅ 商品卖点: 追加 ' + addedCount + ' 条');
-    }
-
+    editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: null}));
     editor.dispatchEvent(new Event('input', {bubbles: true}));
+    editor.dispatchEvent(new Event('change', {bubbles: true}));
+    await sleep3(250);
+    try { editor.blur(); } catch (_) {}
+
+    const written = String(editor.innerText || editor.textContent || '').replace(/\s+/g, ' ');
+    const missing = descList.filter(d => !written.includes(String(d).slice(0, 12)));
+    if (missing.length) {
+        results.push('⚠️ 商品卖点: ' + missing.length + '/' + descList.length + ' 条未写入（编辑器未接受输入）');
+        log('⚠️ 商品卖点写入不完整: ' + missing.length + ' 条', 'warn');
+    } else {
+        results.push('✅ 商品卖点: 写入 ' + descList.length + ' 条（已回读校验）');
+        log('✅ 商品卖点: 写入 ' + descList.length + ' 条并回读通过', 'success');
+    }
     editor.dispatchEvent(new Event('change', {bubbles: true}));
     editor.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
     editor.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
@@ -3263,18 +3277,24 @@ async function fillDetailTemplate(product) {
         'li[role="option"]',
     ];
 
-    for (let i = 0; i < 10; i++) {
+    // 真机（11-01 行94）：只等 2.8s，网络慢时下拉还是空的 → 判「未找到模板下拉选项」
+    // → 卖点/FAQ 连带不执行 → 该行不保存。改成等 10s，且中途再点一次触发器。
+    const collect = () => {
         for (const sel of optionSelectors) {
             const opts = document.querySelectorAll(sel);
             const visible = Array.from(opts).filter(o => o.offsetHeight > 0);
             if (visible.length > 0) {
-                options = visible;
                 log('🔍 找到 ' + visible.length + ' 个模板选项 (选择器: ' + sel + ')', 'info');
-                break;
+                return visible;
             }
         }
+        return [];
+    };
+    for (let i = 0; i < 40; i++) {
+        options = collect();
         if (options.length > 0) break;
-        await sleep3(200);
+        if (i === 12) { try { await realClick(trigger); } catch (_) {} }   // 约 3s 后补点一次
+        await sleep3(250);
     }
 
     if (options.length === 0) {
@@ -3318,7 +3338,7 @@ async function fillDetailTemplate(product) {
     for (let i = 0; i < 20; i++) {
         const dialog = document.querySelector('[role="alertdialog"], .component-dialog-confirm, .next-dialog-quick');
         if (dialog && dialog.offsetHeight > 0) {
-            log('⚠️ 检测到确认弹窗，点击确认...', 'warn');
+            log('⚠️ 检测到确认弹窗：' + (dialog.innerText || dialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) + ' → 点确认', 'warn');
             let confirmBtn = null;
             const btns = dialog.querySelectorAll('.next-btn');
             for (const btn of btns) {
@@ -3490,13 +3510,10 @@ async function fillFaqsPage3(product, mode) {
         await sleep3(100);
         qInput.focus();
         await sleep3(50);
-        qInput.setSelectionRange(0, qInput.value.length);
-        await sleep3(30);
-        for (const ch of faqs[i].q) {
-            document.execCommand('insertText', false, ch);
-            await sleep3(8);
-        }
-        qInput.dispatchEvent(new Event('input', {bubbles: true}));
+        // 受控组件只认 native setter + InputEvent；execCommand 改的值有时不进入
+        // 平台表单状态（真机：FAQ 写入 6 条，保存刷新后归零）。
+        setInputValue(qInput, faqs[i].q);
+        qInput.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: faqs[i].q}));
         qInput.dispatchEvent(new Event('change', {bubbles: true}));
         confirmInput(qInput);
         pressEnter(qInput);
@@ -3518,13 +3535,8 @@ async function fillFaqsPage3(product, mode) {
         await sleep3(100);
         aTextarea.focus();
         await sleep3(50);
-        aTextarea.setSelectionRange(0, aTextarea.value.length);
-        await sleep3(30);
-        for (const ch of faqs[i].a) {
-            document.execCommand('insertText', false, ch);
-            await sleep3(8);
-        }
-        aTextarea.dispatchEvent(new Event('input', {bubbles: true}));
+        setInputValue(aTextarea, faqs[i].a);
+        aTextarea.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: faqs[i].a}));
         aTextarea.dispatchEvent(new Event('change', {bubbles: true}));
         confirmInput(aTextarea);
         pressEnter(aTextarea);
@@ -3666,18 +3678,24 @@ async function fillCompanyIntroTemplate(product) {
         'li[role="option"]',
     ];
 
-    for (let i = 0; i < 10; i++) {
+    // 真机（11-01 行94）：只等 2.8s，网络慢时下拉还是空的 → 判「未找到模板下拉选项」
+    // → 卖点/FAQ 连带不执行 → 该行不保存。改成等 10s，且中途再点一次触发器。
+    const collect = () => {
         for (const sel of optionSelectors) {
             const opts = document.querySelectorAll(sel);
             const visible = Array.from(opts).filter(o => o.offsetHeight > 0);
             if (visible.length > 0) {
-                options = visible;
                 log('🔍 找到 ' + visible.length + ' 个模板选项 (选择器: ' + sel + ')', 'info');
-                break;
+                return visible;
             }
         }
+        return [];
+    };
+    for (let i = 0; i < 40; i++) {
+        options = collect();
         if (options.length > 0) break;
-        await sleep3(200);
+        if (i === 12) { try { await realClick(trigger); } catch (_) {} }   // 约 3s 后补点一次
+        await sleep3(250);
     }
 
     if (options.length === 0) {
@@ -3721,7 +3739,7 @@ async function fillCompanyIntroTemplate(product) {
     for (let i = 0; i < 20; i++) {
         const dialog = document.querySelector('[role="alertdialog"], .component-dialog-confirm, .next-dialog-quick');
         if (dialog && dialog.offsetHeight > 0) {
-            log('⚠️ 检测到确认弹窗，点击确认...', 'warn');
+            log('⚠️ 检测到确认弹窗：' + (dialog.innerText || dialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) + ' → 点确认', 'warn');
             let confirmBtn = null;
             const btns = dialog.querySelectorAll('.next-btn');
             for (const btn of btns) {

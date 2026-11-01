@@ -88,6 +88,22 @@ function waitForPredictCategoryRender(timeoutMs = 15000) {
 
 // 页2自动填表主流程：标题逐字输入 → 上传主图 → 等待预测类目 → 选择类目；
 // 批量模式（URL 带 row=）最后自动点击「发布产品」跳转页3
+// 页2 失败时给队列一个明确信号：不假装成功，但也不让队列干等 10 分钟。
+async function abortRow(reason, detail) {
+    try {
+        const rowNum = getRowFromUrl();
+        const taskId = (typeof getTaskFromUrl === 'function' ? getTaskFromUrl() : '') || '';
+        log('⛔ 本行中止：' + detail + '（' + reason + '）', 'error');
+        await chrome.runtime.sendMessage({
+            action: 'publishFilled',
+            row: rowNum,
+            taskId,
+            note: reason,
+            failed: true
+        });
+    } catch (e) { log('⚠️ 中止信号发送失败: ' + e.message, 'warn'); }
+}
+
 async function autoFillPage2(product) {
     // 重填前清掉该行的页3 预填标记（键格式与 page3.js 一致：polo_page3_prefilled::task::row，同源同标签页共享 sessionStorage）。
     // 手动「一键填入 ⚡」重做和批量自动填入都走这里，否则页3 会判该行「已填过」而拒绝重填。
@@ -170,6 +186,10 @@ async function autoFillPage2(product) {
     } else {
         dots[1].style.background = '#ff4d4f';
         log('✗ 类目选择失败: ' + (catResult.error || '未知错误'), 'error');
+        // 真机：类目没选中还去点发布 → 平台拦下 → 页面停在原页，日志却打「正在跳转」，
+        // 队列只能干等 10 分钟。这里直接中止并给队列一个明确信号。
+        await abortRow('page2-category-failed', '类目选择失败，已跳过本行');
+        return;
     }
 
     log('=== 页2信息已填写完成 ===', 'success');
@@ -198,13 +218,36 @@ async function autoFillPage2(product) {
             });
         }
         
-        if (publishBtn) {
-            publishBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            await new Promise(r => setTimeout(r, 800));
+        if (!publishBtn) {
+            log('⚠️ 未找到发布按钮，已跳过本行', 'warn');
+            await abortRow('page2-no-publish-btn', '未找到发布按钮');
+            return;
+        }
+        if (publishBtn.disabled || publishBtn.getAttribute('aria-disabled') === 'true') {
+            log('⏳ 发布按钮暂不可用（disabled），等 5 秒重试', 'warn');
+            await new Promise(r => setTimeout(r, 5000));
+        }
+        publishBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+        await new Promise(r => setTimeout(r, 800));
+
+        // 真机：realClick 永远返回 true，点没点到无从得知 → 必须校验页面真的跳走。
+        const href0 = location.href;
+        let jumped = false;
+        for (let attempt = 1; attempt <= 2 && !jumped; attempt++) {
             await realClick(publishBtn);
-            log('✅ 已点击发布按钮，正在跳转页3...', 'success');
+            log('🖱️ 已点击发布按钮（第 ' + attempt + ' 次），等待跳转…', 'info');
+            for (let i = 0; i < 40; i++) {          // 最多 20s
+                await new Promise(r => setTimeout(r, 500));
+                if (location.href !== href0 || /product\/publish/.test(location.href)) { jumped = true; break; }
+                if (!document.querySelector('input#productTitle') && document.querySelector('[class*="publish"]')) { jumped = true; break; }
+            }
+            if (!jumped) log('⚠️ 第 ' + attempt + ' 次点击后未跳转', 'warn');
+        }
+        if (jumped) {
+            log('✅ 已跳转页3', 'success');
         } else {
-            log('⚠️ 未找到发布按钮，请手动点击', 'warn');
+            log('✗ 两次点击都未跳转页3，已跳过本行（请检查页面校验提示）', 'error');
+            await abortRow('page2-jump-failed', '点发布后未跳转');
         }
     } else {
         log('请确认主图上传成功后，点击底部按钮进入下一步', 'success');

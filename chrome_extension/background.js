@@ -590,6 +590,15 @@ async function saveVerifyProbe(waitMs) {
             // 只有"常驻提示"文案、没有任何报错样式 → 诊断信号，不判失败
             if (SOFT_TEXT.test(t)) pushSignal('formWarnText:' + t.slice(0, 40));
         }
+        // 真机：平台保存成功弹的是 next-dialog「保存成功, 3秒后自动刷新」，
+        // 以前只扫 toast/notification → 明明成功却判「未确认」（实测 2 次/批）。
+        for (const el of Array.from(document.querySelectorAll('.next-dialog,.next-overlay-inner,[role="dialog"]'))) {
+            if (!visible(el)) continue;
+            const t = txt(el);
+            if (!t || t.length > 90) continue;
+            if (OK_TOAST.test(t)) { out.success = true; pushSignal('dialogOk:' + t.slice(0, 40)); }
+            else if (ERR_TOAST.test(t)) { out.error = true; pushSignal('dialogErr:' + t.slice(0, 40)); }
+        }
         for (const el of Array.from(document.querySelectorAll('[class*="toast"],[class*="notification"],[class*="Message"],[class*="Notification"],[role="alert"]'))) {
             if (!visible(el)) continue;
             const t = txt(el);
@@ -831,7 +840,7 @@ async function pausePublishTaskLocked(reason, detail) {
     stopPublishTick();
     console.warn(`⏸ 发品任务已暂停 [${reason}] ${detail || ''}（剩 ${t.remaining.length} 款）`);
     if (first) {
-        await appendPublishLog({ level: 'pause', reason, detail, row: t.currentRow, pages: await countTargetTabs() });
+        await appendPublishLog({ level: 'pause', msg: `暂停(${reason})：${detail}`, reason, detail, row: t.currentRow, pages: await countTargetTabs() });
         await broadcastPublishState({ justPaused: true });
     }
 }
@@ -1161,7 +1170,10 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
         // 已保存过的行被页3 跳过重填：单独记账，不冒充"已填"。
         // 旧行为把它算进 filledCount/filledRows，于是一批全跳过时面板显示"已填 100/100 · 待保存 0"，
         // 实际 0 份草稿。skip 只推进队列，填/保存两类计数都不动。
-        const isSkipped = msg.skipped === true;
+        // 页2 中止（类目失败/点了不跳转/没有发布按钮）也走这条消息：按"跳过"记账，
+        // 不算已填，但要推进队列，避免再等 10 分钟超时（真机卡过 3 分钟+）。
+        const isSkipped = msg.skipped === true || msg.failed === true;
+        const skipNote = msg.failed === true ? ('page2-abort:' + String(msg.note || '')) : '';
 
         // 记录填写完成。暂停中也接受：当前页的有效完成必须入账，只是不自动开新页。
         const wasPaused = t.state === 'paused';
@@ -1182,7 +1194,7 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
         t.currentRowFailure = '';  // 行已成功填写，失效状态清除
         t.resourceBlockDetail = '';
         await savePublishTask(t);
-        await appendPublishLog({ level: isSkipped ? 'skipped' : 'filled', row, skipped: isSkipped, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilledDone, paused: wasPaused });
+        await appendPublishLog({ level: isSkipped ? 'skipped' : 'filled', row, msg: skipNote || (isSkipped ? 'skipped' : 'filled'), skipped: isSkipped, filled: t.filledCount, remain: t.remaining.length, batchFilled: t.batchFilledDone, paused: wasPaused });
 
         if (t.remaining.length === 0) {
             t.state = 'done';
@@ -1195,6 +1207,16 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
             await broadcastPublishState();
             return { ok: true, done: true, skipped: isSkipped };
         }
+
+        // 回收本行标签：真机 24 个 publish 页常驻，越跑越慢。
+        // 延迟 8s 是为了让平台「保存成功→3 秒自动刷新」走完，不复现「连接断开」。
+        try {
+            const finishedTabId = senderTabId;
+            if (finishedTabId) {
+                setTimeout(() => { chrome.tabs.remove(finishedTabId).catch(() => {}); }, 8000);
+                appendPublishLog({ level: 'recycle', row, msg: `本行完成，8s 后关闭标签 ${finishedTabId}` });
+            }
+        } catch (_) {}
 
         notifyAssistant('publishFilledAck', { row, skipped: isSkipped, filled: t.filledCount, total: t.total, remaining: t.remaining.length });
         await broadcastPublishState();
