@@ -407,24 +407,51 @@ async function selectCategory(category) {
             window.selectors.getList('page2', 'categoryItem') :
             ['ul.category-list li', 'li.next-tree-node', 'li'];
 
-        for (const kw of keywords) {
-            const catLi = Array.from(document.querySelectorAll(categoryItemSelectors.join(','))).find(el => {
-                const text = el.textContent.trim();
-                return text === kw || (text.includes(kw) && text.length < 30);
-            });
-            
-            if (!catLi && window.smartFind) {
-                const foundByText = window.smartFind.findByText(kw, document, { tagName: 'li' });
-                if (foundByText && foundByText.textContent.trim().length < 30) {
-                    catLi = foundByText;
+        // 真机事故（2026-11-01 行12）：切 tab 后只等 1.5s 就匹配一次，类目树还没渲染 →
+        // 直接判「未匹配到类目」。页面其实有「男女士衣及衬衫」，等一会儿就能匹配上。
+        const matchOnce = () => {
+            for (const kw of keywords) {
+                const catLi = Array.from(document.querySelectorAll(categoryItemSelectors.join(','))).find(el => {
+                    const text = el.textContent.trim();
+                    return text === kw || (text.includes(kw) && text.length < 30);
+                });
+                if (catLi) return catLi;
+                if (window.smartFind) {
+                    const found = window.smartFind.findByText(kw, document, { tagName: 'li' });
+                    if (found && found.textContent.trim().length < 30) return found;
                 }
             }
-            
-            if (catLi) {
-                catLi.scrollIntoView({ block: 'center', behavior: 'instant' });
-                await new Promise(r => setTimeout(r, 300));
-                await realClick(catLi);
-                return { ok: true, name: catLi.textContent.trim() };
+            return null;
+        };
+
+        const clickItem = async (catLi) => {
+            catLi.scrollIntoView({ block: 'center', behavior: 'instant' });
+            await new Promise(r => setTimeout(r, 300));
+            await realClick(catLi);
+            return { ok: true, name: catLi.textContent.trim() };
+        };
+
+        for (let i = 0; i < 16; i++) {          // 最多等 8s（500ms × 16）
+            const hit = matchOnce();
+            if (hit) return await clickItem(hit);
+            if (i === 8) log('⏳ 类目列表仍未出现匹配项，继续等待…', 'warn');
+            await new Promise(r => setTimeout(r, 500));
+        }
+
+        // 兜底：常用类目里确实没有 → 切「预测类目」tab 再找一轮
+        const predictTab = Array.from(document.querySelectorAll(tabSelectors.join(','))).find(tab => {
+            const inner = tab.querySelector(tabInnerSelectors.join(','));
+            const text = (inner ? inner.textContent : tab.textContent) || '';
+            return text.includes('预测类目') || text.includes('预测') || text.includes('推荐');
+        });
+        if (predictTab) {
+            log('↪️ 常用类目无匹配，改试「预测类目」', 'warn');
+            await realClick(predictTab);
+            await new Promise(r => setTimeout(r, 1500));
+            for (let i = 0; i < 8; i++) {
+                const hit = matchOnce();
+                if (hit) return await clickItem(hit);
+                await new Promise(r => setTimeout(r, 500));
             }
         }
 

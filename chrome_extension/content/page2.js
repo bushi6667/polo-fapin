@@ -63,18 +63,17 @@ function waitForPredictCategoryRender(timeoutMs = 15000) {
                 }
             }
             
+            // 类目 tab 出现即说明类目区已渲染；以前还要求命中 categoryList 选择器，
+            // 选择器与当前 DOM 不符时每行白等 15s（真机：100% 超时）。列表项由 selectCategory 内部轮询等待。
+            if (hasPredict || hasFav) {
+                resolve(true);
+                return;
+            }
+
             const catList = document.querySelector(catListSelectors.join(','));
             if (catList && (hasPredict || hasFav)) {
                 resolve(true);
                 return;
-            }
-            
-            if (window.smartFind) {
-                const foundCatList = window.smartFind.find('page2', 'categoryList');
-                if (foundCatList && (hasPredict || hasFav)) {
-                    resolve(true);
-                    return;
-                }
             }
             
             if (Date.now() - startTime > timeoutMs) {
