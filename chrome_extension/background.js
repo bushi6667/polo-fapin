@@ -4034,18 +4034,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const prepared=await PublicationImages.prepare(request.product,request.kind,readPublicationGenerated,async path=>{
                 const response=await fetch(chrome.runtime.getURL(path));if(!response.ok)throw Error('类目公共图读取失败：'+path);return response.blob();
             });
-            const frames=await chrome.webNavigation.getAllFrames({tabId});let chosen=null,enable=null;
-            for(const frame of frames||[{frameId:0}]){
-                if(frame.frameId!==0){try{if(!/(^|\.)alibaba\.com$/.test(new URL(frame.url).hostname))continue;}catch(_){continue;}}
-                try{
-                    await chrome.scripting.executeScript({target:{tabId,frameIds:[frame.frameId]},files:['upload/publication-dom.js']});
-                    const result=await chrome.scripting.executeScript({target:{tabId,frameIds:[frame.frameId]},func:kind=>globalThis.PublicationDom.probe(kind),args:[request.kind]});
-                    if(result[0]?.result?.found){chosen=frame.frameId;break;}
-                    if(result[0]?.result?.canEnable)enable=frame.frameId;
-                }catch(e){if(frame.frameId===0)throw e;}
+            // 页面刚打开/网速慢时上传区还没渲染，一次探测就报「未找到主图上传区域」＝整行失败。
+            // 改成轮询等待（最多 30s），期间每 5s 打一条进度，超时才报错。
+            const deadline=Date.now()+30000;let chosen=null,enable=null,round=0;
+            while(Date.now()<deadline){
+                const frames=await chrome.webNavigation.getAllFrames({tabId});chosen=null;enable=null;
+                for(const frame of frames||[{frameId:0}]){
+                    if(frame.frameId!==0){try{if(!/(^|\.)alibaba\.com$/.test(new URL(frame.url).hostname))continue;}catch(_){continue;}}
+                    try{
+                        await chrome.scripting.executeScript({target:{tabId,frameIds:[frame.frameId]},files:['upload/publication-dom.js']});
+                        const result=await chrome.scripting.executeScript({target:{tabId,frameIds:[frame.frameId]},func:kind=>globalThis.PublicationDom.probe(kind),args:[request.kind]});
+                        if(result[0]?.result?.found){chosen=frame.frameId;break;}
+                        if(result[0]?.result?.canEnable)enable=frame.frameId;
+                    }catch(e){if(frame.frameId===0&&round===0)throw e;}
+                }
+                if(chosen!==null||enable!==null)break;
+                round++;
+                if(round%10===0)console.log('⏳ 等待上传区渲染 '+(round*0.5)+'s…');
+                await new Promise(r=>setTimeout(r,500));
             }
             if(chosen===null)chosen=enable;
-            if(chosen===null)throw Error('未找到'+(request.kind==='main'?'主图':'细节图')+'上传区域，请先选择对应模板');
+            if(chosen===null)throw Error('等待 30s 仍未找到'+(request.kind==='main'?'主图':'细节图')+'上传区域');
             const executed=await chrome.scripting.executeScript({target:{tabId,frameIds:[chosen]},func:async(kind,files)=>{
                 try{return await globalThis.PublicationDom.perform(kind,files);}catch(e){return {ok:false,error:e.message};}
             },args:[request.kind,prepared.files]});
