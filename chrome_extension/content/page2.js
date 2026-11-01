@@ -127,10 +127,10 @@ async function autoFillPage2(product) {
     };
 
     // 步骤指示条重置（灰）
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 2; i++) {
         if (dots[i]) dots[i].style.background = '#e5e6eb';
     }
-    setNextStep('标题');
+    setNextStep('主图');
 
     log('开始自动填写页2...');
     await new Promise(r => setTimeout(r, 500));
@@ -235,13 +235,12 @@ function createPage2Panel() {
                 <div style="font-weight:500;color:#333;font-size:12px;">点击下方绿色按钮加载</div>
             </div>
             <div style="margin-bottom:4px;" id="polo-next-step"></div>
+            <!-- 页2 现在只做「传主图 → 选类目」，标题交给页3，步骤条同步为两段 -->
             <div style="display:flex;gap:4px;margin-bottom:4px;">
-                <div class="step-dot" style="flex:1;height:6px;border-radius:3px;background:#e5e6eb;"></div>
                 <div class="step-dot" style="flex:1;height:6px;border-radius:3px;background:#e5e6eb;"></div>
                 <div class="step-dot" style="flex:1;height:6px;border-radius:3px;background:#e5e6eb;"></div>
             </div>
             <div style="display:flex;gap:4px;font-size:10px;color:#999;text-align:center;margin-bottom:12px;">
-                <div style="flex:1;">标题</div>
                 <div style="flex:1;">主图</div>
                 <div style="flex:1;">类目</div>
             </div>
@@ -304,11 +303,11 @@ function createPage2Panel() {
             if (request.result?.ok) {
                 log('✓ 主图上传成功！', 'success');
                 const dots = document.querySelectorAll('.step-dot');
-                if (dots[1]) dots[1].style.background = '#52c41a';
+                if (dots[0]) dots[0].style.background = '#52c41a';
             } else {
                 log('✗ 主图上传失败: ' + (request.result?.error || '未知错误'), 'error');
                 const dots = document.querySelectorAll('.step-dot');
-                if (dots[1]) dots[1].style.background = '#ff4d4f';
+                if (dots[0]) dots[0].style.background = '#ff4d4f';
             }
         }
         if (request.action === 'log' && request.msg) {
