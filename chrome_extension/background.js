@@ -1208,16 +1208,6 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
             return { ok: true, done: true, skipped: isSkipped };
         }
 
-        // 回收本行标签：真机 24 个 publish 页常驻，越跑越慢。
-        // 延迟 8s 是为了让平台「保存成功→3 秒自动刷新」走完，不复现「连接断开」。
-        try {
-            const finishedTabId = senderTabId;
-            if (finishedTabId) {
-                setTimeout(() => { chrome.tabs.remove(finishedTabId).catch(() => {}); }, 8000);
-                appendPublishLog({ level: 'recycle', row, msg: `本行完成，8s 后关闭标签 ${finishedTabId}` });
-            }
-        } catch (_) {}
-
         notifyAssistant('publishFilledAck', { row, skipped: isSkipped, filled: t.filledCount, total: t.total, remaining: t.remaining.length });
         await broadcastPublishState();
         // 只在运行中自动开下一款；暂停状态保持暂停（等用户主动继续）
