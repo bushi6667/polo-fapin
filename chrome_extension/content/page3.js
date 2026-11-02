@@ -1145,10 +1145,12 @@ async function scrollToSection(sectionText, maxAttempts = 6) {
 //   4. 上传后等待2-3秒检测结果
 //   5. 监听 uploadResult 消息等待最终结果，菜单项可正确判断成功/失败
 // ============================================================
-function requestPublicationUpload(product, kind) {
+function requestPublicationUpload(product, kind, options = {}) {
     return new Promise((resolve,reject)=>{
         const timer=setTimeout(()=>reject(Error('图片上传超时，请检查页面上传状态')),240000);
-        chrome.runtime.sendMessage({action:'uploadPublicationImages',kind,product:{row:product.row,category:product.category,_categoryType:product._categoryType,_publishFileKey:product._publishFileKey}},response=>{
+        const request={action:'uploadPublicationImages',kind,product:{row:product.row,category:product.category,_categoryType:product._categoryType,_publishFileKey:product._publishFileKey}};
+        if(options.appendOnly===true)request.action='appendPublicationImages';
+        chrome.runtime.sendMessage(request,response=>{
             clearTimeout(timer);const error=chrome.runtime.lastError;
             if(error||!response?.ok)reject(Error(error?.message||response?.error||'后台没有确认上传成功'));
             else resolve(response);
@@ -1699,7 +1701,7 @@ async function finalAttributeAudit(requiredFields, optionalFields, product) {
     return { filled: filledFields, empty: stillEmpty };
 }
 
-async function uploadColorImageViaBlob(colorKey, colorLabel, itemIndex, imageUrl) {
+async function uploadColorImageViaBlob(colorKey, colorLabel, itemIndex, imageUrl, options = {}) {
     try {
         log(`📥 下载 ${colorLabel} 图片...`);
         const resp = await fetch(imageUrl, {
@@ -1716,11 +1718,17 @@ async function uploadColorImageViaBlob(colorKey, colorLabel, itemIndex, imageUrl
         log(`✅ 下载完成: ${Math.round(blob.size / 1024)}KB`, 'success');
 
         const items = document.querySelectorAll('.posting-field-color .item, .item[role="item"], .posting-field-color-select .item');
-        const item = items[itemIndex];
+        const item = options.expectedInput?.closest('.item,[role="item"]') || items[itemIndex];
         if (!item) throw new Error('找不到颜色项');
+        if(options.missingOnly===true) {
+            if(options.isCurrent&&!options.isCurrent())throw Error('商品已切换，停止颜色图上传');
+            const input=item.querySelector('.posting-field-color-select input[role="colorCombobox"],input[role="colorCombobox"]');
+            if(!input||input.isConnected===false||String(input.value).trim()!==colorLabel||input!==options.expectedInput)throw Error('颜色目标已变化，停止上传');
+            if([...item.querySelectorAll('.value-preview.uploaded img')].some(e=>e.getAttribute('src')))return {ok:true,skipped:true};
+        }
 
         let fileInput = item.querySelector('input[type="file"]');
-        if (!fileInput) {
+        if (!fileInput && options.missingOnly!==true) {
             fileInput = document.querySelectorAll('.posting-field-color input[type="file"], .item input[type="file"]')[itemIndex];
         }
         if (!fileInput) throw new Error('找不到 file input');
@@ -1841,16 +1849,17 @@ async function fillColorsPage3(product) {
                 await sleep3(30);
             }
             targetInput = getColorInputs()[i];
-            if (typeof commitFieldByClick === 'function') await commitFieldByClick(targetInput, '颜色文字 ' + color.label);
-            else targetInput?.blur();
+            // 注意：这里不能用真实点击提交！真机实证（21:39 批量）：realClick 会被平台
+            // 当成"点击颜色区外部"→ 正在输入的文字被清空 → 图片上传成功但文字全空。
+            // 颜色下拉只认 blur + Esc/外部 mousedown（下方专门处理），保持原方案。
+            targetInput?.blur();
             await sleep3(600);
             targetInput = getColorInputs()[i];
             if (targetInput && targetInput.value !== color.label) {
                 // 真机：逐字输入偶尔丢字/被 React 回填覆盖 → 用原生 setter 覆盖一次，
-                // 再真实点一次空白提交，最后回读；仍不一致就明确报错，不假装成功。
+                // 失焦提交后再次回读；仍不一致就明确报错，不假装成功。
                 setInputValue(targetInput, color.label);
-                if (typeof commitFieldByClick === 'function') await commitFieldByClick(targetInput, '颜色文字重填 ' + color.label);
-                else targetInput.blur();
+                targetInput.blur();
                 await sleep3(600);
                 targetInput = getColorInputs()[i];
                 if (targetInput && targetInput.value !== color.label) {
@@ -4690,6 +4699,13 @@ function createPage3Panel() {
     };
 
     const menu = document.getElementById('polo-action-menu');
+    window.PoloPage3Review?.mount(() => currentProduct, async (product, action) => {
+        await ensureTabActive();
+        const fn = actionMap[action];
+        if (!fn) throw new Error('不支持的修复步骤：' + action);
+        const results = await fn(product, 'overwrite');
+        for (const r of results || []) log(r, /^[⚠️❌]/u.test(r) ? 'warn' : 'info');
+    });
     // 动作有 20 多项，单列会拉成一条长条 → 两列网格
     menu.style.display = 'none';
     menu.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';

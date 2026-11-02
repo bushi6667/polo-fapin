@@ -84,7 +84,21 @@
         for(let i=0;i<40&&items(area).length;i++)await sleep(100);
         if(items(area).length)throw Error('旧图片未清空，已停止上传');
     }
-    async function perform(kind,files){
+    function appendPlan(files,existingNames){
+        const stem=name=>String(name||'').trim().replace(/\.(png|jpe?g|webp)$/i,'').toLowerCase();
+        const expected=new Map(files.map(file=>[stem(file.name),file]));
+        if(expected.size!==files.length)throw Error('源图片名称重复，停止补图');
+        const seen=new Set();
+        for(const name of existingNames){
+            const key=stem(name);
+            if(!expected.has(key)||seen.has(key))throw Error('无法可靠识别已有图片，保留现场，停止补图');
+            seen.add(key);
+        }
+        return files.filter(file=>!seen.has(stem(file.name)));
+    }
+    async function perform(kind,files,options={}){
+        const assertPage=()=>{if(options.appendOnly===true&&options.expectedPageUrl&&location.href!==options.expectedPageUrl)throw Error('补图期间页面已切换，停止上传');};
+        assertPage();
         const expected=kind==='main'?6:3;
         if(!Array.isArray(files)||files.length!==expected)throw Error('上传图片数量不正确，未操作页面');
         // 先验证全部文件，成功后才清空原图。
@@ -106,7 +120,19 @@
         if(!area)throw Error(kind==='detail'?'未找到细节图区域，请先选择详情模板':'未找到主图上传区域');
         area.scrollIntoView({block:'center'});
         area.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));
-        await clear(area);
+        let uploadFiles=prepared,preserved=0,preservedSources=[];
+        if(options.appendOnly===true){
+            const current=items(area);
+            const names=current.map(item=>{
+                const candidates=[item.innerText,...[...item.querySelectorAll('[title],img[alt]')].map(e=>e.getAttribute('title')||e.getAttribute('alt'))];
+                return candidates.flatMap(text=>String(text||'').match(/[\w-]+\.(?:png|jpe?g|webp)\b/ig)||[])[0]||'';
+            });
+            uploadFiles=appendPlan(prepared,names);
+            preserved=current.length;
+            if(!uploadFiles.length)return {ok:true,count:preserved,expectedCount:expected,appended:0};
+            preservedSources=current.map(item=>item.querySelector('img')?.src||backgroundSource(item));
+            if(preservedSources.some(source=>!source))throw Error('已有图片身份尚未加载，保留现场，停止补图');
+        }else await clear(area);
         let input;
         for(let i=0;i<20;i++){
             area=root(kind)||area;
@@ -122,10 +148,15 @@
         }
         if(!input)throw Error('未找到目标区域的多图上传输入框，未上传到其他区域');
         // 详情组件会按文件名重排批量输入，逐张等待完成以保持 333→666→222。
-        const batches=kind==='detail'?prepared.map(file=>[file]):[prepared];
-        let uploaded=0;
+        const batches=kind==='detail'?uploadFiles.map(file=>[file]):[uploadFiles];
+        let uploaded=preserved;
         for(const batch of batches){
+            assertPage();
             area=root(kind)||area;
+            if(options.appendOnly===true){
+                const current=items(area),sources=new Set(current.map(item=>item.querySelector('img')?.src||backgroundSource(item)));
+                if(current.length!==uploaded||preservedSources.some(source=>!sources.has(source)))throw Error('已有图片在补图期间发生变化，停止追加');
+            }
             input=area.querySelector('input[type="file"][multiple]')||input;
             const transfer=new DataTransfer();batch.forEach(file=>transfer.items.add(file));input.files=transfer.files;
             globalThis.PublicationUploadAudit.uploadStartedAt=Date.now();
@@ -145,7 +176,7 @@
             if(!done)throw Error('上传未通过数量和加载校验：期望 '+uploaded+' 张，实际 '+items(area).length+' 张');
         }
         progress('completed',compressed);
-        return {ok:true,count:items(area).length,expectedCount:expected};
+        return {ok:true,count:items(area).length,expectedCount:expected,appended:uploadFiles.length};
     }
-    globalThis.PublicationDom={probe,perform,compressForUpload};
+    globalThis.PublicationDom={probe,perform,compressForUpload,appendPlan};
 })();

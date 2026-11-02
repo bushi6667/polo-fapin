@@ -1,0 +1,27 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict'),path=require('path');
+const ctx={};vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../chrome_extension/upload/publication-dom.js'),'utf8'),ctx);
+const {appendPlan}=ctx.PublicationDom;
+const files=['444','111','bank_1','bank_2','bank_3','bank_4'].map(key=>({name:key+'.jpg'}));
+const before=JSON.stringify(files);
+assert.deepEqual(Array.from(appendPlan(files,files.slice(0,5).map(f=>f.name)),f=>f.name),['bank_4.jpg']);
+assert.equal(JSON.stringify(files),before,'不能修改源清单或已有图片');
+assert.equal(appendPlan(files,files.map(f=>f.name)).length,0);
+assert.equal(appendPlan(files,[]).length,6);
+assert.deepEqual(Array.from(appendPlan(files,['444.png','111.jpeg','bank_1.webp','bank_2.jpg','bank_3.jpg']),f=>f.name),['bank_4.jpg']);
+assert.throws(()=>appendPlan(files,['unknown.jpg']),/无法可靠识别/);
+assert.throws(()=>appendPlan(files,['444.jpg','444.png']),/无法可靠识别/);
+assert.throws(()=>appendPlan([{name:'444.jpg'},{name:'444.png'}],[]),/源图片名称重复/);
+console.log('PASS append plan: only missing files, no replacement, known aliases, reject unknown/duplicate identities');
+const calls=[],bridge={setTimeout,clearTimeout,chrome:{runtime:{sendMessage:(msg,cb)=>{calls.push(msg);cb({ok:true});}}}};
+vm.createContext(bridge);
+const page=fs.readFileSync(path.join(__dirname,'../chrome_extension/content/page3.js'),'utf8');
+const start=page.indexOf('function requestPublicationUpload('),end=page.indexOf('async function fillImagesPage3',start);
+vm.runInContext(page.slice(start,end),bridge);
+(async()=>{
+ await bridge.requestPublicationUpload({row:2,category:'shirt',_publishFileKey:'test'},'main',{appendOnly:true});
+ assert.equal(calls[0].action,'appendPublicationImages','旧后台必须拒绝未知补图动作，不能降级到整组替换');
+ await bridge.requestPublicationUpload({row:2},'main');
+ assert.equal(calls[1].action,'uploadPublicationImages');
+ console.log('PASS append bridge uses distinct action; legacy upload remains explicit');
+})().catch(e=>{console.error(e);process.exitCode=1;});

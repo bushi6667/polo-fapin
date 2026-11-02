@@ -1664,7 +1664,7 @@ function getColorImagePathData(rowNum, color, callback, context) {
     // 图片以磁盘为准：先按页面句柄读 <文件名>/rowN/rowN_<color>.png，读到就直接用 dataUrl 上传。
     // 读不到（未授权/文件不存在）才回落到旧记录逻辑，兼容历史数据。
     fetchColorImageAsBase64(rowNum, color, undefined, context.fileFolder).then(r => {
-        if (r && r.ok && r.dataUrl) { callback({ ok: true, url: r.dataUrl, dataUrl: r.dataUrl, fromDisk: true, path: null }); return; }
+        if (r && r.ok && r.dataUrl) { callback({ ok: true, url: r.dataUrl, dataUrl: r.dataUrl, fromDisk: true, path: null, fileKey:context.fileKey,rowNum,color }); return; }
         getColorImagePathDataLegacy(rowNum, color, callback, context);
     }).catch(() => getColorImagePathDataLegacy(rowNum, color, callback, context));
 }
@@ -3624,12 +3624,14 @@ async function handleSharedAction(request, sendResponse, sender) {
         return true;
     }
     if (request.action === 'getColorImagePath') {
+        if(request.fileKey&&!request.taskId&&request.fileKey!==getFilePrefix()){sendResponse({ok:false,error:'颜色补图的文件身份不匹配'});return true;}
         if (request.taskId) {
             const task = await loadPublishTask();
             if (!task || task.taskId !== request.taskId || (task.products ? !Object.prototype.hasOwnProperty.call(task.products, String(request.rowNum)) : ![...task.remaining, ...(task.filledRows || [])].includes(request.rowNum))) {
                 sendResponse({ ok: false, error: '发品图片任务身份不匹配' }); return true;
             }
             if (task.colorImgDir === undefined && task.fileKey !== getFilePrefix()) { sendResponse({ ok: false, error: '旧任务缺少图片目录绑定，请切回原 Excel' }); return true; }
+            if(request.fileKey&&request.fileKey!==task.fileKey){sendResponse({ok:false,error:'颜色补图的任务文件身份不匹配'});return true;}
             getColorImagePathData(request.rowNum, request.color, sendResponse, {
                 taskId: task.taskId, fileKey: task.fileKey, fileFolder: task.fileFolder === undefined ? (CURRENT_FILENAME || DEFAULT_FILE_FOLDER) : task.fileFolder,
                 colorImgDir: task.colorImgDir === undefined ? COLOR_IMG_DIR : task.colorImgDir
@@ -4082,7 +4084,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if(sender.tab?.id&&publicationUploadLocks.has(sender.tab.id))notifyAssistant('publishImageProgress',{phase:request.phase,done:request.done,total:request.total,fileKey:getFilePrefix(),rowNum:request.rowNum});
         sendResponse({ok:true});return true;
     }
-    if(request.action==='uploadPublicationImages'){
+    if(request.action==='uploadPublicationImages'||request.action==='appendPublicationImages'){
         const tabId=sender.tab?.id;
         if(!tabId){sendResponse({ok:false,error:'缺少上传目标页面'});return false;}
         let uploadPage;try{uploadPage=new URL(sender.tab?.url||sender.url||'');}catch(_){}
@@ -4118,9 +4120,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             }
             if(chosen===null)chosen=enable;
             if(chosen===null)throw Error('等待 30s 仍未找到'+(request.kind==='main'?'主图':'细节图')+'上传区域');
-            const executed=await chrome.scripting.executeScript({target:{tabId,frameIds:[chosen]},func:async(kind,files)=>{
-                try{return await globalThis.PublicationDom.perform(kind,files);}catch(e){return {ok:false,error:e.message};}
-            },args:[request.kind,prepared.files]});
+            if(request.action==='appendPublicationImages'){
+                const currentTab=await chrome.tabs.get(tabId);
+                if(!currentTab||currentTab.url!==sender.tab.url)throw Error('补图期间页面已切换，未上传到新页面');
+            }
+            const executed=await chrome.scripting.executeScript({target:{tabId,frameIds:[chosen]},func:async(kind,files,options)=>{
+                try{return await globalThis.PublicationDom.perform(kind,files,options);}catch(e){return {ok:false,error:e.message};}
+            },args:[request.kind,prepared.files,{appendOnly:request.action==='appendPublicationImages'||request.appendOnly===true,expectedPageUrl:request.action==='appendPublicationImages'?sender.tab.url:undefined}]});
             const result=executed[0]?.result;if(!result?.ok)throw Error(result?.error||'页面没有确认上传成功');
             sendResponse({...result,category:prepared.category});
         }catch(e){sendResponse({ok:false,error:e.message});}finally{publicationUploadLocks.delete(tabId);}})();return true;
@@ -4324,6 +4330,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.action === 'getColorImagePath') {
+        if(request.fileKey&&!request.taskId&&request.fileKey!==getFilePrefix()){sendResponse({ok:false,error:'颜色补图的文件身份不匹配'});return true;}
         if (request.taskId) { handleSharedAction(request, sendResponse, sender).catch(e => sendResponse({ ok: false, error: e.message })); return true; }
         console.log(`🔍 [getColorImagePath] onMessage调用: rowNum=${request.rowNum}, color=${request.color}, COLOR_IMG_DIR=${COLOR_IMG_DIR}, CURRENT_FILENAME=${CURRENT_FILENAME}`);
         const responseFn = (data) => {

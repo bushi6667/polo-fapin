@@ -1,0 +1,11 @@
+const assert=require('assert/strict'),fs=require('fs'),vm=require('vm'),path=require('path');
+const ctx={window:{}};
+vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../chrome_extension/content/page3-review-stock.js'),'utf8'),ctx);
+const {classify}=ctx.window.PoloReviewStock;
+const expected=['white|s','white|m'];
+assert.equal(classify([{key:'white|s',value:'19999'},{key:'white|m',value:'1'}],expected).state,'pass');
+assert.equal(classify([{key:'white|s',value:'0'},{key:'white|m',value:'1'}],expected).state,'pass');
+assert.equal(classify([{key:'white|s',value:''},{key:'white|m',value:'1'}],expected).state,'fail');
+assert.equal(classify([{key:'white|s',value:'10000'}],expected).state,'unknown');
+assert.equal(classify([{key:'white|s',value:'1'},{key:'white|s',value:'1'}],expected).state,'unknown');
+console.log('PASS stock presence: preserve custom values and zero, empty, missing, duplicate rows');
