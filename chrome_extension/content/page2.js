@@ -5,6 +5,10 @@
 // 依赖：common.js（工具）、selectors.js（配置）、smartFind.js（查找）
 // 面板：页面右下角浮动面板（Polo发品助手）
 // ============================================================
+// 页2与页3共用#scImages，图片容器不能作为跨页成功标志。
+function isPage3Destination(pageLocation = location) {
+    return pageLocation.hostname === 'post.alibaba.com' && /^\/product\/publish(?:\.htm)?\/?$/.test(pageLocation.pathname);
+}
 let hiddenFileInput = null;
 async function uploadPage2PublicationImages(product){
     log('正在准备并压缩6张主图：444、111及当前类目4张公共图…');
@@ -237,12 +241,9 @@ async function autoFillPage2(product) {
         publishBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
         await new Promise(r => setTimeout(r, 800));
 
-        // 真机：realClick 永远返回 true，点没点到无从得知 → 必须校验页面真的跳走。
-        // 判定不能用 href !== href0（平台 replaceState 改 spm/参数就会假阳性），
-        // 也不能用 [class*="publish"]（页2 自己就命中）。只认 pathname 变化或页3 独有容器。
-        const path0 = location.pathname;
-        const isPage3 = () => !!document.querySelector('.sell-catProp-item, #struct-image, #scImages');
-        let jumped = isPage3() || location.pathname !== path0;
+        // 点击返回成功不等于已跳转，只认页3地址；共享上传容器、参数变化不能作证。
+        const isPage3 = () => isPage3Destination(location);
+        let jumped = isPage3();
         for (let attempt = 1; attempt <= 2 && !jumped; attempt++) {
             // 第二击前重新定位：旧引用可能已被平台移除或置灰，硬点会命中 (0,0)
             const btnsNow = Array.from(document.querySelectorAll('button')).filter(b => {
@@ -255,7 +256,7 @@ async function autoFillPage2(product) {
             log('🖱️ 已点击发布按钮（第 ' + attempt + ' 次），等待跳转…', 'info');
             for (let i = 0; i < 40; i++) {          // 最多 20s
                 await new Promise(r => setTimeout(r, 500));
-                if (location.pathname !== path0 || isPage3()) { jumped = true; break; }
+                if (isPage3()) { jumped = true; break; }
             }
             if (!jumped) log('⚠️ 第 ' + attempt + ' 次点击后未跳转（页面仍有 ' + btnsNow.length + ' 个发布按钮）', 'warn');
         }
