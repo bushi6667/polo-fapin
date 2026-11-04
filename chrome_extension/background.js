@@ -1,5 +1,7 @@
 importScripts('directory-store.js');
 importScripts('upload/publication-images.js');
+importScripts('upload/save-click.js');
+importScripts('upload/save-evidence.js');
 importScripts('content/page3-review-company.js');
 importScripts('upload/page2_upload.js', 'upload/page3_upload.js', 'suite/suite-task.js', 'suite/suite-core.js', 'suite/suite-native-input.js');
 
@@ -208,7 +210,7 @@ const PUBLISH_LOG_MAX = 2000;   // 500 条只够存 1 小时（真机 13 小时�
 const PUBLISH_SETTINGS_KEY = 'polo_publish_settings';
 const PUBLISH_VERIFIED_SAVED_KEY = 'polo_publish_verified_saved';   // 保存记录（用户定义：页3菜单点击保存；记录来源）
 // 点击保存后等待平台反馈的时长：太短采不到 toast/红字，太长拖慢批量。测试里置 0。
-const SAVE_VERIFY_WAIT_MS = 2500;
+const SAVE_VERIFY_WAIT_MS = 8000;
 const PUBLISH_TICK_MS = 30000;                          // 运行期资源巡检间隔上限
 // 扩展自己点保存后的「自记账窗口」时长（内存，不落盘）：
 // CDP 注入的点击在渲染器里 isTrusted === true，页3 的点击监听会把它当成用户手动点击再回传一次
@@ -537,7 +539,7 @@ function isUnverifiedSave(entry) {
 
 // 保存后在页面上采集反馈信号。必须是自包含函数（会被序列化进页3执行），不能引用外部变量。
 // 返回：{ error, success, navigated, buttonGone, buttonDisabled, signals[] }
-async function saveVerifyProbe(waitMs) {
+async function saveVerifyProbe(waitMs, token) {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     const out = { error: false, success: false, navigated: false, buttonGone: false, buttonDisabled: false, signals: [] };
     const txt = el => el ? String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : '';
@@ -618,6 +620,11 @@ async function saveVerifyProbe(waitMs) {
         const now = saveButtons();
         if (now.length === 0) { out.buttonGone = true; pushSignal('buttonGone'); }
         else if (now.every(b => !!b.disabled)) { out.buttonDisabled = true; pushSignal('buttonDisabled'); }
+        // 重载可能让executeScript直接返回空结果；只存本次明确成功/错误，不存按钮禁用等旁证。
+        if (token && (out.success || out.error)) {
+            try { sessionStorage.setItem('polo_save_probe::' + token, JSON.stringify({ ...out,
+                token, href: url0, doc: performance.timeOrigin, at: Date.now() })); } catch (_) {}
+        }
         // 只有「明确报错 / 明确成功 / 已跳转」才提前结束轮询。
         // buttonGone / buttonDisabled 只是"提交已生效"的旁证，不能 break：点保存后按钮往往
         // 0-200ms 就 disabled，一 break 整个 2.5s 窗口就作废了，异步返回的拒绝文案永远采不到。
@@ -650,20 +657,34 @@ async function readTabUrl(tabId) {
 
 async function verifyPublishSaved(tabId, beforeUrl) {
     let raw = null;
+    const startedAt = Date.now(), token = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     try {
-        const results = await chrome.scripting.executeScript({ target: { tabId }, args: [SAVE_VERIFY_WAIT_MS], func: saveVerifyProbe });
+        const results = await chrome.scripting.executeScript({ target: { tabId }, args: [SAVE_VERIFY_WAIT_MS, token], func: saveVerifyProbe });
         raw = (results && results[0]) ? results[0].result : null;
     } catch (e) {
-        const nowUrl = await readTabUrl(tabId);
-        if (beforeUrl && nowUrl && nowUrl !== beforeUrl) {
-            // 提交成功后页面跳走/重载会销毁执行上下文，URL 变化本身就是成功信号
-            return { verified: true, failure: false, signals: ['url:' + String(nowUrl).slice(0, 60)] };
-        }
         console.warn('⚠️ 保存校验未能执行，按未确认处理：' + e.message);
         await appendPublishLog({ level: 'saveVerifyError', error: e.message });
-        return { verified: false, failure: false, signals: [] };
     }
-    return decideSaveVerification(raw);
+    const verdict = decideSaveVerification(raw);
+    const deadline = Date.now() + 3000;
+    let remembered = null;
+    while (true) {
+        const nowUrl = await readTabUrl(tabId);
+        let captured = null;
+        let readUnavailable = false;
+        try {
+            const r = await chrome.scripting.executeScript({ target: { tabId }, func: PoloSaveEvidence.read, args: [token] });
+            captured = r?.[0]?.result;
+            readUnavailable = captured === undefined;
+            if (captured?.saved) remembered = captured.saved;
+            if (captured && remembered) captured = { ...captured, saved: remembered };
+        } catch (_) { readUnavailable = true; }
+        const result = PoloSaveEvidence.recover({ verdict, captured, beforeUrl, nowUrl, token, startedAt });
+        if (result.verified || result.failure || !Number.isFinite(captured?.doc) && !readUnavailable
+            || Date.now() >= deadline) return result;
+        // 空探针返回时，新文档未必已经提交。保留已读证据，只等待新文档，不重发保存。
+        await new Promise(resolve => setTimeout(resolve, 250));
+    }
 }
 
 // ---------- 自记账窗口：挡住「扩展自己点的保存」被页3 二次记账 ----------
@@ -791,20 +812,20 @@ async function savePublishProduct(request, sender, clickButton = true) {
             // 打标记 → 点击：顺序不能反，页3 监听靠"新鲜的标记"识别这次注入点击
             const baseline = await markAutoSaveInPage(tabId);
             autoSaveToken = pushAutoSaveSelfClick(fileKey, row, baseline);
-            clicked = await realClickCDP(tabId, x, y);
-            if (!clicked.ok) {
-                try {
-                    const results = await chrome.scripting.executeScript({ target: { tabId }, args: [x, y], func: (px, py) => {
-                        const button = document.elementFromPoint(px, py)?.closest('button');
-                        if (!button || (button.innerText || button.textContent || '').trim() !== '保存') return false;
-                        button.click(); return true;
-                    } });
-                    clicked = { ok: results.some(r => r.result === true) };
-                } catch (_) {}
-            }
-            if (!clicked.ok) {
+            await chrome.tabs.update(tabId, { active: true });
+            clicked = await PoloSaveClick.click({
+                page: async (mode, token) => {
+                    const r = await chrome.scripting.executeScript({ target: { tabId },
+                        func: PoloSaveClick.page, args: [mode, token] });
+                    return r?.[0]?.result;
+                },
+                mouse: resolveTarget => realClickCDP(tabId, x, y, resolveTarget),
+                wait: ms => new Promise(resolve => setTimeout(resolve, ms))
+            });
+            await appendPublishLog({ level: 'saveClick', row, fileKey, ...clicked });
+            if (!clicked.ok && !(clicked.unconfirmed && clicked.attempted)) {
                 removeAutoSaveToken(autoSaveToken);   // 没点成 → 窗口立刻撤掉，别挡住真人点击
-                return { ok: false, error: '保存按钮未点击，未标记已保存' };
+                return { ok: false, error: '保存按钮未点击或未确认：' + (clicked.error || '未标记已保存'), unconfirmed: !!clicked.unconfirmed };
             }
             // 页3 已自己吞掉这次注入点击 → 不会再有回声，窗口可以提前撤掉
             await confirmAutoSaveSwallowedInPage(tabId, autoSaveToken);
@@ -816,6 +837,8 @@ async function savePublishProduct(request, sender, clickButton = true) {
         const verdict = clickButton
             ? await verifyPublishSaved(tabId, beforeUrl)
             : { verified: true, failure: false, signals: [] };
+        if (clickButton) await appendPublishLog({ level: 'saveVerification', row, fileKey,
+            verified: verdict.verified, failure: verdict.failure, signals: verdict.signals });
         if (verdict.failure) {
             console.warn(`⚠️ 第 ${row} 行保存后被平台拒绝，未标记已保存：${verdict.signals.join(' | ') || '（无详情）'}`);
             await appendPublishLog({ level: 'saveRejected', row, fileKey, signals: verdict.signals });
@@ -1485,8 +1508,9 @@ recoverColorExecOnStartup();
 // 套图：非终态任务在冷启动时标记为中断（不自动重发已提交的豆包请求）
 if (typeof SuiteTaskStore !== 'undefined') SuiteTaskStore.recoverOnStartup();
 
-async function realClickCDP(tabId, x, y) {
+async function realClickCDP(tabId, x, y, resolveTarget) {
     let attachedHere = false;
+    let dispatched = false;
     try {
         try {
             await chrome.debugger.attach({ tabId }, '1.3');
@@ -1496,6 +1520,15 @@ async function realClickCDP(tabId, x, y) {
                 throw e;
             }
         }
+        // attach可能改变底部固定按钮的位置；必须在连接完成后重新定位。
+        if (resolveTarget) {
+            await new Promise(r => setTimeout(r, 100));
+            const target = await resolveTarget();
+            if (!target?.ok || !Number.isFinite(target.x) || !Number.isFinite(target.y)) {
+                return { ok: false, dispatched: false, error: target?.error || '保存按钮位置未确认' };
+            }
+            x = target.x; y = target.y;
+        }
         await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
             type: 'mouseMoved',
             x, y,
@@ -1503,6 +1536,7 @@ async function realClickCDP(tabId, x, y) {
             clickCount: 0
         });
         await new Promise(r => setTimeout(r, 30));
+        dispatched = true;
         await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
             type: 'mousePressed',
             x, y,
@@ -1519,7 +1553,7 @@ async function realClickCDP(tabId, x, y) {
         await new Promise(r => setTimeout(r, 30));
         return { ok: true };
     } catch (e) {
-        return { ok: false, error: e.message };
+        return { ok: false, dispatched, error: e.message };
     } finally {
         if (attachedHere) {
             try { await chrome.debugger.detach({ tabId }); } catch (_) {}

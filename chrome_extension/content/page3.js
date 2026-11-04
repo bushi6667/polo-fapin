@@ -2278,44 +2278,13 @@ async function fillSizeTemplate(product, mode, options = {}) {
     
     await sleep3(200);
     
-    // 处理确认弹窗（清除尺码表数据）- 最多等待3秒
-    for (let i = 0; i < 20; i++) {
-        const confirmDialog = document.querySelector('.size-chart-dialog-confirm, .next-dialog-quick, [role="alertdialog"]');
-        if (confirmDialog && confirmDialog.offsetHeight > 0) {
-            if(options.missingOnly){assertEmptySize();const text=confirmDialog.textContent||'';if(!/清除尺码表数据/.test(text)||!/请确认是否清空尺码表数据/.test(text)){confirmDialog.querySelector('.next-btn-normal')?.click();throw Error('未知尺码确认提示，停止');}}
-            log('⚠️ 检测到确认弹窗：' + (confirmDialog.innerText || confirmDialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) + ' → 点确定', 'warn');
-            // 找"确定"按钮（中英文都支持）
-            let confirmBtn = null;
-            const btns = confirmDialog.querySelectorAll('.next-btn');
-            for (const btn of btns) {
-                const helper = btn.querySelector('.next-btn-helper');
-                const text = helper ? helper.innerText.trim() : btn.innerText.trim();
-                if (text === '确定' || text === '确认' || text === 'Confirm' || text === 'OK') {
-                    confirmBtn = btn;
-                    break;
-                }
-            }
-            if (!confirmBtn) {
-                confirmBtn = confirmDialog.querySelector('.next-btn-primary');
-            }
-            if (confirmBtn) {
-                await realClick(confirmBtn);
-                if (typeof waitDialogsGone === 'function') await waitDialogsGone(4000);
-                break;
-            }
-        }
-        await sleep3(150);
-    }
-    
-    await sleep3(800);
-    
     if (found) {
-        log(`✅ 已选择模板: ${selectedText}`, 'success');
-        results.push(`✅ 尺码模板: ${selectedText}`);
-        
-        // 等待尺码表加载完成
-        await sleep3(1500);
-        
+        if (!window.PoloReviewSize?.confirmTemplate) throw Error('尺码模板确认模块未加载');
+        log(`尺码模板已点击，等待确认及实际测量值：${selectedText}`, 'info');
+        await window.PoloReviewSize.confirmTemplate(document, {
+            wait: sleep3, isCurrent: options.isCurrent,
+            canConfirm: options.missingOnly ? assertEmptySize : guardSize
+        });
         // 重新勾选尺码（因为选择模板后可能会重置）
         const defaultSizes = options.missingOnly ? preservedSizes : ['S', 'M', 'L', 'XL', '2XL', '3XL'];
         const szMap = {'S':'S','M':'M','L':'L','XL':'Xl','2XL':'2 XL','3XL':'3 XL'};
@@ -2326,13 +2295,16 @@ async function fillSizeTemplate(product, mode, options = {}) {
             document.querySelectorAll('.next-checkbox-wrapper .next-checkbox-label').forEach(l => {
                 if ((l.innerText || '').trim() === cb) {
                     const wrapper = l.closest('.next-checkbox-wrapper');
-                    if (wrapper && !wrapper.classList.contains('checked')) {
+                    if (wrapper && !wrapper.closest('thead,.next-overlay-wrapper,[class*="filter"]')
+                        && wrapper.querySelector('input')?.checked === false) {
                         wrapper.click();
                     }
                 }
             });
         }
         
+        await window.PoloReviewSize.waitMeasurements(document, { wait: sleep3, isCurrent: options.isCurrent });
+        results.push(`✅ 尺码模板: ${selectedText}`);
         results.push(`✅ 尺码: ${defaultSizes.join(', ')}`);
     } else {
         results.push(`⚠️ 未找到模板「${targetTemplate}」`);
@@ -2343,6 +2315,7 @@ async function fillSizeTemplate(product, mode, options = {}) {
         if(!inputs.length||inputs.some(i=>!/^\d+(?:\.\d+)?$/.test(String(i.value||'').trim())))throw Error('尺码模板实际测量值不完整');
         if(JSON.stringify(selectedSizes().sort())!==JSON.stringify(preservedSizes.sort()))throw Error('模板改变了原尺码选择，需复核，不判通过');
     }
+    if(found)log(`✅ 尺码模板实际测量值及尺码选择已核对：${selectedText}`, 'success');
     return results;
 }
 

@@ -51,10 +51,16 @@ function backend(opts = {}) {
     const probeWaits = [];
     let probeCalls = 0;
     env.ctx.chrome.scripting.executeScript = async ({ func, args }) => {
+        if (func?.name === 'readSaveProbeEvidence') return [{ result: opts.captured ? opts.captured(args[0]) : null }];
+        if (func?.name === 'saveClickPage') {
+            if (args[0] === 'target') return [{ result: { ok: true, x: 60, y: 30 } }];
+            return [{ result: { ok: opts.fallbackClick !== false, clicks: opts.fallbackClick === false ? 0 : 1, presses: 0 } }];
+        }
         if (func && func.name === 'saveVerifyProbe') {
             probeCalls++;
             probeWaits.push(args && args[0]);
             if (opts.probeThrows) throw new Error('Cannot access contents of the page');
+            if (opts.probeEmpty) return [];
             return [{ result: opts.probeRaw === undefined ? { success: true, signals: ['successToast:保存成功'] } : opts.probeRaw }];
         }
         return [{ result: opts.fallbackClick === undefined ? true : opts.fallbackClick }];
@@ -251,7 +257,7 @@ function seqProbe(fixture) {
         const { sender } = await openTask(env);
         await env.sendInternal({ action: 'savePublishProduct', row: 412, x: 60, y: 30, fileKey: '' }, sender);
         ok(probeWaits.length === 1 && probeWaits[0] === env.run('SAVE_VERIFY_WAIT_MS'), '探针收到 SAVE_VERIFY_WAIT_MS（实际 ' + probeWaits[0] + '）');
-        ok(probeWaits[0] >= 2000 && probeWaits[0] <= 3000, '等待时长在 2~3 秒区间');
+        ok(probeWaits[0] >= 8000 && probeWaits[0] <= 10000, '等待时长在8~10秒区间，仍低于单次请求保护上限');
         await env.run('stopPublishTick()');
     }
 
@@ -383,12 +389,40 @@ function seqProbe(fixture) {
         tab.url = 'https://post.alibaba.com/product/publish/success?row=412';
         const resp = await env.sendInternal({ action: 'savePublishProduct', row: 412, x: 60, y: 30, fileKey: '' }, sender);
         ok(resp && resp.ok === true && resp.verified === true, 'ok:true / verified:true', JSON.stringify(resp));
-        ok((resp.signals || []).some(s => s.startsWith('url:')), 'signals 记下 URL 变化');
+        ok((resp.signals || []).some(s => s.startsWith('savedDestination:')), 'signals 记下保存目的地址');
         ok(savedMapOf(env)[''][412].unverified === undefined, '记录不是 unverified（重发不再重填）');
         await env.run('stopPublishTick()');
     }
 
     // ------------------------------------------------------------
+    console.log('\n【6c】探针空结果但新草稿地址已有商品ID；无效跳转不能放行');
+    for (const sample of [
+        { probeEmpty: true, url: 'https://post.alibaba.com/product/publish.htm?itemId=123&pubAction=draft', verified: true },
+        { probeRaw: null, url: 'https://post.alibaba.com/product/publish.htm?itemId=123&pubAction=draft', verified: true },
+        { probeEmpty: true, url: 'https://login.alibaba.com/', verified: false },
+        { probeEmpty: true, url: 'https://post.alibaba.com/product/publish.htm?error=1', verified: false },
+        { probeRaw: { error: true, signals: ['formError:不能为空'] }, url: 'https://post.alibaba.com/product/publish.htm?itemId=123', verified: false }
+    ]) {
+        const { env } = backend(sample); await delay(100);
+        const { sender } = await openTask(env);
+        env.tabs.find(t => t.id === sender.tab.id).url = sample.url;
+        const response = await env.sendInternal({ action: 'savePublishProduct', row: 412, x: 60, y: 30, fileKey: '' }, sender);
+        ok(response.verified === sample.verified, `空探针/错误优先：${sample.url}`, JSON.stringify(response));
+        await env.run('stopPublishTick()');
+    }
+    console.log('\n【6d】同地址重载：使用本次重载前捕获的成功信号，不重新点击');
+    {
+        const url = 'https://post.alibaba.com/product/publish.htm?itemId=123&pubAction=draft';
+        const { env, probeCalls } = backend({ probeEmpty: true, captured: token => ({ href: url, doc: 2,
+            saved: { token, href: url, doc: 1, at: Date.now(), success: true, signals: ['dialogOk:保存成功'] } }) });
+        await delay(100); const { sender } = await openTask(env);
+        sender.tab.url = url; sender.url = url; env.tabs.find(t => t.id === sender.tab.id).url = url;
+        const response = await env.sendInternal({ action: 'savePublishProduct', row: 412, x: 60, y: 30, fileKey: '' }, sender);
+        ok(response.verified === true, '真实后台采集恢复证据并确认同URL保存', JSON.stringify(response));
+        ok(response.signals.includes('probe:success-before-reload'), '保留重载前成功证据来源');
+        ok(probeCalls() === 1, '只运行一次保存结果探针');
+        await env.run('stopPublishTick()');
+    }
     console.log('\n【7】页面探针 saveVerifyProbe：三类信号判定');
     {
         const e1 = probeEnv({ helps: [mkEl({ text: '请输入3-128个字符', cls: 'next-form-item-help' })] });

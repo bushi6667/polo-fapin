@@ -171,6 +171,8 @@ function createEnv(opts = {}) {
     };
     sandbox.globalThis = sandbox;
     const ctx = vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../chrome_extension/upload/save-click.js'), 'utf8'), ctx);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../chrome_extension/upload/save-evidence.js'), 'utf8'), ctx);
     vm.runInContext(SRC, ctx, { filename: 'background.js' });
 
     const run = (expr) => vm.runInContext(expr, ctx);

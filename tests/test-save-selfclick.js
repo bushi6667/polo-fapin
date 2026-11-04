@@ -50,7 +50,11 @@ function backend(opts = {}) {
     let hits = 0;                  // 页面 __poloAutoSaveHits
     let swallowPending = !!opts.swallow;
 
-    env.ctx.chrome.scripting.executeScript = async ({ func }) => {
+    env.ctx.chrome.scripting.executeScript = async ({ func, args }) => {
+        if (func?.name === 'saveClickPage') {
+            if (args[0] === 'target') return [{ result: { ok: true, x: 60, y: 30 } }];
+            return [{ result: { ok: true, clicks: 1, presses: 0 } }];
+        }
         const text = String(func || '');
         if (func && func.name === 'saveVerifyProbe') {
             calls.push('probe');
