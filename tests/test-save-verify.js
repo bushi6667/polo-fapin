@@ -123,6 +123,7 @@ function pageEnv(opts = {}) {
         getTaskFromUrl: () => task,
         getRowFromUrl: () => row,
         fillAllPage3: async () => { events.push('fill'); return opts.results || ['✅ 全部字段处理完毕']; },
+        auditPage3BeforeSave: async () => [],
         sendMessageRetry: async msg => {
             messages.push(msg);
             events.push('msg:' + msg.action);
@@ -143,7 +144,13 @@ function pageEnv(opts = {}) {
         }
     };
     vm.createContext(c);
+    c.clearTimeout=clearTimeout;
+    c.location={href:'https://post.alibaba.com/product/publish.htm?row='+row};
+    c.document.querySelector=()=>null;
+    vm.runInContext(fs.readFileSync(__dirname+'/../chrome_extension/content/page3-save-stability.js','utf8'),c);
     vm.runInContext([fn('saveDraft'), fn('waitPublishFormReady'), fn('loadBatchProduct')].join('\n'), c);
+    // 本文件验证原保存探针及调用点的日志/推进条件；闭环真实模块另有专项覆盖。
+    c.saveAutomaticPage3 = (...args) => c.saveDraft(...args);
     return { c, events, logs, messages, store, saveBtn, btn, row, task };
 }
 
@@ -503,18 +510,18 @@ function seqProbe(fixture) {
         ok(logHas(unv, '已点击保存但未确认成功', 'warn'), 'unverified → warn「已点击保存但未确认成功」');
         ok(!logHas(unv, '✅ 已自动保存'), 'unverified → 不打「✅ 已自动保存」');
         ok(logHas(unv, '自动保存未完成', 'warn'), 'unverified → 调用点 warn 自动保存未完成');
-        ok(unv.messages.filter(m => m.action === 'publishFilled').length === 1, 'unverified → 队列照旧推进（publishFilled 仍发 1 次）');
+        ok(unv.messages.filter(m => m.action === 'publishFilled').length === 0, 'unverified → 当前行保留，不推进队列');
 
         const bad = await runSingle({ saveResponse: { ok: false, error: '平台校验未通过，未标记已保存' } });
         ok(logHas(bad, '平台校验未通过', 'error'), '明确失败 → error 级别日志');
         ok(!logHas(bad, '✅ 已自动保存'), '明确失败 → 不打「✅ 已自动保存」');
         ok(logHas(bad, '自动保存未完成', 'error'), '明确失败 → 调用点用 error 级别');
-        ok(bad.messages.filter(m => m.action === 'publishFilled').length === 1, '明确失败 → 队列仍推进（不卡死）');
+        ok(bad.messages.filter(m => m.action === 'publishFilled').length === 0, '明确失败 → 当前行保留，不推进队列');
         ok(bad.btn.disabled === false, '按钮恢复可用');
 
         const thrown = await runSingle({ saveResponse: 'throw' });
         ok(logHas(thrown, '自动保存异常', 'warn'), 'saveDraft 抛异常仍按 warn 处理（不崩）');
-        ok(thrown.messages.filter(m => m.action === 'publishFilled').length === 1, '异常时 publishFilled 仍发出');
+        ok(thrown.messages.filter(m => m.action === 'publishFilled').length === 0, '保存异常时不发送 publishFilled');
     }
 
     console.log(`\n=== 结果: ${pass} 通过 / ${fail} 失败 ===`);

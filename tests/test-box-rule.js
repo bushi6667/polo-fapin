@@ -44,8 +44,9 @@ async function run(displayed, hidden, reportedOk, timeout = false, ruleText) {
     }
 }
 
-async function runDialog(first, second, disabled = false, directList = false, resumeList = false, finishText = '确认完成', missingFinal = false, associated = false, confirmCancellation = false) {
+async function runDialog(first, second, disabled = false, directList = false, resumeList = false, finishText = '确认完成', missingFinal = false, associated = false, confirmCancellation = false, assocMode = 'disappear') {
     let stage = 0, listener, quantity = '', manual = false, multiple = false;
+    let rowState = associated ? 'linked' : 'pending';
     class Input {
         get value() { return quantity; }
         set value(value) { quantity = value; }
@@ -63,23 +64,48 @@ async function runDialog(first, second, disabled = false, directList = false, re
         };
     }
     const radios = [element('手动设置', false, () => { manual = true; }), element('一箱多件', false, () => { multiple = true; })];
+    // 关联按钮的四种真实结果：直接关联、变成仍要关联、出现确定、二次点击仍无效。
+    const associateButton = element('关联', true, () => {
+        assert.equal(quantity, '25');
+        if (assocMode === 'disappear') { rowState = 'gone'; stage = 4; }
+        else if (assocMode === 'still' || assocMode === 'noop') rowState = 'still';
+        else if (assocMode === 'confirm') rowState = 'confirm';
+        else rowState = 'linked';
+    });
+    const stillButton = element('仍要关联', true, () => {
+        if (assocMode !== 'noop') rowState = 'linked';
+    });
+    const confirmAssociateButton = element('确定', true, () => { rowState = 'linked'; });
     const buttons = [
         element(first, true, () => { if (manual) stage = 1; }),
         element(second, true, () => { if (multiple) stage = directList ? 3 : 2; }),
         element('下一步', true, () => { stage = 3; }),
-        element('关联', true, () => { assert.equal(quantity, '25'); stage = 4; }),
+        associateButton,
         element(finishText, true, () => { stage = 5; })
     ];
     if (finishText === '确认运费') buttons.push(element('确认完成', true, () => { stage = 6; }));
     let cancellationPending = false;
     const cancelButton = element('取消关联', true, () => {
         if (confirmCancellation) cancellationPending = true;
-        else associated = false;
+        else rowState = 'pending';
     });
-    const confirmCancelButton = element('确定', true, () => { associated = false; cancellationPending = false; });
+    const confirmCancelButton = element('确定', true, () => { rowState = 'pending'; cancellationPending = false; });
     const cancelDialog = { innerText: '确认取消关联？', offsetParent: {}, querySelectorAll: () => [confirmCancelButton] };
-    const row = { innerText: '50*40*30', querySelector: () => associated ? null : input,
-        querySelectorAll: () => associated ? [cancelButton] : [buttons[3]] };
+    const row = {
+        get innerText() {
+            const state = rowState === 'linked' ? '取消关联' : rowState === 'still' ? '仍要关联'
+                : rowState === 'confirm' ? '关联 请确认是否关联 确定' : '关联';
+            return '50*40*30 25件 ' + state;
+        },
+        querySelector: () => (rowState === 'linked' || rowState === 'gone') ? null : input,
+        querySelectorAll: () => {
+            if (rowState === 'linked') return [cancelButton];
+            if (rowState === 'gone') return [];
+            if (rowState === 'still') return [stillButton];
+            if (rowState === 'confirm') return [associateButton, confirmAssociateButton];
+            return [associateButton];
+        }
+    };
     const context = vm.createContext({
         window: {}, console: { log() {} }, HTMLInputElement: Input,
         Event: class { constructor(type) { this.type = type; } },
@@ -88,16 +114,20 @@ async function runDialog(first, second, disabled = false, directList = false, re
         chrome: { runtime: { onMessage: { addListener: callback => { listener = callback; } } } },
         document: { querySelectorAll: selector => {
             if (selector === '.next-dialog') return cancellationPending ? [cancelDialog] : [];
-            if (selector === 'tr, .next-table-row') return stage === 3 ? [row] : [];
-            if (selector === 'button' || selector === '.next-btn') return stage < (finishText === '确认运费' && !missingFinal ? 6 : 5) ? [buttons[stage]] : [];
+            if (selector === 'tr, .next-table-row') return stage === 3 && rowState !== 'gone' ? [row] : [];
+            if (selector === 'button' || selector === '.next-btn') {
+                if (rowState === 'linked' && stage === 3) return [buttons[4]];
+                return stage < (finishText === '确认运费' && !missingFinal ? 6 : 5) ? [buttons[stage]] : [];
+            }
             if (selector === 'label' || selector.includes('radio')) return stage < 2 ? [radios[stage]] : [];
             return [];
         } }
     });
     vm.runInContext(fs.readFileSync(__dirname + '/../chrome_extension/content/boxRuleIframe.js', 'utf8'), context);
     const result = await new Promise(resolve => listener({ action: 'fillBoxRuleIframe' }, {}, resolve));
-    assert.equal(result.ok, !disabled && !missingFinal);
-    assert.equal(stage, disabled ? 3 : finishText === '确认运费' && !missingFinal ? 6 : 5);
+    const associationFailed = disabled || assocMode === 'noop';
+    assert.equal(result.ok, !missingFinal && !associationFailed);
+    assert.equal(stage, associationFailed ? 3 : finishText === '确认运费' && !missingFinal ? 6 : 5);
 }
 
 (async () => {
@@ -118,5 +148,10 @@ async function runDialog(first, second, disabled = false, directList = false, re
     await runDialog('确认', '下一步', false, true, false, '确认运费', true);
     await runDialog('确认', '下一步', false, false, true, '确认运费', false, true);
     await runDialog('确认', '下一步', false, false, true, '确认运费', false, true, true);
-    console.log('PASS: 15 box rule scenarios including replacing an existing association with confirmation, both dialog button sequences, disabled association, closed channel, false success and deadline cleanup');
+    // 「关联」后的三种真实成功路径，以及仍要关联二次点击无效时必须失败。
+    await runDialog('确认', '下一步', false, false, false, '确认完成', false, false, false, 'still');
+    await runDialog('确认', '下一步', false, false, false, '确认完成', false, false, false, 'confirm');
+    await runDialog('确认', '下一步', false, false, false, '确认完成', false, false, false, 'linked');
+    await runDialog('确认', '下一步', false, false, false, '确认完成', false, false, false, 'noop');
+    console.log('PASS: 19 box rule scenarios including direct association, 仍要关联 second confirmation, 确定 confirmation, noop must fail, replacing an existing association, both dialog sequences, closed channel and deadline cleanup');
 })().catch(error => { console.error(error); process.exitCode = 1; });

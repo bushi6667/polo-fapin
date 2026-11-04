@@ -14,5 +14,10 @@ function color(label,loaded){const row={loaded,querySelectorAll(){return this.lo
  await assert.rejects(repair(doc,{}, {...api,read:async()=>({ok:true,url:'cached',fromDisk:false})}),/不使用旧缓存/);
  await repair(doc,{}, {...api,read:async()=>{white.row.loaded=true;return {ok:true,url:'local',fromDisk:true};}});
  assert.equal(uploads,1,'读取期间图片已补回，不覆盖');
+ let on=false,clicks=0;const toggle={classList:{contains:c=>c===(on?'next-switch-on':'next-switch-off')},scrollIntoView(){}};
+ const switchDoc={querySelector:()=>toggle,querySelectorAll:()=>[white.input,black.input]};
+ await repair(switchDoc,{}, {...api,click:async()=>{clicks++;on=true;},wait:async()=>{}});assert.equal(clicks,1);assert(on);
+ await repair(switchDoc,{}, {...api,click:async()=>{clicks++;},wait:async()=>{}});assert.equal(clicks,1,'already enabled must not toggle off');
+ on=false;await assert.rejects(repair(switchDoc,{}, {...api,click:async()=>{},wait:async()=>{}}),/未开启/);
  console.log('PASS color image repair: one missing only, preserve names/existing images, reject unknown/cache, reread before upload');
 })().catch(e=>{console.error(e);process.exitCode=1;});

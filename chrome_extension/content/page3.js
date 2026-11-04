@@ -2103,8 +2103,16 @@ async function fillSizesPage3(product) {
 //   4. 选择后自动检测确认对话框(role=alertdialog)，点击"确定"按钮
 //   5. 确认对话框检测: 150ms间隔，最多3秒
 // ============================================================
-async function fillSizeTemplate(product) {
+async function fillSizeTemplate(product, mode, options = {}) {
     const results = [];
+    const guardSize = () => { if(options.isCurrent&&!options.isCurrent())throw Error('商品已切换，停止尺码模板填入'); };
+    const measurementInputs = () => [...document.querySelectorAll('.size-chart-table-main td[required][name] input')];
+    const selectedSizes = () => [...document.querySelectorAll('.next-checkbox-wrapper')].filter(e=>!e.closest('thead,.next-overlay-wrapper,[class*="filter"]')&&e.querySelector('input')?.checked).map(e=>String(e.querySelector('.next-checkbox-label')?.textContent||'').trim()).filter(s=>/^(xxs|xs|s|m|l|xl|[2-9] ?xl|one size)$/i.test(s));
+    guardSize();
+    const preservedSizes = options.missingOnly ? selectedSizes() : null;
+    const assertEmptySize = () => { guardSize(); const inputs=measurementInputs(); if(!inputs.length||inputs.some(i=>String(i.value||'').trim()))throw Error('尺码测量区未定位或已有内容，不重选模板'); };
+    if(options.missingOnly)assertEmptySize();
+
     
     const sizeSection = await scrollAndFind(() => document.querySelector('.size-chart-table-main, .country-size-chart-container, .size-chart-qiankun'), 5);
     if (sizeSection) {
@@ -2149,6 +2157,7 @@ async function fillSizeTemplate(product) {
     
     templateSelect.scrollIntoView({block: 'center'});
     await sleep3(300);
+    if(options.missingOnly)assertEmptySize();
     await realClick(templateSelect);
     await sleep3(1000);
     
@@ -2228,6 +2237,7 @@ async function fillSizeTemplate(product) {
         if (text === targetTemplate) {
             option.scrollIntoView({block: 'center'});
             await sleep3(200);
+            if(options.missingOnly)assertEmptySize();
             await realClick(option);
             found = true;
             selectedText = text;
@@ -2236,7 +2246,7 @@ async function fillSizeTemplate(product) {
     }
     
     // 模糊匹配
-    if (!found) {
+    if (!found && !options.missingOnly) {
         const searchKeywords = targetTemplate.replace('男士', '').replace('通用', '');
         for (const option of dropdownOptions) {
             const text = (option.innerText || '').trim();
@@ -2252,7 +2262,7 @@ async function fillSizeTemplate(product) {
     }
     
     // 再放宽：只要包含"男士"和"通用"
-    if (!found) {
+    if (!found && !options.missingOnly) {
         for (const option of dropdownOptions) {
             const text = (option.innerText || '').trim();
             if (text && text.includes('男士') && text.includes('通用')) {
@@ -2272,6 +2282,7 @@ async function fillSizeTemplate(product) {
     for (let i = 0; i < 20; i++) {
         const confirmDialog = document.querySelector('.size-chart-dialog-confirm, .next-dialog-quick, [role="alertdialog"]');
         if (confirmDialog && confirmDialog.offsetHeight > 0) {
+            if(options.missingOnly){assertEmptySize();const text=confirmDialog.textContent||'';if(!/清除尺码表数据/.test(text)||!/请确认是否清空尺码表数据/.test(text)){confirmDialog.querySelector('.next-btn-normal')?.click();throw Error('未知尺码确认提示，停止');}}
             log('⚠️ 检测到确认弹窗：' + (confirmDialog.innerText || confirmDialog.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40) + ' → 点确定', 'warn');
             // 找"确定"按钮（中英文都支持）
             let confirmBtn = null;
@@ -2306,9 +2317,10 @@ async function fillSizeTemplate(product) {
         await sleep3(1500);
         
         // 重新勾选尺码（因为选择模板后可能会重置）
-        const defaultSizes = ['S', 'M', 'L', 'XL', '2XL', '3XL'];
+        const defaultSizes = options.missingOnly ? preservedSizes : ['S', 'M', 'L', 'XL', '2XL', '3XL'];
         const szMap = {'S':'S','M':'M','L':'L','XL':'Xl','2XL':'2 XL','3XL':'3 XL'};
         
+        guardSize();
         for (const s of defaultSizes) {
             const cb = szMap[s] || s;
             document.querySelectorAll('.next-checkbox-wrapper .next-checkbox-label').forEach(l => {
@@ -2326,6 +2338,11 @@ async function fillSizeTemplate(product) {
         results.push(`⚠️ 未找到模板「${targetTemplate}」`);
     }
     
+    if(options.missingOnly){
+        guardSize();const inputs=measurementInputs();
+        if(!inputs.length||inputs.some(i=>!/^\d+(?:\.\d+)?$/.test(String(i.value||'').trim())))throw Error('尺码模板实际测量值不完整');
+        if(JSON.stringify(selectedSizes().sort())!==JSON.stringify(preservedSizes.sort()))throw Error('模板改变了原尺码选择，需复核，不判通过');
+    }
     return results;
 }
 
@@ -2936,10 +2953,12 @@ async function ensureLogisticsReady(product) {
     return again;
 }
 
-async function fillBoxRule(product) {
+async function fillBoxRule(product, mode, options = {}) {
+    const guardBox = () => {if(options.isCurrent&&!options.isCurrent())throw Error('商品已切换，停止箱规补缺');};
+    guardBox();
     // 箱规点不动，通常不是箱规本身，而是物流属性/发货期没真正提交 → 先补一次
     const pre = [];
-    if (typeof ensureLogisticsReady === 'function') {
+    if (!options.missingOnly && typeof ensureLogisticsReady === 'function') {
         try { pre.push(...await ensureLogisticsReady(product)); } catch (_) {}
     }
     if (getAssociatedBoxRule()) return [...pre.map(p => '⚠️ 箱规前置：' + p), '✅ 箱规已关联: 50×40×30 / 25件'];
@@ -2960,6 +2979,7 @@ async function fillBoxRule(product) {
             Array.from(section.querySelectorAll('#boxPackaging .change-box-rule-text')).find(button =>
                 button.getBoundingClientRect().height > 0);
         if (!addBtn) return ['⚠️ 箱规: 未找到添加或关联箱规按钮'];
+        guardBox();
         addBtn.scrollIntoView({ block: 'center' });
         await sleep3(200);
         // 先补齐指针事件再点：只发 click 时阿里按钮可能不弹窗（不触发 mousedown 逻辑）
@@ -2983,6 +3003,7 @@ async function fillBoxRule(product) {
     }
     for (let i = 0; i < 150 && !findIframe(); i++) await sleep3(200);   // 8s → 30s
     if (!findIframe()) return ['❌ 箱规: iframe 30s 内未加载'];
+    guardBox();
     await sleep3(800);
 
     // 弹窗完成后可能销毁消息通道；以主页面实际关联参数为准。
@@ -3021,6 +3042,7 @@ async function fillBoxRule(product) {
             if (!check()) finish('❌ 箱规关联超时（60s），页面未显示完整箱规参数');
         }, 60000);
         try {
+            guardBox();
             chrome.runtime.sendMessage({ action: 'fillBoxRule' }, response => {
                 const error = chrome.runtime.lastError?.message;
                 if (error || !response?.ok) handleResult({ error: error || response?.error || '启动失败' });
@@ -3371,18 +3393,10 @@ function splitMixedText(s) {
 
 // ============================================================
 // ✨ 填入商品卖点 fillHighlightsPage3
-// 输入方式: 解析卖点数据 → 创建ul/li DOM → 插入contenteditable编辑器
-// 遇到的问题:
-//   1. 编辑器是contenteditable富文本，不是普通input
-//   2. 卖点可能有多个，需要动态生成列表
-//   3. 直接设置innerHTML可能不触发React更新
-// 解决方案:
-//   1. parseHighlights() 从xlsx数据解析卖点（按换行/符号拆分）
-//   2. 创建 <ul> + 多个 <li> DOM元素
-//   3. 清空编辑器innerHTML后appendChild插入ul
-//   4. 触发 input/change/blur 事件确保React捕获更新
+// 数据解析与页1预解析保持原约定；写入交给page3-highlights.js，保留平台ul/li结构。
+// 验证完整正文、条数、卖点自身计数器，并在平台节流及失焦后复核。
 // ============================================================
-async function fillHighlightsPage3(product, mode) {
+async function fillHighlightsPage3(product, mode, options = {}) {
     if (!mode) mode = window.__polo_fill_mode || 'overwrite';
     const results = [];
 
@@ -3426,81 +3440,17 @@ async function fillHighlightsPage3(product, mode) {
         return results;
     }
 
-    // 真机事故（11-01 行101）：直接改 ul.innerHTML 只动 DOM，平台富文本编辑器的
-    // 内部 model 不知道 → 点保存时内容被丢弃。
-    // 现在全程只用编辑命令（聚焦 → 定位/清空 → insertText），不再直接改 DOM。
-    editor.scrollIntoView({block: 'center'});
-    await sleep3(150);
-    await realClick(editor);
-    await sleep3(200);
-    try { editor.focus(); } catch (_) {}
-    await sleep3(100);
-
-    // 焦点断言：selectAll/delete 的作用域跟焦点走，焦点不在编辑器里会删掉整页内容
-    const inEditor = () => {
-        const a = document.activeElement;
-        return a === editor || (a && editor.contains(a));
-    };
-    if (!inEditor()) {
-        results.push('⚠️ 商品卖点: 编辑器未获得焦点，已中止（避免误删页面内容）');
-        log('⚠️ 商品卖点：焦点不在编辑器里，跳过写入', 'warn');
-        return results;
+    if (!window.PoloHighlights) return ['⚠️ 商品卖点: 写入模块未加载，请重新加载扩展后再试'];
+    try {
+        const pageAtStart = location.href;
+        const outcome = await window.PoloHighlights.write(document, descList, {
+            mode, missingOnly: options.missingOnly === true, click: realClick,
+            isCurrent: () => location.href === pageAtStart && (!options.isCurrent || options.isCurrent())
+        });
+        results.push(outcome.skipped ? '✅ 商品卖点: 已有内容，保留' : `✅ 商品卖点: ${outcome.count}条，列表/完整正文/计数及失焦复核通过`);
+    } catch (e) {
+        results.push('⚠️ 商品卖点: ' + e.message);
     }
-
-    const beforeText = String(editor.innerText || '').trim();
-
-    if (mode === 'append') {
-        // 追加模式：把光标放到末尾，不清空
-        try {
-            const sel = window.getSelection();
-            const range = document.createRange();
-            range.selectNodeContents(editor);
-            range.collapse(false);
-            sel.removeAllRanges();
-            sel.addRange(range);
-        } catch (_) {}
-        await sleep3(80);
-        document.execCommand('insertText', false, String.fromCharCode(10));
-        await sleep3(60);
-    } else {
-        document.execCommand('selectAll', false, null);
-        await sleep3(50);
-        document.execCommand('delete', false, null);
-        await sleep3(120);
-    }
-    if (beforeText) log('ℹ️ 商品卖点：覆盖前编辑器有 ' + beforeText.length + ' 字（前 20 字：' + beforeText.slice(0, 20) + '）', 'info');
-
-    for (let di = 0; di < descList.length; di++) {
-        document.execCommand('insertText', false, String(descList[di]));
-        await sleep3(20);
-        // 最后一条不再补换行：否则编辑器会多出一个空 <li>（实测 5 条变 6 条）
-        if (di < descList.length - 1) {
-            document.execCommand('insertText', false, String.fromCharCode(10));
-            await sleep3(20);
-        }
-    }
-
-    editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: null}));
-    editor.dispatchEvent(new Event('input', {bubbles: true}));
-    editor.dispatchEvent(new Event('change', {bubbles: true}));
-    await sleep3(250);
-
-    // 回读放在 blur 之前：blur 后平台可能把编辑区切成只读视图，读到的就不是刚写的内容
-    const norm = t => String(t || '').replace(/\s+/g, ' ').trim();
-    const written = norm(editor.innerText || editor.textContent || '');
-    const missing = descList.filter(d => !written.includes(norm(d).slice(0, Math.min(12, norm(d).length))));
-
-    try { editor.blur(); } catch (_) {}
-
-    if (missing.length) {
-        results.push('⚠️ 商品卖点: ' + missing.length + '/' + descList.length + ' 条未写入（前 2 条：' + missing.slice(0, 2).map(d => norm(d).slice(0, 16)).join(' / ') + '）');
-        log('⚠️ 商品卖点写入不完整: ' + missing.length + ' 条', 'warn');
-    } else {
-        const liCount = editor.querySelectorAll('li').length;
-        results.push('✅ 商品卖点: 写入 ' + descList.length + ' 条（已回读校验' + (liCount && liCount !== descList.length ? '，页面 li ' + liCount + ' 个' : '') + '）');
-        log('✅ 商品卖点: 写入 ' + descList.length + ' 条并回读通过', 'success');
-    }
-    await sleep3(200);
 
     return results;
 }
@@ -3518,7 +3468,7 @@ async function fillHighlightsPage3(product, mode) {
 //   3. 多选择器降级查找选项，10轮轮询等待渲染
 //   4. pickDetailTemplate() 根据类目匹配模板关键词
 // ============================================================
-async function fillDetailTemplate(product) {
+async function fillDetailTemplate(product, opts = {}) {
     const results = [];
 
     const section = await scrollToSection('商品介绍', 6);
@@ -3669,13 +3619,16 @@ async function fillDetailTemplate(product) {
         results.push('⚠️ 商品详情模板选择失败');
     }
 
-    const hlRes = await fillHighlightsPage3(product);
-    results.push(...hlRes);
+    // 缺图修复时只选模板/上传，不整组重写已有卖点；需要时由检查层只补缺失条目。
+    if (!opts.skipHighlights) {
+        const hlRes = await fillHighlightsPage3(product);
+        results.push(...hlRes);
+    }
 
     return results;
 }
 
-function pickCompanyIntroTemplate(product) {
+function pickCompanyIntroTemplate(product, options = {}) {
     const cat = (product.category || '').toLowerCase();
     
     const numMatch = cat.match(/\((\d+)\)/);
@@ -3693,7 +3646,7 @@ function pickCompanyIntroTemplate(product) {
     if (cat.includes('polo') || cat.includes('polo衫')) return 'Polo衫';
     if (cat.includes('t-shirt') || cat.includes('t shirt') || cat.includes('tshirt') || cat.includes('t恤')) return 'T恤';
     if (cat.includes('shirt') || cat.includes('衬衫') || cat.includes('衬衣')) return 'Shirt';
-    return 'Polo衫';
+    return options.strict ? '' : 'Polo衫';
 }
 
 // 旧版只认「同一行 Q: … A: …」。遇到全角冒号、Q/A 分两行、或压根没前缀
@@ -3787,11 +3740,12 @@ function resolveFaqs(product, max = 8) {
 //      - 触发input/change事件，blur失焦
 //   4. parseFaqs() 动态解析FAQ数量，不硬编码
 // ============================================================
-async function fillFaqsPage3(product, mode) {
+async function fillFaqsPage3(product, mode, options = {}) {
     if (!mode) mode = window.__polo_fill_mode || 'overwrite';
     const results = [];
     const FAQ_MAX = 8;                       // 平台条目上限，超了「添加」按钮无响应（实测第 9 条点不动）
-    const { all: allFaqs, en: enFaqs, use: faqs } = resolveFaqs(product, FAQ_MAX);
+    const restored = Array.isArray(options.faqSnapshot) ? options.faqSnapshot.map(([q,a])=>({q:String(q),a:String(a)})) : null;
+    const { all: allFaqs, en: enFaqs, use: faqs } = restored ? {all:restored,en:restored,use:restored.slice(0,FAQ_MAX)} : resolveFaqs(product, FAQ_MAX);
     if (!allFaqs.length) log('📋 FAQ：原文无 Q/A 结构（解析 0 条）', 'warn');
     else log('📋 解析到 ' + allFaqs.length + ' 条FAQ（英文 ' + enFaqs.length + ' 条，本次填 ' + faqs.length + ' 条' +
         (enFaqs.length > FAQ_MAX ? '，平台上限 ' + FAQ_MAX + ' 条已截断' : '') + '）', 'info');
@@ -3976,9 +3930,10 @@ async function auditPage3BeforeSave(product) {
     if (detail < 3) problems.push(`细节图 ${detail}/3`);
 
     const ed = document.querySelector('#struct-textDesc .text-area-list-editor[contenteditable="true"]');
-    const hlCount = ed ? ed.querySelectorAll('li').length : 0;
+    const hlState = window.PoloHighlights?.inspect(document);
+    const hlCount = hlState?.items?.length || 0;
     const descList = Array.isArray(product?._highlightDescs) ? product._highlightDescs.filter(Boolean) : [];
-    if (descList.length > 0 && hlCount === 0) problems.push('卖点 0 条');
+    if (descList.length > 0 && (!hlCount || hlState?.state !== 'pass')) problems.push('卖点为空或尚未确认平台接收');
 
     // 与 fillFaqsPage3 同源（走 resolveFaqs）：否则"被语言过滤"会被当成"没填"
     // 平台自己的物流提示条：有未填项就记下来（箱规点不动多半源于此）
@@ -4001,6 +3956,9 @@ async function auditPage3BeforeSave(product) {
 
 async function saveDraft(product, opts = {}) {
     const results = [];
+    if(!window.PoloSaveStability)return ['❌ 保存保护模块未加载，请重载扩展'];
+    const savePageAtStart=location.href;
+    await window.PoloSaveStability.wait(document,{isCurrent:()=>location.href===savePageAtStart&&currentProduct===product});
     log('🖱️ 查找保存按钮...', 'info');
     let saveBtn = null;
     const allBtns = document.querySelectorAll('button');
@@ -4016,7 +3974,7 @@ async function saveDraft(product, opts = {}) {
         await sleep3(300);
         log('🖱️ 点击保存按钮...', 'info');
         const rect = saveBtn.getBoundingClientRect();
-        const response = await sendMessageRetry({
+        const response = await window.PoloSaveStability.request(()=>sendMessageRetry({
             action: 'savePublishProduct', row: product.row,
             taskId: product._publishTaskId || getTaskFromUrl(), fileKey: product._publishFileKey,
             // 商品 ID：保存后页面上才有 itemId，助手页点「已保存」可以一键复制它
@@ -4024,8 +3982,9 @@ async function saveDraft(product, opts = {}) {
             // 有缺项（FAQ/介绍模板/箱规/属性没填全）时照样保存，但要记成"未确认"，
             // 这样重跑时不会被当成"已保存过"跳过（真机：62/71/74/78 就是这么卡死的）。
             incomplete: opts.incomplete === true,
+            reviewCycle: opts.reviewCycle,
             x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2)
-        });
+        },0));
         if (response && response.ok) {
             if (response.verified === false) {
                 // 点到了保存，但页面上既没成功反馈也没报错：不能冒充"已自动保存"
@@ -4035,6 +3994,8 @@ async function saveDraft(product, opts = {}) {
                 log('✅ 平台已确认保存成功', 'success');
                 results.push('✅ 已保存');
             }
+        } else if(response?.unconfirmed) {
+            log('⚠️ '+response.error,'warn');results.push('⚠️ '+response.error);
         } else {
             // 明确失败（平台校验拒绝 / 按钮没点到）：用 error 级别，避免被当成"自动保存成功"
             log('❌ ' + (response?.error || '保存操作未完成'), 'error');
@@ -4045,6 +4006,35 @@ async function saveDraft(product, opts = {}) {
         results.push('⚠️ 未找到保存按钮');
     }
     return results;
+}
+
+// 保存后会重载，恢复必须先于批量页的“已保存/已预填”跳过分支。
+async function runSavedReviewPage3(product, opts = {}) {
+    if (!window.PoloSaveReviewRuntime) throw Error('保存复查模块未加载，请重载扩展');
+    if (typeof product._publishFileKey !== 'string') throw Error('缺少原商品文件身份，请重新加载商品数据');
+    if (!Number.isInteger(Number(product.row)) || Number(product.row) <= 0) throw Error('缺少有效商品行号');
+    return window.PoloSaveReviewRuntime.run(product, {
+        allowManual: !product._publishTaskId, ...opts, getProduct: () => currentProduct,
+        save: saveDraft, repair: (p, action) => window.poloRepairMissingPage3(p, action),
+        send: message => window.PoloSaveStability.request(() => sendMessageRetry(message, 0)),
+        wait: sleep3, log,
+        refreshQuality: () => window.PoloPage3Review.detectQuality(document, realClick),
+        hold: product._publishTaskId ? reason => window.PoloSaveStability.request(() => sendMessageRetry({
+            action: 'holdPublishReview', taskId: product._publishTaskId, row: product.row, reason
+        }, 0)) : undefined
+    });
+}
+
+async function saveAutomaticPage3(product, opts = {}) {
+    const state = await runSavedReviewPage3(product, { startNew: true });
+    return state?.phase === 'complete' ? ['✅ 已保存并复查通过'] : ['⚠️ 保存复查未通过，当前行保留'];
+}
+
+async function holdMissingReviewPage3(product) {
+    const reason = '当前行已有待复查草稿，但本页复查进度缺失；保留原草稿，不整页重填';
+    log('⚠️ ' + reason, 'warn');
+    await sendMessageRetry({ action: 'holdPublishReview', taskId: product._publishTaskId,
+        row: product.row, reason }, 0);
 }
 
 // ============================================================
@@ -4060,7 +4050,7 @@ async function saveDraft(product, opts = {}) {
 //   3. 多选择器降级查找选项，10轮轮询等待渲染
 //   4. pickCompanyIntroTemplate() 根据类目匹配模板关键词
 // ============================================================
-async function fillCompanyIntroTemplate(product) {
+async function fillCompanyIntroTemplate(product, opts = {}) {
     const results = [];
 
     const section = await scrollToSection('公司介绍', 6);
@@ -4211,8 +4201,11 @@ async function fillCompanyIntroTemplate(product) {
         results.push('⚠️ 公司介绍模板选择失败');
     }
 
-    const faqRes = await fillFaqsPage3(product);
-    results.push(...faqRes);
+    // 缺图修复时只选模板，不整组重写已有FAQ；需要时由检查层只补空项/缺项。
+    if (!opts.skipFaq) {
+        const faqRes = await fillFaqsPage3(product);
+        results.push(...faqRes);
+    }
 
     return results;
 }
@@ -4410,6 +4403,7 @@ function createPage3Panel() {
     const modeFillDropdownBtn = document.getElementById('polo-mode-fill-dropdown-btn');
     const saveButton = document.getElementById('polo-save-btn');
     saveButton.onclick = async () => {
+        if (window.PoloSaveReviewRuntime?.busy) { log('保存复查正在运行，请等待结束', 'warn'); return; }
         if (!currentProduct) { log('没有产品数据！', 'error'); return; }
         saveButton.disabled = true;
         try {
@@ -4552,6 +4546,7 @@ function createPage3Panel() {
     document.getElementById('polo-close').onclick = () => panel.remove();
 
     document.getElementById('polo-autofill-btn').onclick = async () => {
+        if (window.PoloSaveReviewRuntime?.busy) { log('保存复查正在运行，请等待结束', 'warn'); return; }
         if (!currentProduct) {
             log('没有产品数据！', 'error');
             return;
@@ -4561,6 +4556,11 @@ function createPage3Panel() {
         btn.style.opacity = '0.5';
         try {
             await ensureTabActive();
+            if (window.PoloSaveReviewRuntime?.has(currentProduct) && !window.PoloSaveReviewRuntime.proof(currentProduct)) {
+                log('已有保存复查进度，保留当前内容，不重新填入整页', 'warn');
+                await runSavedReviewPage3(currentProduct, { resumeOnly: true });
+                return;
+            }
             log('开始自动填写页3...');
             const results = await fillAllPage3(currentProduct);
                 // 只有真的填完（无 ⚠️/❌）才写预填标记；填失败就写会导致刷新后整页跳过
@@ -4584,37 +4584,18 @@ function createPage3Panel() {
             }
 
             let autoSaved = false;
-            if (hasProblems) {
-                // 有警告/失败：不自动保存，避免把填错的内容存出去，留人工核对
-                log('💡 请检查填写内容后，手动点击页面底部的保存按钮', 'warn');
-                const saveBtn = Array.from(document.querySelectorAll('button')).find(b =>
-                    (b.innerText || b.textContent || '').trim() === '保存' && b.offsetHeight > 0
-                );
-                if (saveBtn) {
-                    saveBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    log('🔍 已滚动到保存按钮位置', 'info');
-                }
-            } else {
-                // 全部填入成功：自动保存，保存成功后才上报完成
-                try {
-                    const saveResults = await saveDraft(currentProduct);
-                    const saveList = saveResults || [];
-                    const hardFail = saveList.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
-                    const saveFailed = saveList.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
-                    if (saveFailed) {
-                        // 明确失败给 error，仅"未确认"给 warn；都不打「✅ 已自动保存」
-                        log((hardFail ? '❌ ' : '⚠️ ') + '自动保存未完成：' + saveList.join('；') + '，请手动点击页面底部的保存按钮', hardFail ? 'error' : 'warn');
-                    } else {
-                        autoSaved = true;
-                        log('✅ 已自动保存', 'success');
-                    }
-                } catch (e) {
-                    log('⚠️ 自动保存异常: ' + e.message + '，请手动点击页面底部的保存按钮', 'warn');
-                }
+            try {
+                const saveList = await saveAutomaticPage3(currentProduct);
+                autoSaved = saveList.length > 0 && !saveList.some(r => /^[⚠️❌]/u.test(String(r).trim()));
+                for (const r of saveList) log(r, String(r).startsWith('❌') ? 'error' : autoSaved ? 'success' : 'warn');
+                if (autoSaved) log('✅ 已自动保存并复查通过', 'success');
+                else log('⚠️ 自动保存未完成：' + saveList.join('；') + '；当前行保留，请先核对保存状态', saveList.some(r => String(r).startsWith('❌')) ? 'error' : 'warn');
+            } catch (e) {
+                log('⚠️ 自动保存异常: ' + e.message + '；当前行保留，请先核对保存状态', 'warn');
             }
 
             const rowNum = getRowFromUrl();
-            if (rowNum !== null) {
+            if (rowNum !== null && autoSaved) {
                 // 填写完成 ≠ 保存完成：只上报 publishFilled（携带任务标识），不写任何已保存标记
                 log(autoSaved
                     ? `🔄 批量模式：第${rowNum}行已自动保存`
@@ -4622,14 +4603,16 @@ function createPage3Panel() {
                 await sendMessageRetry({
                     action: 'publishFilled',
                     row: rowNum,
-                    taskId: getTaskFromUrl()
+                    taskId: getTaskFromUrl(),
+                    reviewCycle: window.PoloSaveReviewRuntime?.proof(currentProduct)
                 });
             }
         } catch (e) {
             log('❌ 填入失败: ' + e.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.style.opacity = '1';
         }
-        btn.disabled = false;
-        btn.style.opacity = '1';
     };
 
     if (modeFillBtn) {
@@ -4699,13 +4682,14 @@ function createPage3Panel() {
     };
 
     const menu = document.getElementById('polo-action-menu');
-    window.PoloPage3Review?.mount(() => currentProduct, async (product, action) => {
+    window.poloRepairMissingPage3 = async (product, action) => {
         await ensureTabActive();
         const fn = actionMap[action];
         if (!fn) throw new Error('不支持的修复步骤：' + action);
-        const results = await fn(product, 'overwrite');
+        const results = await fn(product, 'overwrite', {missingOnly:true,isCurrent:()=>currentProduct===product});
         for (const r of results || []) log(r, /^[⚠️❌]/u.test(r) ? 'warn' : 'info');
-    });
+    };
+    window.PoloPage3Review?.mount(() => currentProduct, window.poloRepairMissingPage3);
     // 动作有 20 多项，单列会拉成一条长条 → 两列网格
     menu.style.display = 'none';
     menu.style.gridTemplateColumns = 'repeat(2, minmax(0, 1fr))';
@@ -4721,6 +4705,7 @@ function createPage3Panel() {
         el.onmouseleave = () => { el.style.background = 'transparent'; };
         el.onclick = async (e) => {
             e.stopPropagation();
+            if (window.PoloSaveReviewRuntime?.busy) { log('保存复查正在运行，请等待结束', 'warn'); return; }
             menu.style.display = 'none';
             if (!currentProduct) {
                 log('没有产品数据！', 'error');
@@ -4884,6 +4869,41 @@ async function loadBatchProduct(rowNum) {
             updateProductInfo(currentProduct);
             log('✓ 从批量数据加载产品: 行' + rowNum, 'success');
 
+            // 平台保存重载后，先恢复保存复查；不能被旧保存记录跳过或整页重新填入。
+            if (window.PoloSaveReviewRuntime?.has(currentProduct)) {
+                await ensureTabActive();
+                if (!await waitPublishFormReady(60000)) throw Error('保存后表单未就绪，保留当前行');
+                const resumed = await runSavedReviewPage3(currentProduct, { resumeOnly: true });
+                if (resumed?.phase === 'complete') {
+                    await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(),
+                        reviewCycle: window.PoloSaveReviewRuntime.proof(currentProduct), note: 'saved+reviewed' });
+                }
+                return true;
+            }
+
+            if (resp.reviewPending === true) {
+                await holdMissingReviewPage3(currentProduct);
+                return true;
+            }
+
+            // 已保存行必须先判、并且要"上报跳过"。
+            // 为什么放在前面：填完即自动保存后，每一行都会进保存记录；若先走
+            // autoFillAllowed === false 那条分支，就会静默 return、不上报，
+            // 队列停在当前行直到 10 分钟超时（同文件同几行重发时 100% 命中）。
+            const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows', taskId: getTaskFromUrl() });
+            const savedEntry = (uploadedResp && uploadedResp.ok && uploadedResp.rows) ? uploadedResp.rows[rowNum] : null;
+            if (savedEntry?.reviewPending === true) {
+                await holdMissingReviewPage3(currentProduct);
+                return true;
+            }
+            // 未确认的保存（unverified）不算"已保存过"：草稿重复保存 ≠ 重复发布，重发时允许重填核对。
+            if (savedEntry && savedEntry.unverified !== true) {
+                log(`⚠️ 第${rowNum}行已保存过，跳过自动填入并推进队列`, 'warn');
+                await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true, note: 'skip-already-saved' });
+                return false;
+            }
+            if (savedEntry) log(`⚠️ 第${rowNum}行上次保存未确认，重新填入由平台复核（不当作已保存跳过）`, 'warn');
+
             let alreadyPrefilled = false;
             const completedTask = currentProduct._publishTaskId || getTaskFromUrl() || currentProduct._publishFileKey || '';
             try {
@@ -4896,20 +4916,6 @@ async function loadBatchProduct(rowNum) {
                 log('该行被重新派发，已清除预填标记，重新自动填入', 'info');
                 alreadyPrefilled = false;
             }
-            // 已保存行必须先判、并且要"上报跳过"。
-            // 为什么放在前面：填完即自动保存后，每一行都会进保存记录；若先走
-            // autoFillAllowed === false 那条分支，就会静默 return、不上报，
-            // 队列停在当前行直到 10 分钟超时（同文件同几行重发时 100% 命中）。
-            const uploadedResp = await sendMessageRetry({ action: 'getUploadedRows', taskId: getTaskFromUrl() });
-            const savedEntry = (uploadedResp && uploadedResp.ok && uploadedResp.rows) ? uploadedResp.rows[rowNum] : null;
-            // 未确认的保存（unverified）不算"已保存过"：草稿重复保存 ≠ 重复发布，重发时允许重填核对。
-            if (savedEntry && savedEntry.unverified !== true) {
-                log(`⚠️ 第${rowNum}行已保存过，跳过自动填入并推进队列`, 'warn');
-                await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(), skipped: true, note: 'skip-already-saved' });
-                return false;
-            }
-            if (savedEntry) log(`⚠️ 第${rowNum}行上次保存未确认，重新填入由平台复核（不当作已保存跳过）`, 'warn');
-
             // 有预填标记、但这一行没有任何保存记录 → 说明上次是"填了没存"或"填失败"，
             // 不能当成已完成：清掉标记重新填（否则草稿里就是一片空白）。
             if (alreadyPrefilled && !savedEntry && resp.autoFillAllowed !== false) {
@@ -4971,46 +4977,16 @@ async function loadBatchProduct(rowNum) {
             }
 
                 let autoSaved = false;
-                if (hasErrors) {
-                    // 有硬失败：不自动保存，避免把填错的内容存出去，留人工核对
-                    log('💡 有填失败项，已跳过自动保存；请检查后手动点击页面底部的保存按钮', 'warn');
-                    const saveBtn = Array.from(document.querySelectorAll('button')).find(b => 
-                        (b.innerText || b.textContent || '').trim() === '保存' && b.offsetHeight > 0
-                    );
-                    if (saveBtn) {
-                        saveBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        log('🔍 已滚动到保存按钮位置', 'info');
-                    }
-                } else {
-                    // 全部填入成功：自动保存，保存成功后才上报完成
-                    try {
-                        // "内容不完整"只认两类：硬失败 ❌，或关键项（箱规/分组/主图/细节图）没成功。
-                        // 以前把任意 ⚠️ 都算不完整，结果几乎每行都被标"未确认"（真机 50 行里 44 行），
-                        // 明明保存成功却看着像没保存。
-                        const keyMissing = ['箱规', '商品分组', '主图', '细节图'].filter(name =>
-                            !results.some(r => String(r == null ? '' : r).trim().startsWith('✅') && String(r).includes(name)));
-                        let auditProblems = [];
-                        try { auditProblems = await auditPage3BeforeSave(currentProduct); } catch (_) { auditProblems = []; }
-                        if (auditProblems.length) {
-                            log('⚠️ 保存前自检未通过：' + auditProblems.join(' / ') + '（本行记为未确认，重跑会重填）', 'warn');
-                            results.push('⚠️ 保存前自检：' + auditProblems.join(' / '));
-                        }
-                        const incomplete = hasErrors || keyMissing.length > 0 || auditProblems.length > 0;
-                        if (keyMissing.length) log(`⚠️ 关键项未完成：${keyMissing.join(' / ')}，本行记为未确认（重跑会重填）`, 'warn');
-                        const saveResults = await saveDraft(currentProduct, { incomplete });
-                        const saveList = saveResults || [];
-                        const hardFail = saveList.some(r => /^❌/u.test(String(r == null ? '' : r).trim()));
-                        const saveFailed = saveList.some(r => /^[⚠️❌]/u.test(String(r == null ? '' : r).trim()));
-                        if (saveFailed) {
-                            // 明确失败给 error，仅"未确认"给 warn；都不打「✅ 已自动保存」
-                            log((hardFail ? '❌ ' : '⚠️ ') + '自动保存未完成：' + saveList.join('；') + '，请手动点击页面底部的保存按钮', hardFail ? 'error' : 'warn');
-                        } else {
-                            autoSaved = true;
-                            log('✅ 已自动保存' + (hasProblems ? '（有警告项，已保存，建议抽查）' : ''), 'success');
-                        }
-                    } catch (e) {
-                        log('⚠️ 自动保存异常: ' + e.message + '，请手动点击页面底部的保存按钮', 'warn');
-                    }
+                try {
+                    // 保留原保存前审查，并由统一检查器复核实际表单，不凭填入日志重填。
+                    const auditProblems = await auditPage3BeforeSave(currentProduct);
+                    if (auditProblems.length) log('⚠️ 保存前审查：' + auditProblems.join(' / ') + '；交由单项补缺复核', 'warn');
+                    const saveList = await saveAutomaticPage3(currentProduct);
+                    autoSaved = saveList.length > 0 && !saveList.some(r => /^[⚠️❌]/u.test(String(r).trim()));
+                    for (const r of saveList) log(r, autoSaved ? 'success' : 'warn');
+                    if (!autoSaved) log('⚠️ 自动保存未完成；当前行保留，请先核对保存状态', 'warn');
+                } catch (e) {
+                    log('⚠️ 自动保存异常: ' + e.message + '；当前行保留，请先核对保存状态', 'warn');
                 }
 
                 log(autoSaved
@@ -5018,8 +4994,8 @@ async function loadBatchProduct(rowNum) {
                     : `🔄 批量模式：第${rowNum}行填写完成，待核对后手动保存`, autoSaved ? 'success' : 'warn');
                 try {
                     // note 会落进后台日志：事后能分清这一行是「填完就保存了」还是「填完没保存」
-                    await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(),
-                        note: autoSaved ? 'filled+autosaved' : 'filled-no-save' });
+                    if (autoSaved) await sendMessageRetry({ action: 'publishFilled', row: rowNum, taskId: getTaskFromUrl(),
+                        reviewCycle: window.PoloSaveReviewRuntime?.proof(currentProduct), note: 'saved+reviewed' });
                 } finally {
                     stopHeartbeat();
                 }
@@ -5049,6 +5025,20 @@ function backfillRowItemId() {
     } catch (_) {}
 }
 
+// 普通手动页不会启动批量；仅恢复这张标签中已经开始的保存复查。
+async function resumeManualSavedReviewPage3() {
+    try {
+        for (let i = 0; i < 40 && !currentProduct; i++) await sleep3(250);
+        if (!currentProduct || !window.PoloSaveReviewRuntime?.has(currentProduct)) return;
+        // 手动页没有待补发的队列完成消息；已完成的旧轮次不能套在一次新的独立保存上。
+        // 批量页仍保留complete恢复，用来补发可能因重载丢失的最终完成消息。
+        if (window.PoloSaveReviewRuntime.proof(currentProduct)) return;
+        await ensureTabActive();
+        if (!await waitPublishFormReady(60000)) throw Error('保存后表单未就绪');
+        await runSavedReviewPage3(currentProduct, { resumeOnly: true });
+    } catch (e) { log('保存后复查未完成：' + e.message, 'warn'); }
+}
+
 function initPage3() {
     if (top !== self) return;
     createPage3Panel();
@@ -5061,6 +5051,7 @@ function initPage3() {
         loadBatchProduct(rowNum);
     } else {
         initStorageListener(false);
+        resumeManualSavedReviewPage3();
     }
 }
 

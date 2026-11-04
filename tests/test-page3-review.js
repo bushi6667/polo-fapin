@@ -30,6 +30,21 @@ const doc = text => ({querySelectorAll:()=>[{textContent:text,closest:()=>null}]
     let hiddenWrites=0;ctx.fillAttributeField=async()=>{hiddenWrites++;};
     await checks({},{}).find(x=>x.action==='fill_attributes').repair();
     assert.equal(hiddenWrites,0);
+    const attributeControls=[{value:''}];
+    ctx.findFieldContainer=()=>({querySelectorAll:()=>attributeControls});
+    await checks({},{}).find(x=>x.action==='fill_attributes').repair();
+    assert.equal(hiddenWrites,1,'visible empty attribute must be repaired');
+    attributeControls[0].value='Custom fabric';
+    await checks({},{}).find(x=>x.action==='fill_attributes').repair();
+    assert.equal(hiddenWrites,1,'existing custom attribute must remain');
+    attributeControls[0].value='请选择';
+    assert.equal(presence('fill_attributes',{},{}).state,'fail','placeholder is missing content, not missing control');
+    await checks({},{}).find(x=>x.action==='fill_attributes').repair();
+    assert.equal(hiddenWrites,2,'placeholder attribute must be repaired');
+    attributeControls.length=0;
+    await checks({},{}).find(x=>x.action==='fill_attributes').repair();
+    assert.equal(hiddenWrites,2,'missing controls must not trigger repair');
+
     const faqDoc={querySelector:()=>null,querySelectorAll:()=>[{querySelector:s=>({value:s.includes('question')?'已有自定义问题':''})}]};
     assert.equal(presence('fill_faqs',faqDoc,{}).state,'unknown');
     const question={value:'自定义问题',scrollIntoView(){}},answer={value:'',scrollIntoView(){}};
@@ -76,6 +91,23 @@ const doc = text => ({querySelectorAll:()=>[{textContent:text,closest:()=>null}]
     ctx.resolveFaqs=()=>({use:[]});
     const partialImages={querySelector:()=>({querySelectorAll:()=>[{querySelector:()=>({}),contains:()=>false}]}),querySelectorAll:()=>[]};
     assert.equal(presence('fill_images',partialImages,{}).state,'fail');
+    // 细节图：商品介绍模板未选时必须明确报告，不能笼统“未定位”，也不能自动选模板。
+    const detailSection={textContent:'商品介绍模板请选择',querySelector:()=>({textContent:''})};
+    const detailDoc={querySelectorAll:sel=>sel==='[role="all"]'?[detailSection]:[],querySelector:()=>null};
+    const detailMissing=presence('fill_detail_images',detailDoc,{});
+    assert.equal(detailMissing.state,'fail');
+    assert.match(detailMissing.detail,/商品介绍模板未选择/);
+    detailSection.querySelector=()=>({textContent:'通用'});
+    const detailNoArea=presence('fill_detail_images',detailDoc,{});
+    assert.equal(detailNoArea.state,'unknown');
+    assert.match(detailNoArea.detail,/图片区域未定位/);
+    // 真机：商品介绍模板未选，但旧版商详已有 3 张细节图；已有图片应保留并判通过，不能误报缺失。
+    const detailGallery={textContent:'细节图 Detail shot',querySelector:()=>null,querySelectorAll:()=>[1,2,3].map(()=>({querySelector:()=>({}),contains:()=>false}))};
+    detailSection.querySelector=()=>({textContent:''});
+    const detailHasImagesDoc={querySelectorAll:sel=>sel==='[role="all"]'?[detailSection]:sel==='.gallery-item-container'?[detailGallery]:[],querySelector:()=>null};
+    const detailHasImages=presence('fill_detail_images',detailHasImagesDoc,{});
+    assert.equal(detailHasImages.state,'pass','已有3张细节图不能被未选模板误判为缺失');
+    assert.match(detailHasImages.detail,/已有3张/);
     ctx.buildAttributeFields=()=>({required:[{lbl:'材质',val:'Cotton'}],optional:[{lbl:'产品类型',val:'Formal'}]});
     const material={value:'用户自定义面料'};
     ctx.findFieldContainer=(_id,label)=>label==='材质'?{querySelectorAll:()=>[material]}:null;
@@ -87,6 +119,21 @@ const doc = text => ({querySelectorAll:()=>[{textContent:text,closest:()=>null}]
     assert.equal(presence('fill_logistics_template',serviceDoc,{}).state,'pass');
     serviceRoot.querySelectorAll=()=>[{checked:false}];
     assert.equal(presence('fill_logistics_template',serviceDoc,{}).state,'fail');
+    const placeholderTrigger={textContent:'模板请选择\u00a0'};
+    let selectedTemplate=null;
+    const templateArea={querySelector:s=>s.includes('em[title]')?selectedTemplate:placeholderTrigger,querySelectorAll:()=>[]};
+    const templateDoc={querySelector:()=>templateArea,querySelectorAll:()=>[]};
+    assert.equal(presence('fill_logistics_template',templateDoc,{}).state,'fail','模板前缀加请选择不是已选模板');
+    placeholderTrigger.textContent='模板Search typed but not selected';
+    assert.equal(presence('fill_logistics_template',templateDoc,{}).state,'fail','搜索镜像文字不是已选模板');
+    selectedTemplate={textContent:'通用'};
+    assert.equal(presence('fill_logistics_template',templateDoc,{}).state,'pass');
+    selectedTemplate=null;templateArea.querySelectorAll=()=>[{checked:true}];
+    assert.equal(presence('fill_logistics_template',templateDoc,{}).state,'pass','保存后名称消失但已勾内容应保留');
+    templateArea.getBoundingClientRect=()=>({height:0});
+    assert.equal(presence('fill_logistics_template',templateDoc,{}).state,'unknown');
+    const emptyGroupDoc={querySelector:()=>({value:'',closest:()=>({querySelector:()=>({textContent:'请选择分组'})})})};
+    const emptyGroup=presence('fill_group',emptyGroupDoc,{});assert.equal(emptyGroup.state,'fail');assert.match(emptyGroup.detail,/分组为空/);
     const input=v=>({value:v,scrollIntoView(){},closest:()=>null});
     const quantities=['50','500','2000','5000'].map(input),prices=['','99','88','77'].map(input);
     const ladderDoc={querySelectorAll:s=>s.includes('input-quantity')?quantities:prices};
@@ -112,21 +159,157 @@ const doc = text => ({querySelectorAll:()=>[{textContent:text,closest:()=>null}]
     assert.equal(clicks,1);
     await assert.rejects(detect(qualityDoc,async()=>{},{wait:async()=>{},attempts:2}),/超时/);
     await assert.rejects(detect({querySelectorAll:()=>[]},async()=>{},{wait:async()=>{},attempts:2}),/未找到/);
+    // 箱规守卫：只有物流证明为空才拦截；控件未定位(unknown)不得误拦，且必须保持 missingOnly。
+    const measureCol = (name, value) => ({ querySelector: sel => sel === '.next-row:first-child' ? { textContent: name } : { value } });
+    const measureArea = { getBoundingClientRect: () => ({ height: 100 }), querySelectorAll: () => [measureCol('长', '16'), measureCol('宽', '16'), measureCol('高', '4')] };
+    const logisticsDoc = weight => ({
+        querySelector: sel => sel.includes('pkgWeight') ? { value: weight } : null,
+        querySelectorAll: sel => sel === '.component-pkgMeasure' ? [measureArea] : []
+    });
+    assert.equal(presence('fill_logistics', logisticsDoc(''), {}).state, 'fail');
+    assert.equal(presence('fill_logistics', logisticsDoc('0.2'), {}).state, 'unknown');
+    let boxCalls = 0, boxMissingOnly = null;
+    ctx.fillBoxRule = async (product, mode, opts) => { boxCalls++; boxMissingOnly = opts && opts.missingOnly; };
+    const failBox = checks({}, logisticsDoc('')).find(x => x.action === 'fill_box_rule');
+    await assert.rejects(failBox.repair({}), /物流为空/);
+    assert.equal(boxCalls, 0, 'proven empty logistics must block box repair');
+    const unknownBox = checks({}, logisticsDoc('0.2')).find(x => x.action === 'fill_box_rule');
+    await unknownBox.repair({});
+    assert.equal(boxCalls, 1, 'unlocated logistics controls must not block box repair');
+    assert.equal(boxMissingOnly, true, 'box repair must remain missingOnly');
+    // 箱规读取：兼容真机容器 #boxPackaging，并以主页面已关联回读为准。
+    const boxNode = text => ({ textContent: text, getBoundingClientRect: () => ({ height: 100 }) });
+    const boxDoc = text => ({ querySelector: () => null, querySelectorAll: sel => sel.includes('boxPackaging') ? [boxNode(text)] : [] });
+    ctx.getAssociatedBoxRule = () => null;
+    assert.equal(presence('fill_box_rule', boxDoc('箱规 添加或关联箱规'), {}).state, 'fail');
+    assert.equal(presence('fill_box_rule', boxDoc('50*40*30 25件 取消关联'), {}).state, 'pass');
+    ctx.getAssociatedBoxRule = () => '50*40*30 25件';
+    assert.equal(presence('fill_box_rule', boxDoc('箱规 添加或关联箱规'), {}).state, 'pass', 'main page associated rule is authoritative');
+    ctx.getAssociatedBoxRule = () => null;
+    assert.equal(presence('fill_box_rule', boxDoc('箱规模版异常'), {}).state, 'unknown');
+    // 卖点：列表自洽但条数少于来源时必须报缺失；同条数自定义替换不误报。
+    const originalInspect = ctx.window.PoloHighlights;
+    ctx.parseHighlights = () => [{desc_en:'A'},{desc_en:'B'},{desc_en:'C'},{desc_en:'D'},{desc_en:'E'}];
+    ctx.window.PoloHighlights = {inspect:()=>({state:'pass',detail:'平台计数一致（4条）',items:['A','B','C','D']})};
+    const missingHighlights = presence('fill_highlights',{}, {highlights:''});
+    assert.equal(missingHighlights.state,'fail','条数少于来源必须判缺失');
+    assert.match(missingHighlights.detail,/缺少1条来源卖点/);
+    ctx.window.PoloHighlights = {inspect:()=>({state:'pass',detail:'平台计数一致（5条）',items:['A','B','C','D','X']})};
+    assert.equal(presence('fill_highlights',{}, {highlights:''}).state,'pass','同条数自定义替换不误报');
+    // 卖点补缺只追加缺失来源条目，保留页面已有与自定义文案。
+    let highlightWrites = [];
+    ctx.window.PoloHighlights = {inspect:()=>({state:'pass',detail:'',items:['A','B','C','D']}),write:async(_doc,values,opts)=>{highlightWrites.push({values,opts});}};
+    const highlightItem = checks({highlights:''},{}).find(x=>x.action==='fill_highlights');
+    await highlightItem.repair({});
+    assert.deepEqual(highlightWrites[0].values,['E']);
+    assert.equal(highlightWrites[0].opts.mode,'append','补缺失必须追加而不是整组覆盖');
+    ctx.window.PoloHighlights = {inspect:()=>({state:'pass',detail:'',items:['A','B','C','D','E']}),write:async()=>{throw Error('不应写入');}};
+    await highlightItem.repair({});
+    ctx.window.PoloHighlights = {inspect:()=>({state:'pass',detail:'',items:[]}),write:async()=>{throw Error('不应写入');}};
+    ctx.parseHighlights = () => [];
+    await assert.rejects(highlightItem.repair({}),/缺少卖点来源/);
+    if (originalInspect) ctx.window.PoloHighlights = originalInspect;
+    else delete ctx.window.PoloHighlights;
+    delete ctx.parseHighlights;
+    // 颜色整行缺失：剩余行都非空也不能判通过。
+    const colorDoc = n => ({querySelectorAll:s=>s==='.posting-field-color-select input[role="colorCombobox"]'?Array.from({length:n},(_,i)=>({value:['White','Black','Gray','Navy'][i]})):[]});
+    assert.equal(presence('fill_colors',colorDoc(4),{}).state,'pass');
+    const shortColors = presence('fill_colors',colorDoc(3),{});
+    assert.equal(shortColors.state,'fail');assert.match(shortColors.detail,/颜色仅3行/);
+    const dupColorDoc={querySelectorAll:s=>s==='.posting-field-color-select input[role="colorCombobox"]'?['White','White','Gray','Navy'].map(v=>({value:v})):[]};
+    const dupColors=presence('fill_colors',dupColorDoc,{});
+    assert.equal(dupColors.state,'fail');assert.match(dupColors.detail,/颜色名称重复/);
+    const manyColorDoc={querySelectorAll:s=>s==='.posting-field-color-select input[role="colorCombobox"]'?['White','Black','Gray','Navy','Red'].map(v=>({value:v})):[]};
+    assert.equal(presence('fill_colors',manyColorDoc,{}).state,'fail');
+    // 尺码部分缺失：只补未选，不取消已选。
+    const sizePresenceDoc = checked => ({querySelectorAll:s=>s==='.next-checkbox-wrapper'?['S','M','L','XL','2XL','3XL'].map(t=>({classList:{contains:c=>c==='checked'&&checked.includes(t)},querySelector:q=>q==='.next-checkbox-label'?{textContent:t}:null,closest:()=>null})):[]});
+    assert.equal(presence('fill_sizes',sizePresenceDoc(['S','M','L','XL','2XL','3XL']),{}).state,'pass');
+    const partialSizes = presence('fill_sizes',sizePresenceDoc(['S','M','L','XL']),{});
+    assert.equal(partialSizes.state,'fail');assert.match(partialSizes.detail,/缺少尺码/);
+    assert.equal(presence('fill_sizes',sizePresenceDoc([]),{}).state,'fail');
+    // XXL 与 2XL 视为同一档：只认页面实际写法，避免整码假通过。
+    const sizeXxlDoc = checked => ({querySelectorAll:s=>s==='.next-checkbox-wrapper'?['S','M','L','XL','XXL','3XL'].map(t=>({classList:{contains:c=>c==='checked'&&checked.includes(t)},querySelector:q=>q==='.next-checkbox-label'?{textContent:t}:null,closest:()=>null})):[]});
+    assert.equal(presence('fill_sizes',sizeXxlDoc(['S','M','L','XL','XXL','3XL']),{}).state,'pass');
+    const missXxl = presence('fill_sizes',sizeXxlDoc(['S','M','L','XL','3XL']),{});
+    assert.equal(missXxl.state,'fail');assert.match(missXxl.detail,/2xl/);
+    // 商品介绍有多个区块：占位区块在前、真实选中区块在后时，不得误判模板未选。
+    const placeholderSection={textContent:'商品介绍模板请选择',querySelector:()=>({textContent:''})};
+    const selectedSection={textContent:'商品介绍模板通用',querySelector:()=>({textContent:'通用'})};
+    const multiSectionDoc={querySelectorAll:sel=>sel==='[role="all"]'?[placeholderSection,selectedSection]:[],querySelector:()=>null};
+    const multiDetail=presence('fill_detail_images',multiSectionDoc,{});
+    assert.equal(multiDetail.state,'unknown','真实选中模板后不应再报模板未选择');
+    assert.match(multiDetail.detail,/图片区域未定位/);
     assert(checks({},doc('商品质量助手 5.0')).length>13);
     assert(checks({},doc('商品质量助手 4.9')).length>13);
-    // 真实主图补缺暴露模板副作用：缺数据也不得调用整表模板或物流重置。
-    for(const action of ['fill_size_template','fill_sizes','fill_box_rule']) {
-        const item=checks({},{}).find(x=>x.action===action);
-        assert.equal(item.repair,false,action+' must never use destructive legacy repair');
-        let calls=0;
-        await run([{...item,prepare:undefined,read:()=>result(false,'缺项')}],async()=>{calls++;},()=>{});
-        assert.equal(calls,0);
-    }
+    // 图片组只能按自己的标题认定，不能被隐藏菜单中的另一个组名冒充。
+    const makeCompanyGallery=(label,hidden='',image=true)=>({textContent:label+hidden,querySelector:selector=>selector.includes('header-en-name')?{textContent:label}:image?{}:null});
+    const companyPresenceText={value:'Existing company text'};
+    let companyPresenceGroups=[makeCompanyGallery('Company overview',' Customization capabilities'),makeCompanyGallery('Extended company profile')];
+    const companyPresenceDoc={querySelector:selector=>selector==='#struct-companyDesc textarea'?companyPresenceText:selector==='#detail-company-introduction-card'?{querySelectorAll:()=>companyPresenceGroups}:null,querySelectorAll:()=>[]};
+    assert.equal(ctx.window.PoloPage3Review.presence('fill_company_intro_template',companyPresenceDoc,{}).state,'fail');
+    companyPresenceGroups.push(makeCompanyGallery('Customization capabilities','',false));
+    assert.equal(ctx.window.PoloPage3Review.presence('fill_company_intro_template',companyPresenceDoc,{}).state,'fail');
+    companyPresenceGroups[2]=makeCompanyGallery('Customization capabilities');
+    assert.equal(ctx.window.PoloPage3Review.presence('fill_company_intro_template',companyPresenceDoc,{}).state,'pass');
+    companyPresenceText.value='';
+    assert.equal(ctx.window.PoloPage3Review.presence('fill_company_intro_template',companyPresenceDoc,{}).state,'fail');
+    companyPresenceGroups=[{textContent:'Company overview Customization capabilities Extended company profile',querySelector:()=>null}];
+    assert.equal(ctx.window.PoloPage3Review.presence('fill_company_intro_template',companyPresenceDoc,{}).state,'unknown');
+    // 公司介绍：委托平台原回调的局部合并模块，不能再重选整个模板。
+    let companyCalls=0;
+    const companyDoc=doc('company');
+    ctx.fillCompanyIntroTemplate=async()=>{throw Error('禁止整套模板替换');};
+    ctx.window.PoloReviewCompany={repair:async(actualDoc,product,options)=>{
+        companyCalls++;assert.equal(actualDoc,companyDoc);assert.equal(product.category,'Shirt');assert.equal(options.isCurrent(),true);
+    }};
+    const companyItem=checks({category:'Shirt'},companyDoc).find(x=>x.action==='fill_company_intro_template');
+    await companyItem.repair({isCurrent:()=>true});
+    assert.equal(companyCalls,1);
+    delete ctx.window.PoloReviewCompany;
+    await assert.rejects(async()=>companyItem.repair({}),/公司介绍补缺模块未加载/);
+    // 细节图：复用原 fillDetailTemplate 选模板，但跳过整组卖点重写，只追加缺失条目。
+    let detailCalls=0,detailUploads=0,detailHighlights=0,detailOptions=null,hlWrites=[];
+    const detailRepairSelected={textContent:''};
+    ctx.fillDetailTemplate=async(_product,options)=>{detailCalls++;detailOptions=options;detailRepairSelected.textContent='通用';};
+    ctx.requestPublicationUpload=async()=>{detailUploads++;return {count:3};};
+    ctx.fillHighlightsPage3=async()=>{detailHighlights++;return ['✅ 卖点'];};
+    let inspectCalls=0;
+    ctx.window.PoloHighlights={inspect:()=>({state:'pass',detail:'',items:inspectCalls++===0?['A','B']:['A']}),write:async(_doc,values,opts)=>{hlWrites.push({values,opts});}};
+    const detailRepairSection={textContent:'商品介绍模板',querySelector:()=>detailRepairSelected};
+    const detailRepairDoc={querySelector:()=>null,querySelectorAll:sel=>sel==='[role="all"]'?[detailRepairSection]:[]};
+    const detailItem=checks({},detailRepairDoc).find(x=>x.action==='fill_detail_images');
+    await detailItem.repair({});
+    assert.equal(detailCalls,1,'detail repair must select template via original flow');
+    assert.equal(detailOptions.skipHighlights,true,'detail repair must not overwrite existing highlights');
+    assert.equal(detailUploads,1,'detail images uploaded after template');
+    assert.equal(detailHighlights,0,'不得调用整组卖点填入');
+    assert.deepEqual(hlWrites[0].values,['A','B'],'模板重排卖点时按原快照还原');
+    assert.equal(hlWrites[0].opts.mode,'overwrite','还原已有卖点用快照，不是来源覆盖');
+    // 原卖点为空时，才追加来源缺失条目。
+    ctx.parseHighlights=()=>[{desc_en:'C'}];
+    ctx.window.PoloHighlights.inspect=()=>({state:'pass',detail:'',items:[]});
+    detailRepairSelected.textContent='';
+    await detailItem.repair({});
+    assert.deepEqual(hlWrites.at(-1).values,['C'],'无原卖点时才补来源');
+    assert.equal(hlWrites.at(-1).opts.mode,'append');
+    delete ctx.parseHighlights;
+    delete ctx.window.PoloHighlights;
     const sizeDoc=(cells,visible=true)=>({querySelectorAll:()=>[{getBoundingClientRect:()=>({height:visible?100:0}),querySelectorAll:()=>cells.map(textContent=>({textContent,closest:()=>null}))}]});
     assert.equal(presence('fill_size_template',sizeDoc([]),{}).state,'unknown');
     assert.equal(presence('fill_size_template',sizeDoc(['2 XL','3 XL']),{}).state,'fail');
     assert.equal(presence('fill_size_template',sizeDoc(['43 - 44']),{}).state,'pass');
     assert.equal(presence('fill_size_template',sizeDoc(['43'],false),{}).state,'unknown');
+    const measurement={getAttribute:()=> 'shoulder',querySelectorAll:()=>[{value:''}]};
+    const measuredArea={querySelectorAll:s=>s==='td[required][name]'?[measurement]:[{textContent:'46 - 48'}]};
+    const measuredDoc={querySelectorAll:()=>[measuredArea]};
+    assert.equal(presence('fill_size_template',measuredDoc,{}).state,'fail','EU codes do not prove measurements');
+    measurement.querySelectorAll=()=>[{value:'43'},{value:'44'}];
+    assert.equal(presence('fill_size_template',measuredDoc,{}).state,'pass');
+    measurement.querySelectorAll=()=>[{value:'43'},{value:''}];
+    assert.equal(presence('fill_size_template',measuredDoc,{}).state,'fail','range endpoints must both exist');
+    let readonlyWrites=0;
+    await run([{label:'空字段',action:'x',read:()=>result(false,'空'),repair:async()=>{readonlyWrites++;}}],async()=>{readonlyWrites++;},()=>{},{readOnly:true});
+    assert.equal(readonlyWrites,0,'read-only must never invoke repair');
     let fixes=0, value=false;
     const items=[{label:'缺项',action:'x',read:()=>result(value,'值')},{label:'未知',action:'y',read:()=>result(null,'加载中')},{label:'正常',action:'z',read:()=>result(true,'正常')}];
     const rows=await run(items,async action=>{assert.equal(action,'x');fixes++;value=true;},()=>{});
@@ -141,5 +324,24 @@ const doc = text => ({querySelectorAll:()=>[{textContent:text,closest:()=>null}]
     const failed=await run([{label:'失败',action:'x',read:()=>result(false,'不符')}],async()=>{throw Error('失败');},()=>{});
     assert.equal(failed[0].after.state,'unknown');
     assert(!fs.readFileSync(path.join(__dirname,'../chrome_extension/content/page3-review.js'),'utf8').includes("action: 'publishFilled'"));
+    // 检查入口必须先激活后台标签，避免节流/懒渲染把已有内容读成缺项。
+    let activated = 0;
+    ctx.ensureTabActive = async () => { activated++; };
+    ctx.location = { href: 'https://post.alibaba.com/product/publish.htm' };
+    const save = { after() {} };
+    const reviewBtn = { dataset: {}, style: {}, disabled: false, setAttribute() {}, removeAttribute() {}, getAttribute() { return null; } };
+    const reviewOut = { style: {}, textContent: '', setAttribute() {} };
+    ctx.document = {
+        getElementById: id => id === 'polo-save-btn' ? save : null,
+        createElement: tag => tag === 'button' ? reviewBtn : reviewOut,
+        querySelector: () => null,
+        querySelectorAll: () => []
+    };
+    ctx.window.PoloReviewControls = { mount: (doc, output, items, execute) => { ctx.__executeReview = execute; } };
+    const fixedProduct = { row: 2 };
+    ctx.window.PoloPage3Review.mount(() => fixedProduct, async () => {});
+    await ctx.__executeReview({ readOnly: true, only: 'fill_title' });
+    assert.equal(activated, 1, 'review entry must activate the page before reading');
+    assert.match(reviewOut.textContent, /仅检查，不填入/);
     console.log('PASS page3 review: score branching, targeted repair, reread, unknown and errors');
 })().catch(e=>{console.error(e);process.exitCode=1;});

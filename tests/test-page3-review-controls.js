@@ -1,0 +1,5 @@
+const assert=require('assert/strict'),fs=require('fs'),vm=require('vm'),path=require('path');
+const calls=[],nodes=[];const doc={createElement(tag){const e={tag,children:[],style:{},setAttribute(){},appendChild(n){this.children.push(n)},append(...n){this.children.push(...n)}};nodes.push(e);return e;}};
+const ctx={window:{}};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../chrome_extension/content/page3-review-controls.js'),'utf8'),ctx);
+let mounted;ctx.window.PoloReviewControls.mount(doc,{after:e=>mounted=e},[{action:'fill_colors',label:'颜色'},{action:'fill_sizes',label:'尺码'}],async mode=>calls.push(mode));
+(async()=>{const [select,single,all]=mounted.children;select.value='fill_sizes';await single.onclick();assert.equal(calls[0].only,'fill_sizes');assert.equal(calls[0].readOnly,false);assert.equal(select.disabled,false);await all.onclick();assert.equal(calls[1].only,undefined);assert.equal(calls[1].readOnly,false);assert.equal(select.children.length,2);console.log('PASS review controls: explicit single selection and separate whole-page repair');})().catch(e=>{console.error(e);process.exitCode=1});

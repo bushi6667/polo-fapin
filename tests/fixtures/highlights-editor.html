@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>PoloHighlights isolated browser fixture</title>
+<style>body{font:16px sans-serif;margin:24px} .text-area-list-editor{border:1px solid #888;min-height:160px;padding:12px}.length{padding:8px}pre{white-space:pre-wrap}</style>
+<p>独立卖点编辑测试页，不连接商品保存接口。</p>
+<input id="unrelated" value="PRESERVE UNRELATED CONTENT">
+<div id="struct-textDesc"><div id="textDesc"><div class="text-area-list-editor" contenteditable="true"></div><div class="length">0/2000</div></div></div>
+<pre id="report">等待测试</pre>
+<script src="/page3-highlights.js"></script>
+<script>
+// Fixture仅复现已观察到的公开DOM事件契约，不冒充真实阿里表单或服务器保存验证。
+const editor=document.querySelector('.text-area-list-editor'),counter=document.querySelector('.length');
+let model='',pending,config={};
+const text=()=>[...editor.querySelectorAll('ul li')].map(e=>e.textContent.trim()).filter(Boolean).join('\n');
+function refresh(){if(config.freeze)return;model=text();counter.textContent=model.replace(/\n/g,'**').length+'/'+(config.maximum||2000);}
+function schedule(){clearTimeout(pending);pending=setTimeout(refresh,500);}
+function caret(node){const r=document.createRange();r.selectNodeContents(node);r.collapse(false);const s=getSelection();s.removeAllRanges();s.addRange(r);}
+function reset(values=[],options={}){
+ clearTimeout(pending);editor.blur();config=options;editor.replaceChildren();editor.contentEditable='true';
+ if(values.length){const ul=document.createElement('ul');for(const value of values){const li=document.createElement('li');li.textContent=value;ul.append(li);}editor.append(ul);}
+ model=text();counter.textContent=model.replace(/\n/g,'**').length+'/'+(config.maximum||2000);
+}
+editor.addEventListener('focus',()=>{
+ if(!editor.innerText.trim()&&!editor.querySelector('ul')){const ul=document.createElement('ul'),li=document.createElement('li');li.append(document.createElement('br'));ul.append(li);editor.append(ul);caret(li);}
+});
+editor.addEventListener('input',schedule);
+editor.addEventListener('keydown',e=>{
+ if(e.key!=='Enter'||config.noEnter)return;
+ e.preventDefault();const selection=getSelection(),range=selection.getRangeAt(0);
+ let li=range.startContainer;while(li&&li.nodeName!=='LI')li=li.parentNode;
+ if(!li||!editor.contains(li))return;
+ const after=range.cloneRange();after.selectNodeContents(li);after.setStart(range.startContainer,range.startOffset);
+ const remaining=after.extractContents(),next=document.createElement('li');
+ next.append(remaining.textContent.trim()?remaining:document.createElement('br'));li.after(next);caret(next);
+});
+editor.addEventListener('blur',()=>{if(config.dropOnBlur&&text())editor.replaceChildren();schedule();});
+window.runHighlightBrowserTests=async()=>{
+ const results=[];const assert=(condition,message)=>{if(!condition)throw Error(message);};
+ const equal=(actual,expected)=>JSON.stringify(actual)===JSON.stringify(expected);
+ const items=()=>[...editor.querySelectorAll('ul li')].map(e=>e.textContent.trim()).filter(Boolean);
+ const write=(values,options={})=>PoloHighlights.write(document,values,{click:async e=>e.focus(),...options});
+ async function test(name,fn){try{await fn();assert(document.querySelector('#unrelated').value==='PRESERVE UNRELATED CONTENT','其他字段被改动');results.push({name,pass:true});}catch(e){results.push({name,pass:false,error:e.message});}}
+ async function rejects(fn){let failed=false;try{await fn();}catch(e){failed=true;}assert(failed,'应拒绝但报告了成功');}
+ await test('空框真实编辑形成两条LI',async()=>{reset();await write(['First complete paragraph','Second complete paragraph']);assert(equal(items(),['First complete paragraph','Second complete paragraph']),'正文或条数错误');assert(model===items().join('\n'),'模型未接收');});
+ await test('追加保留已有正文',async()=>{reset(['Existing custom A','Existing custom B']);await write(['Appended paragraph'],{mode:'append'});assert(equal(items(),['Existing custom A','Existing custom B','Appended paragraph']),'追加改了旧正文');});
+ await test('多条覆盖保留UL并正确分条',async()=>{reset(['Old A','Old B']);await write(['New A','New B','New C']);assert(equal(items(),['New A','New B','New C']),'覆盖内容不正确');assert(editor.querySelectorAll('ul').length===1,'UL结构错误');});
+ await test('只补缺项不重写',async()=>{reset(['Custom source']);const before=editor.innerHTML;const r=await write(['Default'],{missingOnly:true});assert(r.skipped&&editor.innerHTML===before,'已有值被重写');});
+ await test('普通DIV假文字不判成功',async()=>{reset();const div=document.createElement('div');div.textContent='Ghost DOM';editor.append(div);assert(PoloHighlights.inspect(document).state==='unknown','错误判通过');await rejects(()=>write(['Default']));assert(div.textContent==='Ghost DOM','假文字被无授权覆盖');});
+ await test('有效列表外的假文字也不能漏判',async()=>{reset(['Existing list']);const div=document.createElement('div');div.textContent='Outside uncommitted text';editor.append(div);const before=editor.innerHTML;assert(PoloHighlights.inspect(document).state==='unknown','漏判列表外文字');await rejects(()=>write(['Default'],{missingOnly:true}));assert(editor.innerHTML===before,'混合正文被覆盖');});
+ await test('已有超限不报补缺成功',async()=>{reset(['Existing text above the small maximum'],{maximum:5});const before=editor.innerHTML;await rejects(()=>write(['New'],{missingOnly:true}));assert(editor.innerHTML===before,'既有超限被改写');});
+ await test('计数不更新不能报成功',async()=>{reset([],{freeze:true});await rejects(()=>write(['Text without model']));});
+ await test('失焦丢失不能报成功',async()=>{reset([],{dropOnBlur:true});await rejects(()=>write(['Dropped after blur']));});
+ await test('超限提前停止保留原内容',async()=>{reset(['Original'],{maximum:12});const before=editor.innerHTML;await rejects(()=>write(['A paragraph longer than the limit']));assert(editor.innerHTML===before,'超限仍改了正文');});
+ await test('特殊字符按文本输入',async()=>{reset();await write(['Fabric <cotton> & trims "special"']);assert(items()[0]==='Fabric <cotton> & trims "special"'&&!editor.querySelector('cotton'),'错误按HTML插入');});
+ await test('切换商品先停止',async()=>{reset(['Keep']);const before=editor.innerHTML;await rejects(()=>write(['Default'],{isCurrent:()=>false}));assert(editor.innerHTML===before,'商品切换仍改正文');});
+ window.fixtureResults=results;document.querySelector('#report').textContent=JSON.stringify(results,null,2);return results;
+};
+</script>

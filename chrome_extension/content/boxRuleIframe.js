@@ -72,6 +72,38 @@
         }) || null;
     }
 
+    function findAssociateButton(row) {
+        if (!row) return null;
+        return Array.from(row.querySelectorAll('button, .next-btn, a, [role="button"]')).find(function(button) {
+            var text=(button.innerText||button.textContent||'').trim();
+            return (text==='关联'||text==='仍要关联') && button.offsetParent!==null && !button.disabled && !button.classList.contains('disabled');
+        }) || null;
+    }
+
+    function isLinkedRow(row) {
+        return !!row && /取消关联|已关联/.test(row.innerText || '');
+    }
+
+    // 点击「关联」后平台可能先提示计费重上涨，需要再点「仍要关联」或「确定/确认关联」。
+    // 只在目标行、行容器或明确的提示浮层里找，避免误点底部的「确认」。
+    function findAssociationConfirmButton(row) {
+        var texts = ['确定', '确认关联', '继续关联'];
+        var scopes = [row, row && row.parentElement].concat(
+            Array.prototype.slice.call(document.querySelectorAll('.next-dialog,.next-balloon,.next-overlay-inner,.next-message'))
+        );
+        for (var i = 0; i < scopes.length; i++) {
+            if (!scopes[i]) continue;
+            var els = scopes[i].querySelectorAll('button, .next-btn, a, [role="button"]');
+            for (var j = 0; j < els.length; j++) {
+                var text = (els[j].innerText || els[j].textContent || '').trim();
+                if (texts.indexOf(text) >= 0 && els[j].offsetParent !== null && !els[j].disabled && !els[j].classList.contains('disabled')) {
+                    return els[j];
+                }
+            }
+        }
+        return null;
+    }
+
     async function fillBoxRule() {
         var result = { s1: false, s2: false, s3: false, s4: false, s5: false, s6: false };
 
@@ -231,14 +263,7 @@
                 for (var i = 0; i < rows.length; i++) {
                     var text = rows[i].innerText || '';
                     if (/50\s*[*x×]\s*40\s*[*x×]\s*30/i.test(text)) {
-                        var btns = rows[i].querySelectorAll('button, .next-btn');
-                        for (var j = 0; j < btns.length; j++) {
-                            var t = (btns[j].innerText || '').trim();
-                            if (t === '关联' && btns[j].offsetParent !== null) {
-                                associateBtn = btns[j];
-                                break;
-                            }
-                        }
+                        associateBtn = findAssociateButton(rows[i]);
                         if (associateBtn) break;
                     }
                 }
@@ -249,8 +274,47 @@
                     }
                     log('点击关联');
                     nativeClick(associateBtn);
-                    await sleep(1500);
-                    result.s5 = true;
+                    await sleep(800);
+                    // 点击本身不是关联成功：真实页面可能直接关联，也可能先变成「仍要关联」
+                    // 或在提示里出现「确定」。只有出现行内已关联证据才进入底部确认。
+                    var retriedAssociate = false;
+                    var clickedStillAssociate = false;
+                    var clickedConfirm = false;
+                    for (var checkAssociate = 0; checkAssociate < 32; checkAssociate++) {
+                        var linkedRow = findTargetRow();
+                        if (isLinkedRow(linkedRow)) { result.s5 = true; break; }
+                        if (!linkedRow && (findEl('确认完成') || findEl('完成') || findEl('确认运费'))) { result.s5 = true; break; }
+                        var confirmAssociate = findAssociationConfirmButton(linkedRow);
+                        if (confirmAssociate && !clickedConfirm) {
+                            var confirmText = (confirmAssociate.innerText || confirmAssociate.textContent || '').trim();
+                            log('点击' + confirmText + '确认关联');
+                            nativeClick(confirmAssociate);
+                            clickedConfirm = true;
+                            await sleep(500);
+                            continue;
+                        }
+                        var stillAssociate = findAssociateButton(linkedRow);
+                        if (stillAssociate) {
+                            var stillText = (stillAssociate.innerText || stillAssociate.textContent || '').trim();
+                            // 「仍要关联」是平台的二次确认；普通「关联」只重试一次，避免死循环。
+                            if (stillText === '仍要关联' && !clickedStillAssociate) {
+                                log('点击仍要关联确认');
+                                nativeClick(stillAssociate);
+                                clickedStillAssociate = true;
+                                await sleep(500);
+                                continue;
+                            }
+                            if (stillText === '关联' && !retriedAssociate) {
+                                log('关联按钮未响应，重试一次');
+                                nativeClick(stillAssociate);
+                                retriedAssociate = true;
+                                await sleep(500);
+                                continue;
+                            }
+                        }
+                        await sleep(250);
+                    }
+                    if(!result.s5)log('行内关联尚未生效，停止底部确认');
                 }
             } catch(e) { log('步骤5异常: ' + e.message); }
             if (!result.s5) return result;

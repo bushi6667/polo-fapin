@@ -1,5 +1,6 @@
 importScripts('directory-store.js');
 importScripts('upload/publication-images.js');
+importScripts('content/page3-review-company.js');
 importScripts('upload/page2_upload.js', 'upload/page3_upload.js', 'suite/suite-task.js', 'suite/suite-core.js', 'suite/suite-native-input.js');
 
 const STORAGE_KEY = 'polo_product_data';
@@ -531,7 +532,7 @@ async function getVerifiedSavedMap(fileKey) {
 // 未确认的保存记录：点了保存但页面上既没成功反馈也没报错（例如提交后异步校验还没结束）。
 // 语义：草稿重复保存 ≠ 重复发布，所以这类行「允许重发时重填」，不当成"已保存过"跳过。
 function isUnverifiedSave(entry) {
-    return !!(entry && entry.unverified === true);
+    return !!(entry && (entry.unverified === true || entry.reviewPending === true));
 }
 
 // 保存后在页面上采集反馈信号。必须是自包含函数（会被序列化进页3执行），不能引用外部变量。
@@ -754,6 +755,11 @@ async function savePublishProduct(request, sender, clickButton = true) {
         if (!tabId || !page || page.hostname !== 'post.alibaba.com' || !page.pathname.startsWith('/product/publish')
             || (sender.frameId !== undefined && sender.frameId !== 0)) return { ok: false, error: '仅允许页3保存入口' };
         const row = Number(request.row), x = Number(request.x), y = Number(request.y);
+        const review = request.reviewCycle;
+        if (review !== undefined && (!clickButton || !review || typeof review.cycleId !== 'string'
+            || !review.cycleId || review.cycleId.length > 128 || !Number.isInteger(review.attempt) || review.attempt < 1 || review.attempt > 6)) {
+            return { ok: false, error: '保存复查标识无效' };
+        }
         // 商品 ID：优先用页面传的，其次从当前标签 URL 取（人工点保存走这条）
         let pageItemId = '';
         try { pageItemId = page.searchParams.get('itemId') || ''; } catch (_) {}
@@ -818,10 +824,18 @@ async function savePublishProduct(request, sender, clickButton = true) {
         // 内容不完整（FAQ/介绍模板/箱规/属性缺项）的保存：照样落记录，但标记 unverified，
         // 这样重跑时不会被"已保存过"跳过 —— 真机 62/71/74/78 就是这么被卡住、再也填不上的。
         const incomplete = request.incomplete === true;
-        const unverified = !verdict.verified || incomplete;
+        let unverified = !verdict.verified || incomplete || !!review;
         const stored = await new Promise(resolve => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, resolve));
         const all = stored[PUBLISH_VERIFIED_SAVED_KEY] || {};
         const record = { at: Date.now(), source: 'page3_save_click', taskId: request.taskId || null, verified: verdict.verified };
+        // 平台保存成功与内容复查通过分开记账，pending 不得用于跳过或推进队列。
+        const prior = all[fileKey]?.[row];
+        if (review || prior?.reviewPending) {
+            record.reviewCycleId = review?.cycleId || prior.reviewCycleId;
+            record.reviewAttempt = review?.attempt || prior.reviewAttempt;
+            record.reviewPending = true;
+            unverified = true;
+        }
         // 保存后 URL 里才出现 itemId：请求没带就再读一次页面/标签，补上再记账
         let finalItemId = String(request.itemId || pageItemId || '');
         if (!finalItemId) {
@@ -847,6 +861,43 @@ async function savePublishProduct(request, sender, clickButton = true) {
         notifyAssistant('publishSaved', { row, fileKey, source: 'page3_save_click', verified: verdict.verified, unverified });
         await broadcastPublishState();
         return { ok: true, row, fileKey, source: 'page3_save_click', verified: verdict.verified, unverified, signals: verdict.signals };
+    });
+}
+
+// 同一保存尝试复查通过才解除 pending；幂等确认，不推进队列。
+async function finishPublishReview(request, sender) {
+    return withPublishLock(async () => {
+        const tabId = sender?.tab?.id;
+        let page;
+        try { page = new URL(sender.url || sender.tab?.url || ''); } catch (_) {}
+        if (!tabId || sender.frameId && sender.frameId !== 0 || page?.hostname !== 'post.alibaba.com'
+            || !page.pathname.startsWith('/product/publish')) return { ok: false, error: '非商品页复查入口' };
+        const row = Number(request.row), t = await loadPublishTask();
+        let fileKey;
+        if (request.taskId) {
+            if (!t || t.taskId !== request.taskId || t.currentTabId !== tabId || Number(t.currentRow) !== row) {
+                return { ok: false, error: '当前任务、商品行或标签已变化' };
+            }
+            fileKey = taskFileKey(t);
+        } else if (typeof request.fileKey === 'string') fileKey = request.fileKey;
+        else return { ok: false, error: '缺少原商品文件身份' };
+        const stored = await new Promise(resolve => chrome.storage.local.get(PUBLISH_VERIFIED_SAVED_KEY, resolve));
+        const all = stored[PUBLISH_VERIFIED_SAVED_KEY] || {}, entry = all[fileKey]?.[row];
+        const itemId = page.searchParams.get('itemId') || '';
+        if (!Number.isInteger(row) || row <= 0 || !entry || !itemId || request.itemId !== itemId
+            || entry.itemId !== itemId || entry.taskId !== (request.taskId || null)
+            || !request.cycleId || entry.reviewCycleId !== request.cycleId || entry.reviewAttempt !== request.attempt
+            || entry.verified !== true || entry.incomplete) return { ok: false, error: '本次保存证据不匹配，拒绝确认复查' };
+        if (entry.reviewPending !== true && entry.reviewPassed !== true) return { ok: false, error: '未找到待复查保存' };
+        if (entry.reviewPassed === true && entry.reviewPending !== true) return { ok: true, repeated: true };
+        entry.reviewPending = false; entry.reviewPassed = true; entry.reviewedAt = Date.now();
+        delete entry.unverified;
+        await new Promise((resolve, reject) => chrome.storage.local.set({ [PUBLISH_VERIFIED_SAVED_KEY]: all }, () => {
+            if (chrome.runtime.lastError) reject(Error(chrome.runtime.lastError.message)); else resolve();
+        }));
+        notifyAssistant('publishSaved', { row, fileKey, verified: true, unverified: false, source: 'page3_review_passed' });
+        await broadcastPublishState();
+        return { ok: true };
     });
 }
 
@@ -1054,6 +1105,11 @@ async function publishTickOnce() {
         // 当前行超时：自动跳过该行并继续，不再整批暂停。
         // 真机两次事故（13 小时 / 11 小时）：某行流程无声中断 → 队列等超时 → 整批挂起。
         if (t.currentRow !== null && t.currentStartedAt && Date.now() - t.currentStartedAt > t.rowTimeoutMs) {
+            const saved = (await getVerifiedSavedMap(taskFileKey(t)))[t.currentRow];
+            if (saved?.reviewPending === true) {
+                await pausePublishTaskLocked('review_required', `第 ${t.currentRow} 行仍待保存后复查，超时不跳过、不重填，原草稿保留`);
+                return;
+            }
             try {
                 appendPublishLog({ level: 'page3', row: t.currentRow, msg: `rowTimeout 自动跳过（>${Math.round(t.rowTimeoutMs / 60000)} 分钟），队列继续` });
             } catch (_) {}
@@ -1190,6 +1246,18 @@ async function onPublishFilled(senderTabId, senderFrameId, msg) {
             return { ok: false, message: `队列首行 ${t.remaining && t.remaining[0]} 与 ${row} 不一致，已拒绝（防止删错行）` };
         }
 
+        // 新闭环行必须有匹配的最终复查证据；旧/迟到的填写完成消息不能越过闸门。
+        const reviewRecord = (await getVerifiedSavedMap(taskFileKey(t)))[row];
+        if (reviewRecord?.reviewPending === true && reviewRecord.taskId === t.taskId) {
+            return { ok: false, message: '当前商品仍待保存后复查，不接受迟到的填写完成或页2失败消息' };
+        }
+        if (msg.failed !== true && reviewRecord?.reviewCycleId
+            && (reviewRecord.reviewPending === true || reviewRecord.reviewPassed !== true
+                || (!msg.skipped && reviewRecord.taskId === t.taskId
+                    && (msg.reviewCycle?.cycleId !== reviewRecord.reviewCycleId || msg.reviewCycle?.attempt !== reviewRecord.reviewAttempt)))) {
+            return { ok: false, message: '保存后复查未通过或证据不匹配，当前行不推进' };
+        }
+
         // 已保存过的行被页3 跳过重填：单独记账，不冒充"已填"。
         // 旧行为把它算进 filledCount/filledRows，于是一批全跳过时面板显示"已填 100/100 · 待保存 0"，
         // 实际 0 份草稿。skip 只推进队列，填/保存两类计数都不动。
@@ -1261,6 +1329,10 @@ async function retryPublishRow() {
         if (t.state === 'running') return { ok: false, message: '任务正在运行，不能重试' };
         if (t.state !== 'paused') return { ok: false, message: '当前状态不可重试' };
         if (t.currentRow === null) return { ok: false, message: '当前没有待重试的行' };
+        const pendingReview = (await getVerifiedSavedMap(taskFileKey(t)))[t.currentRow];
+        if (pendingReview?.reviewPending === true) {
+            return { ok: false, message: '当前行已有待复查草稿，请恢复原商品页核对；不重开发品页整页重填', itemId: pendingReview.itemId || '' };
+        }
 
         // 合法性依据【行失效状态】，而不是最近一次暂停原因（资源暂停不得抹掉行可重试的事实）
         const rowFail = rowFailureOf(t);
@@ -3409,15 +3481,16 @@ async function handleSharedAction(request, sendResponse, sender) {
                 // 未确认的保存不算"已保存"：重发同一文件时允许重填核对（草稿重复保存 ≠ 重复发布）
                 const savedRow = saved[rowNum];
                 const savedVerified = !!(savedRow && !isUnverifiedSave(savedRow));
-                const autoFillAllowed = !savedVerified && !alreadyFilled
+                const reviewPending = savedRow?.reviewPending === true;
+                const autoFillAllowed = !savedVerified && !reviewPending && !alreadyFilled
                     && Number(t.currentRow) === Number(rowNum) && !!sender.tab && sender.tab.id === t.currentTabId;
                 if (t.products && Object.prototype.hasOwnProperty.call(t.products, String(rowNum))) {
                     const data = t.products[String(rowNum)];
                     // filled 告诉页3：队列里这一行是否已记完成，避免重复补发 publishFilled 把队列推进到下一行
-                    sendResponse({ ok: !!data, autoFillAllowed, filled: alreadyFilled, data: data ? { ...data, _publishTaskId: t.taskId, _publishFileKey: taskFileKey(t), _publishImageDir: t.imageDir } : null });
+                    sendResponse({ ok: !!data, autoFillAllowed, reviewPending, filled: alreadyFilled, data: data ? { ...data, _publishTaskId: t.taskId, _publishFileKey: taskFileKey(t), _publishImageDir: t.imageDir } : null });
                 } else if (!t.products) {
                     // 兼容已存在的旧任务；未完成任务期间存储写入已被拒绝。
-                    finish(taskFileKey(t), { autoFillAllowed, filled: alreadyFilled });
+                    finish(taskFileKey(t), { autoFillAllowed, reviewPending, filled: alreadyFilled });
                 } else sendResponse({ ok: false, error: '该行不属于任务产品快照' });
             });
         } else {
@@ -3872,6 +3945,47 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             appendPublishLog({ level: 'page3', tabId, row: request.row, msg: 'publishFilled ' + (request.note || (request.skipped ? 'skip' : '')) });
         }
         onPublishFilled(tabId, frameId, request).then(sendResponse).catch(e => sendResponse({ ok: false, message: e.message }));
+        return true;
+    }
+    if (request.action === 'finishPublishReview') {
+        finishPublishReview(request, sender).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'holdPublishReview') {
+        withPublishLock(async () => {
+            const t = await loadPublishTask();
+            if (!t || request.taskId !== t.taskId || Number(request.row) !== Number(t.currentRow)
+                || sender?.tab?.id !== t.currentTabId || sender.frameId && sender.frameId !== 0) {
+                return { ok: false, error: '非当前商品复查，不改变队列' };
+            }
+            // 与用户“停止并关页”分开；保留当前标签及未保存内容，防超时重新整页填入。
+            await pausePublishTaskLocked('review_required', String(request.reason || '保存后复查未完成').slice(0, 300));
+            return { ok: true };
+        }).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
+        return true;
+    }
+    if (request.action === 'repairCompanyTemplateMissing') {
+        withPublishLock(async () => {
+            let page;
+            try { page = new URL(sender?.url || sender?.tab?.url || ''); } catch (_) {}
+            if (!sender?.tab?.id || sender.frameId && sender.frameId !== 0
+                || page?.hostname !== 'post.alibaba.com' || !page.pathname.startsWith('/product/publish')
+                || (page.searchParams.get('itemId') || '') !== request.itemId
+                || !Number.isInteger(request.row) || request.row <= 0 || typeof request.fileKey !== 'string'
+                || typeof request.label !== 'string' || !request.label || request.label.length > 80
+                || !Number.isFinite(request.origin) || !Number.isFinite(request.deadline)
+                || request.deadline <= Date.now() || request.deadline > Date.now() + 20000) return { ok: false, error: '公司介绍补缺入口或商品身份无效' };
+            if (request.taskId) {
+                const task = await loadPublishTask();
+                if (!task || task.taskId !== request.taskId || task.currentTabId !== sender.tab.id
+                    || Number(task.currentRow) !== request.row || taskFileKey(task) !== request.fileKey) {
+                    return { ok: false, error: '公司介绍补缺任务、标签或文件已变化' };
+                }
+            }
+            const results = await chrome.scripting.executeScript({ target: { tabId: sender.tab.id }, world: 'MAIN',
+                func: PoloReviewCompany.applyMain, args: [{ label: request.label, itemId: request.itemId, origin: request.origin, deadline: request.deadline }] });
+            return results.find(row => row.frameId === 0)?.result || { ok: false, error: '公司介绍补缺无结果' };
+        }).then(sendResponse).catch(e => sendResponse({ ok: false, error: e.message }));
         return true;
     }
     if (request.action === 'retryPublishRow') {

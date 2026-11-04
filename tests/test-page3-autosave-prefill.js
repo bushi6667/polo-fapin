@@ -76,6 +76,7 @@ function pageEnv(opts = {}) {
         getTaskFromUrl: () => task,
         getRowFromUrl: () => row,
         fillAllPage3: async () => { events.push('fill'); return opts.results || ['✅ 全部字段处理完毕']; },
+        auditPage3BeforeSave: async () => [],
         saveDraft: async product => {
             events.push('saveDraft');
             if (opts.saveThrows) throw new Error('CDP 连接断开');
@@ -90,12 +91,26 @@ function pageEnv(opts = {}) {
                     data: { row, _publishTaskId: task, _publishFileKey: '' }
                 };
             }
-            if (msg.action === 'getUploadedRows') return { ok: true, rows: {} };
+            if (msg.action === 'getUploadedRows') return opts.uploadedRows || { ok: true, rows: {} };
             if (msg.action === 'publishFilled') return { ok: true };
             return { ok: true };
         }
     };
     vm.createContext(c);
+    // 本文件验证真实入口的顺序与推进条件；真实闭环/后台分别在独立专项中执行。
+    c.window.PoloSaveReviewRuntime = { busy: false, has: () => !!opts.hasCycle,
+        proof: () => opts.reviewBlocked ? null : ({ cycleId: 'test-cycle', attempt: 1 }) };
+    c.runSavedReviewPage3 = async (product, settings = {}) => {
+        events.push('review:start');
+        if (opts.reviewBlocked) return { phase: 'blocked' };
+        if (!settings.resumeOnly) {
+            const result = await c.saveDraft(product);
+            if (result.some(r => /^[⚠️❌]/u.test(r))) return { phase: 'blocked' };
+        }
+        events.push('review:passed');
+        return { phase: 'complete' };
+    };
+    vm.runInContext(fn('saveAutomaticPage3'), c);
     return { c, events, logs, messages, store, removedKeys, btn, saveBtn, row, task };
 }
 
@@ -104,7 +119,7 @@ const runIn = (env, code) => vm.runInContext(code, env.c);
 // 批量路径：真实 loadBatchProduct
 async function runBatch(opts = {}) {
     const env = pageEnv(opts);
-    vm.runInContext([fn('waitPublishFormReady'), fn('loadBatchProduct')].join('\n'), env.c);
+    vm.runInContext([fn('waitPublishFormReady'), fn('holdMissingReviewPage3'), fn('loadBatchProduct')].join('\n'), env.c);
     await runIn(env, 'loadBatchProduct(' + env.row + ')');
     return env;
 }
@@ -137,7 +152,7 @@ const logHas = (env, kw, type) => env.logs.some(l => l.m.includes(kw) && (type =
         const env = await runBatch({ results: ['✅ 标题', '✅ 属性', '✅ 全部字段处理完毕'] });
         ok(has(env.events, 'saveDraft'), '调用了 saveDraft');
         ok(env.events.filter(e => e === 'saveDraft').length === 1, `saveDraft 只调用 1 次（实际 ${env.events.filter(e => e === 'saveDraft').length}）`);
-        ok(logHas(env, '✅ 已自动保存', 'success'), '日志输出「✅ 已自动保存」');
+        ok(logHas(env, '已保存并复查通过', 'success'), '日志说明保存并复查通过');
         ok(!logHas(env, '手动点击页面底部的保存按钮'), '全成功时不再提示手动保存');
         const saveAt = env.events.indexOf('saveDraft');
         const filledAt = env.events.indexOf('msg:publishFilled');
@@ -162,38 +177,38 @@ const logHas = (env, kw, type) => env.logs.some(l => l.m.includes(kw) && (type =
         const env = await runBatch({ results: ['✅ 标题', '⚠️ 属性: 2 项未填写'] });
         ok(env.events.filter(e => e === 'saveDraft').length === 1, '⚠️ 仍调用 saveDraft');
         ok(logHas(env, '已自动保存', 'success'), '日志有「已自动保存」');
-        ok(logHas(env, '有警告项，已保存，建议抽查'), '日志提示含警告项');
+        ok(has(env.events, 'review:passed'), '旧填入警告仍须经过实际复查');
         ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, 'publishFilled 仍发 1 次');
     }
 
-    console.log('【2b】单件路径：⚠️ 仍按原口径不自动保存（人在旁边，保守处理）');
+    console.log('【2b】单件路径：日志有警告，但实际补缺复查通过后可以保存并推进');
     {
         const env = await runSingle({ results: ['⚠️ FAQs: 1/2 条核对正确'] });
-        ok(env.events.filter(e => e === 'saveDraft').length === 0, '单件路径 saveDraft 未被调用');
-        ok(logHas(env, '手动点击页面底部的保存按钮', 'warn'), '提示手动保存（warn）');
-        ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, 'publishFilled 仍发 1 次');
+        ok(env.events.filter(e => e === 'saveDraft').length === 1, '交由补缺复查流程保存');
+        ok(env.events.indexOf('review:passed') < env.events.indexOf('msg:publishFilled'), '复查通过之后才上报');
+        ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, '复查通过只推进一次');
     }
 
     console.log('【2c】❌ 硬失败 → 不自动保存');
     {
-        const env = await runBatch({ results: ['❌ 主图上传失败'] });
+        const env = await runBatch({ results: ['❌ 主图上传失败'], reviewBlocked: true });
         ok(env.events.filter(e => e === 'saveDraft').length === 0, '❌ 结果不自动保存');
-        ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, '❌ 结果仍上报 publishFilled');
+        ok(env.messages.filter(m => m.action === 'publishFilled').length === 0, '补缺复查未通过，不推进当前行');
     }
 
-    console.log('\n【3】saveDraft 抛异常 → 不崩、不阻断 publishFilled');
+    console.log('\n【3】saveDraft 抛异常 → 不崩、不推进当前行');
     {
         const env = await runBatch({ results: ['✅ 全部字段处理完毕'], saveThrows: true });
         ok(env.events.filter(e => e === 'saveDraft').length === 1, 'saveDraft 被调用（随后抛异常）');
         ok(logHas(env, '自动保存异常', 'warn'), '异常被 catch 并 warn');
         ok(logHas(env, 'CDP 连接断开'), 'warn 日志带上异常原因');
         ok(!logHas(env, '自动填入失败'), '没有冒泡成「自动填入失败」');
-        ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, 'publishFilled 仍然发出');
+        ok(env.messages.filter(m => m.action === 'publishFilled').length === 0, '保存异常不推进当前行');
     }
     {
         const env = await runSingle({ results: ['✅ 全部字段处理完毕'], saveThrows: true });
         ok(logHas(env, '自动保存异常', 'warn'), '单件路径同样 catch 异常');
-        ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, '单件路径 publishFilled 仍然发出');
+        ok(env.messages.filter(m => m.action === 'publishFilled').length === 0, '单件路径保存异常不推进');
         ok(env.btn.disabled === false, '按钮恢复可用（未卡死）');
     }
     // saveDraft 返回 ⚠️（后台拒绝/找不到按钮）也不当作保存成功
@@ -201,11 +216,35 @@ const logHas = (env, kw, type) => env.logs.some(l => l.m.includes(kw) && (type =
         const env = await runBatch({ results: ['✅ 全部字段处理完毕'], saveResults: ['⚠️ 保存按钮未点击，未标记已保存'] });
         ok(logHas(env, '自动保存未完成', 'warn'), '返回 ⚠️ 时记 warn');
         ok(!logHas(env, '✅ 已自动保存'), '返回 ⚠️ 时不记「已自动保存」');
-        ok(env.messages.filter(m => m.action === 'publishFilled').length === 1, 'publishFilled 仍然发出');
+        ok(env.messages.filter(m => m.action === 'publishFilled').length === 0, '保存未确认不推进当前行');
     }
 
     // ------------------------------------------------------------
+    console.log('\n【3b】保存重载恢复先于预填标记判断，不重新填入整页');
+    {
+        const markKey = 'polo_page3_prefilled::pt_test::412';
+        const env = await runBatch({ hasCycle: true, store: [[markKey, '1']] });
+        ok(!has(env.events, 'fill') && !has(env.events, 'saveDraft'), '恢复复查不再整页填入或再次保存');
+        ok(env.removedKeys.length === 0, '恢复不清除预填标记');
+        ok(env.messages.filter(m => m.action === 'publishFilled' && m.reviewCycle?.cycleId === 'test-cycle').length === 1, '复查通过携带当前证据只推进一次');
+        const blocked = await runSingle({ hasCycle: true, reviewBlocked: true });
+        ok(!has(blocked.events, 'fill') && !has(blocked.events, 'saveDraft'), '未确认进度重复点击不清空重填、不重复保存');
+        ok(blocked.messages.filter(m => m.action === 'publishFilled').length === 0, '未通过不推进');
+        ok(blocked.btn.disabled === false, '提前恢复路径也恢复按钮');
+    }
+
     console.log('\n【5】预填标记 + 队列是否已记完成 → 决定要不要补发');
+    for (const byResponse of [true, false]) {
+        const markKey = 'polo_page3_prefilled::pt_test::412';
+        const env = await runBatch({ store: [[markKey, '1']],
+            productResp: { ok: true, autoFillAllowed: true, reviewPending: byResponse,
+                data: { row: 412, _publishTaskId: 'pt_test', _publishFileKey: '' } },
+            uploadedRows: { ok: true, rows: { 412: { reviewPending: true, unverified: true, itemId: '123' } } } });
+        ok(!has(env.events, 'fill') && !has(env.events, 'saveDraft'), '丢失本页进度但后台待复查，不重填不重存');
+        ok(env.removedKeys.length === 0 && env.store.get(markKey) === '1', '待复查时不清预填标记');
+        ok(env.messages.filter(m => m.action === 'holdPublishReview').length === 1, '保留当前行并请求后台暂停');
+        ok(env.messages.filter(m => m.action === 'publishFilled').length === 0, '无复查进度不假报完成');
+    }
     {
         const markKey = 'polo_page3_prefilled::pt_test::412';
         const env = await runBatch({

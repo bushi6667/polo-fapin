@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Polo发品助手 - 自动填表上传",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "从Excel读取产品数据，自动填入1688发品页面，支持自动上传主图和AI换色",
   "permissions": [
     "activeTab",
@@ -60,10 +60,19 @@
         "content/configs/selectors.js",
         "content/utils/smartFind.js",
         "content/utils/domHelpers.js",
+        "content/page3-highlights.js",
         "content/page3-review-stock.js",
         "content/page3-review-faq.js",
         "content/page3-review-colors.js",
+        "content/page3-review-picks.js",
+        "content/page3-review-controls.js",
+        "content/page3-review-templates.js",
+        "content/page3-review-size.js",
+        "content/page3-review-company.js",
         "content/page3-review.js",
+        "content/page3-save-stability.js",
+        "content/page3-save-review-cycle.js",
+        "content/page3-save-review-runtime.js",
         "content/page3.js"
       ],
       "run_at": "document_end"

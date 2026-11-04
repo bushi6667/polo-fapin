@@ -15,7 +15,19 @@
         return {state:missing.length?'fail':'pass',detail:missing.length?'缺少规格图：'+missing.map(x=>x.label).join('、')+'；仅补缺图':'现有颜色规格图完整，保留',missing};
     }
     async function repair(doc,product,api) {
+        const toggle=doc.querySelector?.('.upload-image-switch .next-switch,.sell-o-addon-label .next-switch');
+        if(toggle?.classList.contains('next-switch-off')) {
+            if(api.isCurrent&&!api.isCurrent())throw Error('商品已切换，停止开启规格图');
+            if(!api.click)throw Error('规格图开关关闭，缺少点击能力');
+            toggle.scrollIntoView?.({block:'center'});
+            await api.click(toggle);
+            await (api.wait||((ms)=>new Promise(r=>setTimeout(r,ms))))(800);
+            if(api.isCurrent&&!api.isCurrent())throw Error('商品已切换，停止颜色补图');
+            const live=doc.querySelector('.upload-image-switch .next-switch,.sell-o-addon-label .next-switch');
+            if(!live||!live.classList.contains('next-switch-on'))throw Error('添加规格图开关未开启，不上传');
+        }
         const initial=inspect(doc);
+        if(initial.state==='unknown')throw Error(initial.detail);
         for(const target of initial.missing) {
             if(api.isCurrent&&!api.isCurrent())throw Error('商品已切换，停止颜色补图');
             if(!['white','black','gray','navy'].includes(target.key))throw Error('颜色 '+target.label+' 无明确图片来源，不猜填');
